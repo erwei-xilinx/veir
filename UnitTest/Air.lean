@@ -1,4 +1,6 @@
 import Veir.Air.Extract
+import Veir.Air.Determinism
+import Veir.Air.Pattern
 
 /-! Tests for the AIR event-graph model.
 
@@ -114,3 +116,61 @@ info: 'Veir.Air.Program.steps_reducedGraph_iff' depends on axioms: [propext, Cla
 -/
 #guard_msgs in
 #print axioms Program.steps_reducedGraph_iff
+
+/-! ### Layer 2: access patterns, races, determinism -/
+
+open Veir.Air in
+section
+-- D14: `offsets [4] sizes [4] strides [2]` touches 8, 10, 12, 14 (offset in units of the stride).
+#guard positions [⟨4, 4, 2⟩] == [8, 10, 12, 14]
+-- A stride of 0 repeats (D15).
+#guard positions [⟨0, 3, 0⟩, ⟨0, 2, 1⟩] == [0, 1, 0, 1, 0, 1]
+-- 2-D: rows 1 and 3 of a 4x8 buffer, columns 2..5, written the AIR way.
+#guard positions [⟨0, 2, 16⟩, ⟨10, 4, 1⟩] == [10, 11, 12, 13, 26, 27, 28, 29]
+#guard positions (foldFixed 0 [⟨1, 2, 2, 8⟩, ⟨2, 4, 1, 1⟩]) == subviewFrom 0 [⟨1, 2, 2, 8⟩, ⟨2, 4, 1, 1⟩]
+
+/-- AIR-007's shape: event 0 writes rows 1-2 of buffer 0 (a 4x8 buffer), event 1 reads row 2. -/
+private def writeRows12 : Access := ⟨0, .write, positions [⟨1, 2, 8⟩, ⟨0, 8, 1⟩]⟩
+private def readRow2 : Access := ⟨0, .read, positions [⟨2, 1, 8⟩, ⟨0, 8, 1⟩]⟩
+private def readRow0 : Access := ⟨0, .read, positions [⟨0, 1, 8⟩, ⟨0, 8, 1⟩]⟩
+private def fp7 (r : Access) : Footprint := fun v => if v = 0 then [writeRows12] else if v = 1 then [r] else []
+
+-- Without an edge, the overlapping read is a race (what air-dependency produces for AIR-007) ...
+#guard races ⟨#[[], []]⟩ (fp7 readRow2) == [(0, 1)]
+-- ... with the edge it is not ...
+#guard raceFreeB ⟨#[[], [0]]⟩ (fp7 readRow2)
+-- ... and a read of a row the write does not touch needs no edge.
+#guard raceFreeB ⟨#[[], []]⟩ (fp7 readRow0)
+-- Two reads never race.
+#guard raceFreeB ⟨#[[], []]⟩ (fun v => if v = 0 then [readRow0] else [readRow2])
+end
+
+/--
+info: 'Veir.Air.deterministic' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms deterministic
+
+/--
+info: 'Veir.Air.raceFreeB_iff' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms raceFreeB_iff
+
+/--
+info: 'Veir.Air.raceFree_reduce_iff' depends on axioms: [propext, Quot.sound]
+-/
+#guard_msgs in
+#print axioms raceFree_reduce_iff
+
+/--
+info: 'Veir.Air.positions_foldFixed' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms positions_foldFixed
+
+/--
+info: 'Veir.Air.foldAsAIR_wrong' does not depend on any axioms
+-/
+#guard_msgs in
+#print axioms foldAsAIR_wrong

@@ -231,7 +231,7 @@ theorem progress {g : DepGraph} {sem : Sem σ} (hf : g.Forward)
       refine ⟨t ++ [.start k, .finish k], c₂,
         hsteps.append (.cons st₁ (.cons st₂ (.nil _))), fun v hv => ?_, fun v hv => ?_⟩
       · by_cases hvk : v = k
-        · simp [c₂, c₁, setPhase, hvk]
+        · simp [c₂, setPhase, hvk]
         · simp [c₂, c₁, setPhase, hvk, hdone v (Nat.lt_of_le_of_ne (Nat.le_of_lt_succ hv) hvk)]
       · have hvk : v ≠ k := by omega
         simp [c₂, c₁, setPhase, hvk, hpend v (by omega)]

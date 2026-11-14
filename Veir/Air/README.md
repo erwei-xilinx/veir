@@ -197,6 +197,13 @@ None uses `Lean.ofReduceBool` or an axiom of this development.
 | `Program.steps_reduce_iff` | the AIR instance: same values and faults for an extracted program | `p.graph.Forward` |
 | `Program.reducedGraph_between`, `Program.steps_reducedGraph_iff` | the graph `air-veir reduce` produces lies between `g.reduce` and `g`, so it admits the same executions | `p.graph.Forward` |
 | `progress` | every forward graph can run to completion, under any semantics whose steps can always be taken (checklist C2) | `g.Forward`, total `Sem` |
+| `positions` (`Pattern.lean`) | the elements an access pattern touches, in traversal order (D14); `length_positionsFrom`: there are `Π sizes` of them (D15) | — |
+| `positions_foldFixed` | folding `memref.subview` into a pattern by moving its whole offset into a leading size-1, stride-1 dimension touches exactly the subview's elements, in order | — |
+| `positions_foldAsAIR_of_unitSteps`, `foldAsAIR_wrong` | AIR's current fold is right when every step is 1, and wrong for `subview %m[4] [4] [2]` (AIR-009) | — |
+| `raceFreeB_iff` (`Race.lean`) | the executable race checker decides `RaceFree`: every conflicting (RAW/WAR/WAW, overlapping) pair is ordered by a token path | `g.Forward` |
+| `raceFree_reduce_iff`, `raceFree_of_sameReach` | the transitive reduction, and any rewrite `check` accepts, neither creates nor hides a race | `g.Forward` |
+| `effects_commute` (`Determinism.lean`) | effects framed by non-conflicting footprints commute | `Framed` |
+| `deterministic` | in a race-free program with framed effects, every complete execution ends with the same memory (checklist C3, event level) | `g.Forward`, `Framed`, `RaceFree` |
 | `cyclic_simultaneous_drop_unsound` (UnitTest) | on a cycle, deciding edges independently and dropping them together loses reachability | — |
 
 "Same traces" is the strongest notion here. It implies the same finishing orders (linear
@@ -335,7 +342,7 @@ Status of the async-dependency layer:
 | --- | --- |
 | C1 | **Counterexample found:** AIR accepts a mismatched `air.execute` terminator (D8, confirmed bug). No theorem yet: `extract` is not proven. |
 | C2 | **Proven** (`progress`): dependencies alone never deadlock. Also checked by the bounded run. Becomes a real question with channels, whose `get` can block. |
-| C3 | Planned theorem: race-free (D4) implies the same outcome. Bounded check: race warning ⇔ some schedule differs. |
+| C3 | **Proven at event granularity** (`deterministic`): race-free programs with framed effects end in the same memory under every schedule; `raceFreeB_iff` decides race-freedom. Bounded check (values): race warning ⇔ some schedule differs. Interleavings *inside* bodies (D7) not yet proven. |
 | C4 | Trivial while only dependency lists exist (a DAG is always satisfiable). Becomes real with `concurrency` tokens (D9), which can contradict a dependency path. |
 | C5 | **Proven** for the model's reduction (`steps_reduce_iff`). `air-dependency-canonicalize`, checked exhaustively (`Test/Air/bounded/check.py`): **passes** on all 78,183 graphs of 1–5 events whose `air.execute` bodies have 0 or 1 ops. **Fails** when a body has 2 or more ops: 1,314 of the 2,448 programs of up to 4 events with 2-op bodies. The pass drops every outgoing edge of such an execute, which can make a race-free program racy (974 of 5,330 race-free programs in `--data` mode). Root cause located; see Findings. Reproducer: `Test/Air/bounded/repro_canonicalize_drops_edge.mlir.in`. |
 | C6 | Not started; needs a target model. |

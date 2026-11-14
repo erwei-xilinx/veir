@@ -173,6 +173,20 @@ coordinates `offsets[i] + k[i] · strides[i]`, linearised by the source's layout
 dimension of the source. The two agree when the subview strides are 1 and AIR's strides are the
 layout strides; they differ otherwise. Pending: which one is AIR's semantics?
 
+**Measured 2026-11-13.**
+- `memref.subview %m[4] [4] [2]` on `memref<16xi32>` has layout `strided<[2], offset: 4>`
+  (elements 4, 6, 8, 10). MLIR's verifier rejects `offset: 8`.
+- AIR's `airrt-to-npu` lowers offsets `[4]`, sizes `[4]`, strides `[2]` to
+  `aie.dma_bd(... offset = 8 ...)` (elements 8, 10, 12, 14).
+- mlir-aie (`35fa6b1`, the pinned version) does the same as AIR in its implementation:
+  `NpuDmaMemcpyNdOp::getOffsetInBytes` computes `Σ offsets[i]·strides[i]`, and `aie-opt
+  --aie-dma-to-npu` patches 32 bytes for the 1-D example and 72 for the 2-D one.
+- mlir-aie's **documentation** of that op describes the shape-relative, subview-like reading (16
+  and 40 bytes). The doc contradicts the implementation: AIE-001 in `~/air-issues`.
+
+So the whole toolchain implements "offset in units of the dimension's stride". Only the
+mlir-aie doc and the `memref.subview` analogy say otherwise.
+
 ## D15. DMA patterns ✅
 
 - src and dst each have their own offsets, sizes and strides.

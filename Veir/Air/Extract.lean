@@ -92,7 +92,7 @@ def blockOps (ctx : IRContext OpCode) (block : BlockPtr) : Array OperationPtr :=
   let mut ops := #[]
   let mut cur := block.getFirstOp! ctx
   -- The operation list is a linked list; the arena size bounds the walk.
-  for _ in List.range (ctx.operations.size + 1) do
+  for _ in [0:ctx.operations.size + 1] do
     match cur with
     | none => break
     | some op =>

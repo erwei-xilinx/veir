@@ -271,6 +271,18 @@ for operand removal, which are not in VeIR yet. Its output is only printed, and 
   `air.token.alloc` and `affinity`/`concurrency` token lists. The dialect implements
   `!air.async.token` and a single `async_dependencies` list. The former are planned (D9). This work
   follows the implementation; `!air.token` is refused (`diagnostics.mlir`).
+- **`air-dependency-canonicalize` drops a needed edge** (found by bounded exhaustive checking;
+  pending confirmation as a bug). In `%t2 = air.execute [%t0, %t1] { … %v0 … }`, where `%t1`
+  waits for `%t0` and reads its result `%v0`, the pass drops *both* of `%t2`'s dependencies
+  instead of keeping `%t1`. `%t2` then reads `%v0` with no token path to `%t0`. This happens only
+  when execute bodies use other executes' results: the pass models an execute as the chain of its
+  body ops (seen in `dump-graph`), and the dumped reduced graph still contains the edge, so it is
+  lost when the dependency lists are written back. That location is a hypothesis, not yet
+  traced in the code.
+- **`air-dependency-canonicalize` run time is superlinear in the number of functions in a module**:
+  1.5 s, 7 s and 42 s for 1000, 2000 and 4000 small functions. Hypothesis, not profiled: the
+  pass's `dependencyContext` (`dep_ctx`, with its `op_to_v`/`op_to_g` maps) is a member of the
+  pass and is not reset between functions.
 - **AIR pass behaviour.** `air-dependency-canonicalize` also removes `id` attributes from
   non-DMA/channel/hierarchy ops, and reorders dependency operands. `check` compares reachability,
   so neither matters to it.
@@ -284,6 +296,42 @@ for operand removal, which are not in VeIR yet. Its output is only printed, and 
     throughout, so `air.execute` bodies computing on `index` are not yet importable.
 
 ## Next phase
+
+### Acceptance checklist for each layer
+
+Every layer added -- async dependencies, DMA and memory, channels, `herd`/`segment`/`launch`,
+`!air.token` lists -- answers the same six questions. Each answer is a theorem, a bounded
+exhaustive check, or a counterexample, and is stated as one of these. Lean answers only the
+questions put to it, so this list is what makes the coverage systematic.
+
+| # | Question | Shape of the answer |
+| --- | --- | --- |
+| C1 | **Well-formedness.** Does every program AIR's verifier accepts have a defined meaning? | Theorem `verify ok → extract ok`, or a counterexample (a verifier gap) |
+| C2 | **Progress.** Does every well-formed program have a complete execution? When can it deadlock? | Theorem `∃ trace to all-done`, or a characterisation of deadlocks |
+| C3 | **Determinism.** Under which conditions do all schedules compute the same result? | Theorem `race-free → same outcome`, plus exact race detection |
+| C4 | **Constraint consistency.** Can the constraints (dependency, affinity, concurrency, resources) contradict each other? | Theorem `well-formed → constraints satisfiable`, or a contradictory program |
+| C5 | **Pass correctness.** Does each pass preserve every behaviour? | A refinement or trace-equivalence theorem for the model, plus translation validation of the C++ output |
+| C6 | **Expressiveness.** Relative to a stated target model (for example AIE DMA/locks/streams, or a GPU grid), what can the layer not express? | A theorem of completeness relative to the target, or a behaviour shown to be unrepresentable |
+
+How each question is checked:
+- **Proof** gives a guarantee for every program.
+- **Bounded exhaustive checking** (`Test/Air/bounded/`) gives one for every program up to a stated
+  size. Most semantic bugs show up at small sizes (the small-scope hypothesis).
+- **Translation validation and differential runs** (the interpreter against `air-opt` and against
+  hardware) are the only ways to compare the model with AIR's real behaviour. Lean cannot do that.
+
+Status of the async-dependency layer:
+
+| # | Status |
+| --- | --- |
+| C1 | **Counterexample found:** AIR accepts a mismatched `air.execute` terminator (D8, confirmed bug). No theorem yet: `extract` is not proven. |
+| C2 | True for forward graphs. Not yet a theorem. Bounded check: `Test/Air/bounded/`. |
+| C3 | Planned theorem: race-free (D4) implies the same outcome. Bounded check: race warning ⇔ some schedule differs. |
+| C4 | Trivial while only dependency lists exist (a DAG is always satisfiable). Becomes real with `concurrency` tokens (D9), which can contradict a dependency path. |
+| C5 | **Proven** for the model's reduction (`steps_reduce_iff`). `air-dependency-canonicalize`, checked exhaustively (`Test/Air/bounded/check.py`): **passes** on all 78,183 pure dependency graphs of 1–5 events; **fails** on 1,350 of the 5,330 race-free programs of up to 4 events whose `air.execute`s read each other's results, and makes 974 of them racy. Minimal reproducer: `Test/Air/bounded/repro_canonicalize_drops_edge.mlir.in`. Pending confirmation that this is an AIR bug. |
+| C6 | Not started; needs a target model. |
+
+### What each AIR concept needs
 
 What each AIR concept needs before it can be given a meaning:
 

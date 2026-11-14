@@ -215,6 +215,8 @@ def captureBody (ctx : IRContext OpCode) (what : String) (ops : Array OperationP
   let mut localView : Std.HashSet ValuePtr := {}
   for inner in ops do
     let iname := opName ctx inner
+    if iname == "air.execute" then
+      throw s!"{what}: an air.execute nested in another is not supported (air-dependency produces it when run on async input, AIR-019)"
     let isOpaque := !(iname.startsWith "arith." || iname.startsWith "memref.") || iname == "memref.copy"
     if inner.getNumRegions! ctx ≠ 0 && !isOpaque then
       throw s!"{what}: '{iname}' has a region, which is not supported"

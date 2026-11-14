@@ -11,6 +11,9 @@ function the verdict is:
   completes; once async the puts cannot. The input is not a whole program.
 - `ok`: neither.
 - `output only`: the input could not be analysed, so the output's problems cannot be attributed.
+- `input only (async)`: the input is already async (a test of another pass); air-dependency is not
+  meant to run on it (it would wrap each `air.execute` in another, AIR-019), so only the input is
+  analysed. `async ok` / `async bad` give its verdict.
 Chunks the model does not cover are listed with the first reason.
 
   AIR_OPT=/path/to/air-opt Test/Air/sweep_dependency.py /path/to/mlir-air/mlir/test/Transform/AIRDependency/*.mlir
@@ -44,11 +47,12 @@ def analyse(path):
             out[cur] = [False, int(m.group(2)), 0, False]
         elif cur and "DEADLOCK" in line:
             out[cur][0] = True
+        elif cur and ("are never got" in line or "no put provides" in line or "no get takes" in line):
+            # Elements nothing takes, or a get nothing feeds: a fragment of a program.
+            out[cur][3] = True
+            out[cur][2] += line.startswith("  error")
         elif cur and line.startswith("  error"):
             out[cur][2] += 1
-        elif cur and "are never got" in line:
-            # Elements a sync put buffers and nothing takes: a fragment of a program.
-            out[cur][3] = True
     return out
 
 
@@ -77,6 +81,20 @@ def main():
                 if "func.func" not in chunk:
                     continue
                 tag = f"{base}#{k}"
+                if ins is not None and len(ins) == len(outs) and "air.async.token" in ins[k]:
+                    pi = os.path.join(tmp, "in.mlir")
+                    open(pi, "w").write(ins[k])
+                    i = analyse(pi)
+                    if isinstance(i, str):
+                        print(f"{tag}: REFUSED: {i}")
+                        totals["refused"] = totals.get("refused", 0) + 1
+                        continue
+                    for fn, t in i.items():
+                        verdict = "async fragment" if t[3] else ("async bad" if bad(t) else "async ok")
+                        totals[verdict] = totals.get(verdict, 0) + 1
+                        if verdict == "async bad":
+                            print(f"{tag} @{fn}: {verdict}: deadlock={t[0]} races={t[1]} errors={t[2]}")
+                    continue
                 po, pi = os.path.join(tmp, "out.mlir"), os.path.join(tmp, "in.mlir")
                 open(po, "w").write(chunk)
                 o = analyse(po)

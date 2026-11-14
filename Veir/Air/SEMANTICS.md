@@ -26,6 +26,11 @@ is wrong; the replacement is pending or recorded).
 | D15 | DMA src and dst have their own patterns; stride 0 repeats; `N(dst) = N(src) + padding` | ✅ 2026-11-13 | layer 2 | — |
 | D16 | Memory spaces 0 = L3, 1 = L2, 2 = L1; disjoint address spaces at function scope | ✅ 2026-11-13 | layer 2 | — |
 | D17 | `memref.dealloc` ends a lifetime; deallocating a buffer with an unordered access is an error | ✅ 2026-11-13 | layer 2 | — |
+| D19 | Distinct top-level memref arguments are distinct storage | ✅ 2026-11-13; **differs from upstream** (`UPSTREAM_DIVERGENCES.md`) | layer 2 | — |
+| D20 | A DMA is a stream: src read in traversal order, zero padding inserted on the src side, nested per dimension; dst written in traversal order. `N(dst) = Π (size_i + pad_before_i + pad_after_i)` | ✅ 2026-11-13 | layer 2 | — |
+| D21 | Within one DMA, a location read at stream step i and written at step j is well defined iff i ≤ j, otherwise an intra-DMA race; repeated writes to one location (dst stride 0): the last wins | ✅ 2026-11-13 | layer 2 | — |
+| D22 | Footprint of an op the model does not interpret: read and write of every memref operand's whole buffer (linalg: `ins` read, `outs` read and write); its values are opaque | ✅ 2026-11-13 | layer 2 | — |
+| D23 | Non-constant offsets, sizes and strides: evaluated when running; a footprint that is not known statically is the whole buffer | ✅ 2026-11-13 | layer 2 | — |
 
 ## D1. Blocking `air.wait_all` ✅
 
@@ -219,3 +224,59 @@ not ordered after every access, or an access ordered after the dealloc, is an er
 This raised a suspicion: the ping-pong transformation may use a dealloc to mark the end of a
 buffer's lifetime in a way that breaks this rule. Tracked as AIR-006 in `~/air-issues`; not yet
 investigated.
+
+## D19. Top-level memref arguments do not alias ✅ (differs from upstream)
+
+`func.func @f(%a: memref<16xi32>, %b: memref<16xi32>)`: `%a` and `%b` address distinct storage.
+This is the assumption AIR's own code already makes (`AIRDialect.cpp:263–267`: "the AIR-domain
+assumption that distinct top-level memref SSA values address distinct storage").
+
+Upstream MLIR assumes the opposite. `LocalAliasAnalysis` returns `MayAlias` for two values with
+no allocation effect. Upstream's way to state non-aliasing is `memref.distinct_objects`, under
+which aliasing is undefined behaviour. Recorded for later review in
+`~/air-issues/UPSTREAM_DIVERGENCES.md`.
+
+## D20. A DMA is a stream ✅
+
+The source side (MM2S) reads the src pattern in traversal order and emits a stream. Padding is
+applied on that side: for each dimension `i`, `pad_before[i]` zeros come before and
+`pad_after[i]` zeros after, nested, so a padded index is zero if any of its coordinates is in a
+pad zone. The destination side (S2MM) writes the dst pattern in traversal order from the stream.
+The stream has `Π (src_size_i + pad_before_i + pad_after_i)` elements, and the dst pattern must
+have as many (this refines D15).
+
+## D21. Overlap within one DMA ✅
+
+Let location `L` be read at stream step `i` (src) and written at step `j` (dst).
+
+The write at step `j` carries the value read at step `j`, and reads happen in order, so every read
+at `i ≤ j` precedes the write at `j`. The DMA is well defined on `L` when `i ≤ j` for every such
+pair: it reads the old value.
+
+When `i > j`, whether the read comes before or after the write depends on stream buffering and
+timing, so it is a race inside the DMA. This is the condition under which a forward memmove is
+safe.
+
+When the dst pattern writes a location more than once (stride 0), the last write in traversal
+order wins: the destination writes in order.
+
+## D22. Ops the model does not interpret ✅
+
+A race needs only footprints, not values.
+- **linalg ops:** `ins` are read and `outs` are read and written.
+- **`memref.copy`:** reads its source and writes its target.
+- **Any other op with memref operands:** reads and writes the whole buffer of each operand. This
+  is the conservative choice, which `air-dependency` also makes (`checkOperandReadOrWrite` returns
+  `'w'` for an unknown op).
+
+Values such ops produce are opaque: a deterministic function of the op and of what it read. The
+determinism theorem does not depend on value semantics, so race-freedom and determinism are
+still decided for programs containing them.
+
+## D23. Non-constant offsets, sizes and strides ✅
+
+These are needed, for example, for dynamic partial reconfiguration through control packets.
+- **When running:** they are evaluated from function arguments and host arithmetic.
+- **When checking races statically:** an access whose pattern is not constant is taken to cover
+  its whole buffer, as `air::mayOverlap` does with an unknown range. Given concrete argument values,
+  the check is exact for those values.

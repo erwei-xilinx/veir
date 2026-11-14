@@ -1114,6 +1114,41 @@ inductive LLVMFuncParam
 /-- The error for an opaque LLVM struct, which VeIR rejects. -/
 private def opaqueStructError := "opaque LLVM struct types are not supported"
 
+/--
+  Parse a builtin `affine_map<...>` or `affine_set<...>` attribute, keeping everything between
+  `<` and `>` verbatim. VeIR gives affine maps no meaning; this only lets a program that carries
+  them (linalg's `indexing_maps`, `affine.apply`) be read and printed back unchanged.
+-/
+def parseOptionalAffineAttrVerbatim : AttrParserM (Option Attribute) := do
+  for keyword in ["affine_map", "affine_set"] do
+    if ← parseOptionalKeyword keyword.toByteArray then
+      -- Scan the raw bytes: an affine body contains `->` and `>=`, whose `>` the token-level
+      -- bracket matcher would take for the closing one.
+      let startPos ← getPos
+      let input := (← getThe ParserState).lexer.input
+      let mut depth : Nat := 0
+      let mut i := startPos.byteOffset
+      let mut stop : Option Nat := none
+      while i < input.size do
+        let c := input[i]!
+        if c == '<'.toUInt8 then
+          depth := depth + 1
+        else if c == '>'.toUInt8 then
+          let afterDash := i > 0 && input[i - 1]! == '-'.toUInt8
+          let beforeEq := i + 1 < input.size && input[i + 1]! == '='.toUInt8
+          if !afterDash && !beforeEq then
+            depth := depth - 1
+            if depth == 0 then
+              stop := some i
+              break
+        i := i + 1
+      let some stopAt := stop
+        | throwAt startPos s!"unterminated {keyword}"
+      let body := input.extract startPos.byteOffset (stopAt + 1)
+      resetToken { byteOffset := stopAt + 1 }
+      return some (UnregisteredAttr.mk (keyword ++ String.fromUTF8! body) false none : Attribute)
+  return none
+
 mutual
 
 /--
@@ -1578,6 +1613,8 @@ partial def parseOptionalAttribute : AttrParserM (Option Attribute) := do
     return some denseElementsAttr
   else if let some unitAttr ← parseOptionalUnitAttr then
     return some unitAttr
+  else if let some affineAttr ← parseOptionalAffineAttrVerbatim then
+    return some affineAttr
   else if let some arrayAttr ← parseOptionalArrayAttr then
     return some arrayAttr
   else if let some dictAttr ← parseOptionalDictionaryAttr then

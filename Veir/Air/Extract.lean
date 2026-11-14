@@ -50,6 +50,8 @@ inductive EventKind where
   | waitAll
   /-- `air.wait_all` with no result: the host waits for it before issuing anything else. -/
   | waitAllBlocking
+  /-- `air.dma_memcpy_nd async` (layer 2, `Veir.Air.MemProgram`). -/
+  | dma
 deriving DecidableEq, Repr, Inhabited
 
 structure Event where

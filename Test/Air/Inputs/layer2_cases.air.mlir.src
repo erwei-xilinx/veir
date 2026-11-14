@@ -1,0 +1,115 @@
+// Layer-2 cases, in AIR's custom syntax; converted to generic form for VeIR.
+
+// D21: a stride-0 destination is written several times; the last write wins.
+func.func @stride0_dst(%src : memref<4xi32>, %dst : memref<1xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  %t = air.dma_memcpy_nd async (%dst[%c0] [%c4] [%c0], %src[%c0] [%c4] [%c1]) : (memref<1xi32>, memref<4xi32>)
+  return
+}
+
+// D20: zero padding on the source side: 1 before, 1 after.
+func.func @padding(%src : memref<2xi32>, %dst : memref<4xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c4 = arith.constant 4 : index
+  %t = air.dma_memcpy_nd async (%dst[%c0] [%c4] [%c1], %src[%c0] [%c2] [%c1]) {pad_before = array<i32: 1>, pad_after = array<i32: 1>} : (memref<4xi32>, memref<2xi32>)
+  return
+}
+
+// D21: copying down within one buffer reads every element before overwriting it.
+func.func @overlap_down(%b : memref<4xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : index
+  %t = air.dma_memcpy_nd async (%b[%c0] [%c3] [%c1], %b[%c1] [%c3] [%c1]) : (memref<4xi32>, memref<4xi32>)
+  return
+}
+
+// D21: copying up may overwrite an element before it is read: a race inside the DMA.
+func.func @overlap_up(%b : memref<4xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : index
+  %t = air.dma_memcpy_nd async (%b[%c1] [%c3] [%c1], %b[%c0] [%c3] [%c1]) : (memref<4xi32>, memref<4xi32>)
+  return
+}
+
+// D20/AIR-008: 4 elements in, 8 out.
+func.func @count_mismatch(%src : memref<4xi32>, %dst : memref<8xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  %c8 = arith.constant 8 : index
+  %t = air.dma_memcpy_nd async (%dst[%c0] [%c8] [%c1], %src[%c0] [%c4] [%c1]) : (memref<8xi32>, memref<4xi32>)
+  return
+}
+
+// A pattern past the end of its buffer.
+func.func @out_of_bounds(%src : memref<4xi32>, %dst : memref<4xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c4 = arith.constant 4 : index
+  %t = air.dma_memcpy_nd async (%dst[%c0] [%c4] [%c1], %src[%c2] [%c4] [%c1]) : (memref<4xi32>, memref<4xi32>)
+  return
+}
+
+// D23: two unordered DMAs write %dst; whether they overlap depends on %off.
+func.func @dynamic(%src : memref<8xi32>, %dst : memref<8xi32>, %off : index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  %t0 = air.dma_memcpy_nd async (%dst[%c0] [%c4] [%c1], %src[%c0] [%c4] [%c1]) : (memref<8xi32>, memref<8xi32>)
+  %t1 = air.dma_memcpy_nd async (%dst[%off] [%c4] [%c1], %src[%c4] [%c4] [%c1]) : (memref<8xi32>, memref<8xi32>)
+  return
+}
+
+// D22: an uninterpreted linalg.fill writes %b while an unordered DMA reads it.
+func.func @linalg(%b : memref<4xi32>, %out : memref<4xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  %t0 = air.execute {
+    %z = arith.constant 0 : i32
+    linalg.fill ins(%z : i32) outs(%b : memref<4xi32>)
+    air.execute_terminator
+  }
+  %t1 = air.dma_memcpy_nd async (%out[%c0] [%c4] [%c1], %b[%c0] [%c4] [%c1]) : (memref<4xi32>, memref<4xi32>)
+  return
+}
+
+// D17: a dealloc not ordered after a DMA that reads the buffer.
+func.func @dealloc_race(%out : memref<4xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  %t0, %buf = air.execute -> (memref<4xi32, 1>) {
+    %a = memref.alloc() : memref<4xi32, 1>
+    air.execute_terminator %a : memref<4xi32, 1>
+  }
+  %t1 = air.dma_memcpy_nd async [%t0] (%out[%c0] [%c4] [%c1], %buf[%c0] [%c4] [%c1]) : (memref<4xi32>, memref<4xi32, 1>)
+  %t2 = air.execute [%t0] {
+    memref.dealloc %buf : memref<4xi32, 1>
+    air.execute_terminator
+  }
+  return
+}
+
+// Values through memory: a store, then an ordered load.
+func.func @load_store(%b : memref<2xi32>) {
+  %t0 = air.execute {
+    %c1 = arith.constant 1 : index
+    %v = arith.constant 7 : i32
+    memref.store %v, %b[%c1] : memref<2xi32>
+    air.execute_terminator
+  }
+  %t1, %r = air.execute [%t0] -> (i32) {
+    %c1 = arith.constant 1 : index
+    %x = memref.load %b[%c1] : memref<2xi32>
+    air.execute_terminator %x : i32
+  }
+  return
+}

@@ -17,9 +17,17 @@
 // RUN: not veir-opt %S/Inputs/unknown_type.mlir 2>&1 | filecheck %s --check-prefix=UNKNOWN
 // UNKNOWN: type '!air.token' is not registered
 
-// Memory is not modelled, so an air.execute that allocates has no meaning here.
-// RUN: not air-veir graph --allow-unregistered-dialect %S/Inputs/memref_in_execute.mlir 2>&1 | filecheck %s --check-prefix=MEMREF
-// MEMREF: 'memref.alloc' in an air.execute body is not supported; only arith operations have a meaning here (memory is not modelled)
+// Layer 2 refuses what it has not been given a meaning for yet.
+// RUN: not air-veir graph --allow-unregistered-dialect %S/Inputs/refuse_blocking_dma.mlir 2>&1 | filecheck %s --check-prefix=SYNCDMA
+// SYNCDMA: an air.dma_memcpy_nd without async (blocking form) is not supported yet; its meaning is pending (SEMANTICS.md)
+// RUN: not air-veir graph --allow-unregistered-dialect %S/Inputs/refuse_dma_on_view.mlir 2>&1 | filecheck %s --check-prefix=VIEW
+// VIEW: a DMA on a view is not supported; fold the view into the pattern first
+// RUN: not air-veir graph --allow-unregistered-dialect %S/Inputs/refuse_host_dealloc.mlir 2>&1 | filecheck %s --check-prefix=HOSTDEALLOC
+// HOSTDEALLOC: a host memref.dealloc is not an event and cannot be ordered; not supported
+
+// Memory inside an air.execute is modelled since layer 2.
+// RUN: air-veir run --allow-unregistered-dialect %S/Inputs/memref_in_execute.mlir | filecheck %s --check-prefix=MEMREF
+// MEMREF: program order: event 0 = [buffer 0]
 
 // AIR accepts an air.execute whose terminator yields the wrong type; so does the structure check,
 // but the semantics refuses it.

@@ -25,6 +25,8 @@ Each claim is listed at its own level; they do not imply one another.
 | The supported subset can be interpreted | Yes, by `Program.finishEvent` and `air-veir run`. |
 | The theorems pass Lean's kernel | Yes. No `sorry`, no `native_decide`, no new axioms (see [Theorems](#theorems)). |
 | The `air-dependency-canonicalize` output passes the checker | Yes, on every AIR test file in the subset (4 of 4), and on the fixtures. Only for those instances. |
+| Layer 2: events' memory footprints, races, DMA semantics | Executable (`MemProgram.lean`); the race checker it uses is proven exact (`raceFreeB_iff`), and race-free programs are proven deterministic for framed effects (`deterministic`). That `finishMem` and `footprints` are framed is **not proven**; it is checked exhaustively (`check_dependency.py`: every race-free program has one outcome). |
+| `air-dependency` makes programs race-free | **No**: it leaves 30 of 196 (2 DMAs) and 922 of 2,744 (3 DMAs) small programs with a race (AIR-007). |
 | `air-dependency-canonicalize` is correct | **Not claimed.** The C++ pass works on a larger graph (DMA, channels, hierarchy, loops) than the one modelled here. |
 | The extraction from IR matches the model | **Not proven.** It is tested. `Program.steps_reduce_iff` is about the extracted `Program`, not about the IR. |
 | `air-veir reduce` is correct | **Not proven.** It is checked per run: `sameReach` before printing, then re-parse and re-verify by VeIR and `air-opt`. |
@@ -125,7 +127,12 @@ open, and the ninth of a stack. Its own diff adds `Veir/Interpreter/Netlist.lean
 | `arith.*` in an `air.execute` | VeIR's `arith` | VeIR's | `Arith.interpretOp'` | abstracted: any `Sem` |
 | `arith.constant` in the function | VeIR's `arith` | VeIR's | evaluated before any event | — |
 | `memref<…>` | verbatim, no meaning | none | refused | — |
-| `air.launch`, `air.segment`, `air.herd`, `air.dma_memcpy_nd`, `air.channel.*`, `memref.*`, `scf.*` | `--allow-unregistered-dialect`; round-trips | none | **refused with a diagnostic** | — |
+| `air.dma_memcpy_nd async` | unregistered; round-trips | operand segments and patterns decoded | stream semantics with padding (D20); overlap and repeated writes (D21); bounds checked | footprints (D14, D20); races through `raceFreeB_iff` |
+| `air.dma_memcpy_nd` (no `async`) | round-trips | — | **refused**: meaning pending (D24) | — |
+| `memref.alloc`, `dealloc`, `load`, `store` in `air.execute`; host `memref.alloc` | unregistered; round-trips | — | buffers, `undef` contents, use-after-free checked (D17) | footprints |
+| `memref.copy`, `linalg.*` and any other op in `air.execute` | unregistered; round-trips | — | opaque values; read/write of whole operand buffers (D22) | footprints |
+| `affine_map<…>`, `affine_set<…>` | verbatim, no meaning | — | — | — |
+| `air.launch`, `air.segment`, `air.herd`, `air.channel.*`, `scf.*` | `--allow-unregistered-dialect`; round-trips | none | **refused with a diagnostic** | — |
 | `air.channel` declarations | **refused by VeIR's parser:** `size = [1]` is an untyped integer, and VeIR requires `1 : i64` | — | — | — |
 
 ## Semantics
@@ -221,6 +228,10 @@ resources or memory are involved. Those are outside the model.
 - `Program.finishEvent` (an executable `arith` evaluator, run through `Arith.interpretOp'`);
 - the Lean compiler, which runs `air-veir`.
 
+**Layer 2's executable model** (`extractMem`, `footprints`, `finishMem`) is trusted, and tested.
+The theorems assume the effects are framed by the footprints; that the implementation is, is
+checked exhaustively, not proven.
+
 **Checked per run instead of trusted:** the graph that `air-veir reduce` intends to produce
 (`reducedGraph`) is proven correct. That `applyReduction` turns it into IR is not.
 `applyReduction` rewrites operand arrays on a raw `IRContext` without maintaining use-lists. Proving that well-formed would need new VeIR invariants
@@ -247,7 +258,7 @@ for operand removal, which are not in VeIR yet. Its output is only printed, and 
 **Sweep of AIR's `mlir/test`** (631 files):
 - 158 skipped: expected-error tests, split-input files, or not accepted by `air-opt`.
 - Of the remaining 473:
-  - 140 round-trip identically and 0 differ;
+  - 140 round-trip identically and 0 differ (196 since `affine_map` is read; 276 refused);
   - 332 are refused by VeIR's parser. Each refusal was classified from its error location:
     - 164 for an untyped integer in an array attribute (for example `air.channel … size = [1]`);
     - 85 for `affine_map<…>`;
@@ -346,6 +357,17 @@ Status of the async-dependency layer:
 | C4 | Trivial while only dependency lists exist (a DAG is always satisfiable). Becomes real with `concurrency` tokens (D9), which can contradict a dependency path. |
 | C5 | **Proven** for the model's reduction (`steps_reduce_iff`). `air-dependency-canonicalize`, checked exhaustively (`Test/Air/bounded/check.py`): **passes** on all 78,183 graphs of 1–5 events whose `air.execute` bodies have 0 or 1 ops. **Fails** when a body has 2 or more ops: 1,314 of the 2,448 programs of up to 4 events with 2-op bodies. The pass drops every outgoing edge of such an execute, which can make a race-free program racy (974 of 5,330 race-free programs in `--data` mode). Root cause located; see Findings. Reproducer: `Test/Air/bounded/repro_canonicalize_drops_edge.mlir.in`. |
 | C6 | Not started; needs a target model. |
+
+Status of the memory and DMA layer (layer 2, function scope):
+
+| # | Status |
+| --- | --- |
+| C1 | **Counterexamples found:** AIR accepts a DMA whose src and dst element counts differ (AIR-008); and a subview folded into a DMA addresses other elements (AIR-009, proven: `foldAsAIR_wrong`). `air-veir races` reports both kinds statically. |
+| C2 | Unchanged: DMAs are events, and `progress` covers them. |
+| C3 | **Proven** for framed effects (`deterministic`). Checked for the implementation on every race-free program of `check_dependency.py`: 166 of 196 and 1,822 of 2,744, each with exactly one outcome. |
+| C4 | Not applicable yet (no affinity/concurrency). |
+| C5 | Canonicalize preserves race-freedom (`raceFree_reduce_iff`). `air-dependency` does **not** establish it (AIR-007, exhaustively above). |
+| C6 | Not started. |
 
 ### What each AIR concept needs
 

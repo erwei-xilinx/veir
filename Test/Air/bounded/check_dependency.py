@@ -14,6 +14,10 @@ Run from the VeIR root after `lake build`:
   AIR_OPT=/path/to/air-opt Test/Air/bounded/check_dependency.py --dmas 3
 
 Prints how many programs air-dependency leaves racy, by kind, with examples; exits 1 if any.
+
+It also checks the model against its own theorem (`deterministic`, checklist C3): every program
+`air-veir races` finds race-free must compute one outcome under every schedule (`air-veir run`).
+The implementation is not proven to satisfy that theorem's framing assumption, so this checks it.
 """
 
 import argparse
@@ -65,6 +69,7 @@ def main():
     air_opt = os.environ.get("AIR_OPT") or sys.exit("set AIR_OPT to an air-opt binary")
     progs = list(itertools.product(DMAS, repeat=args.dmas))
     racy, kinds, examples, failures = 0, {}, [], []
+    racefree_ids, nondet = set(), []
     with tempfile.TemporaryDirectory() as tmp:
         for c in range(0, len(progs), args.chunk):
             chunk = progs[c:c + args.chunk]
@@ -88,6 +93,8 @@ def main():
                     cur = int(m.group(1))
                     if int(m.group(2)) > 0:
                         racy += 1
+                    elif int(m.group(3)) == 0:
+                        racefree_ids.add(cur)
                     continue
                 m = re.match(r"^\s+race: (\w+) on (.+?) element", line)
                 if m and cur is not None:
@@ -95,7 +102,23 @@ def main():
                     kinds[key] = kinds.get(key, 0) + 1
                     if len(examples) < args.show:
                         examples.append(f"  p{cur}: {describe(progs[cur])}\n    {line.strip()}")
+            # C3: race-free programs compute one outcome under every schedule.
+            run = subprocess.run([AIR_VEIR, "run", "--allow-unregistered-dialect", dep],
+                                 capture_output=True, text=True)
+            cur = None
+            for line in run.stdout.splitlines():
+                m = re.match(r"^@p(\d+): program order", line)
+                if m:
+                    cur = int(m.group(1))
+                    continue
+                m = re.match(r"^\s+\d+ finishing order\(s\) allowed.*?(\d+) distinct outcome", line)
+                if m and cur in racefree_ids and int(m.group(1)) != 1:
+                    nondet.append(cur)
     print(f"{len(progs)} program(s) of {args.dmas} DMA(s): {racy} left with a race by air-dependency")
+    print(f"C3: {len(racefree_ids)} race-free program(s), {len(nondet)} with more than one outcome"
+          + (f" (e.g. p{nondet[0]})" if nondet else ""))
+    if nondet:
+        failures.append(f"race-free but nondeterministic: {nondet[:5]}")
     for k, n in sorted(kinds.items(), key=lambda kv: -kv[1]):
         print(f"  {n:6} {k}")
     for e in examples:

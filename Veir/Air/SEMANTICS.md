@@ -37,9 +37,12 @@ is wrong; the replacement is pending or recorded).
 | D27 | `scf.parallel` iterations are all concurrent; the result is the reduction of their values (`air.wait_all` joins) | from `docs/AIRComputeModel.md` ("all instances concurrent, tokens reduced") | `Veir.Air.Instance.parallelLoop` | — |
 | D28 | A channel's `size` is a bundle of independent subchannels (any rank); each subchannel (one index) is its own FIFO | ✅ 2026-11-14 | layer 4 | — |
 | D29 | A channel is a spatial hardware stream between tiles. Without `broadcast_shape` it is one-to-one; with it, every put is consumed by N gets at different tiles, simultaneously. With `dest`, a packet flow routes each put to one destination chosen at run time | ✅ 2026-11-14 | layer 4 | — |
-| D30 | Buffering depends on the endpoints' form: async put/get see a channel with no buffer (rendezvous, so backpressure deadlock is possible); sync put/get see a channel with unbounded buffer (a put is not held back by a get later in program order) | ✅ 2026-11-14 (exact rules for mixed forms ❓) | layer 4 | — |
-| D31 | Padding on `channel.put`/`channel.get` is the DMA padding of D20 | ✅ 2026-11-14 (meaning on the get side ❓) | layer 4 | — |
+| D30 | A transfer is buffered (unbounded) if either of its ends is sync, and a rendezvous (no buffer, so backpressure deadlock is possible) if both are async | ✅ 2026-11-14 | layer 4 | — |
+| D31 | Padding: a put inserts zeros into the stream (as D20); a get writes zeros to the padded positions of its destination and takes the rest from the stream | ✅ 2026-11-14 | layer 4 | — |
 | D32 | All channel types (`npu_dma_stream`, `npu_dma_packet`, `npu_cascade`, `npu_mmio`, `gpu_*`) have this semantics | ✅ 2026-11-14 | layer 4 | — |
+| D33 | Two endpoints on the same subchannel, in the same direction, with no token path between them, are an error (a channel FIFO-order race) | ✅ 2026-11-14 | layer 4 | — |
+| D34 | A subchannel is a stream of elements: puts and gets need not pair one to one; the i-th element put is the i-th element got. Elements no get takes leave an async put stuck (backpressure) | ✅ 2026-11-14 | layer 4 | — |
+| D35 | A sync `channel.put`/`channel.get` is a blocking event (as D24) | ✅ 2026-11-14 | layer 4 | — |
 
 ## D1. Blocking `air.wait_all` ✅
 
@@ -343,11 +346,24 @@ Confirmed 2026-11-14:
     consume it, the put is back-pressured;
   - with `dest(%d)` (packet flow), routing is dynamic on a compile-time-determined spatial
     datapath, and each packet is delivered to the destination it selects.
-- **D30.** "channel 是没有buffer的FIFO". For async endpoints the channel has no buffer: a put and its
-  get complete together, so a program can deadlock through backpressure. For sync endpoints
-  the channel is understood to have unbounded buffer space: "程序进行到put的时候，不会因为下一行马上
-  就是get而导致backpressure".
-- **D31.** Padding on a channel endpoint is the same concept as on `air.dma_memcpy_nd` (D20).
+- **D30.** "channel 是没有buffer的FIFO". When both ends of a transfer are async, the channel has no
+  buffer: the put and the get transfer together, so a program can deadlock through
+  backpressure. When either end is sync, the transfer is buffered without bound: "程序进行到put的
+  时候，不会因为下一行马上就是get而导致backpressure".
+- **D31.** Padding is the DMA concept of D20:
+  - a put's padding inserts zeros into the stream;
+  - a get's padding writes zeros to the padded positions of its destination, and the get takes
+    only the other positions from the stream. For example, a get of 2 elements with
+    `pad_before = 1, pad_after = 1` takes 2 from the stream and writes `[0, a, b, 0]`.
+- **D33.** Endpoints on one subchannel in one direction must be totally ordered by token paths.
+  Two that are not are an error, as a memory race is: which elements each one moves is undefined.
+- **D34.** A subchannel carries a stream of elements; a get is one DMA receiving event.
+  - Puts and gets need not pair one to one: one put of 8 elements may feed two gets of 4.
+  - The i-th element put (in the token order of D33) is the i-th element got.
+  - Nothing is wrong as long as there is no backpressure. Elements that no get takes keep an
+    async put from completing.
+- **D35.** A sync put or get is a blocking event (D24): it orders everything after it in program
+  order.
 - **D32.** Every channel type shares this semantics; none is refused for being of another type.
 
 `docs/AIRComputeModel.md`'s `depth` attribute (default 1) does not exist, and contradicts D30

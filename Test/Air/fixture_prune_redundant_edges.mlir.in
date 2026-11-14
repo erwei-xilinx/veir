@@ -1,0 +1,55 @@
+// Generated from mlir-air 9b81b5de0 mlir/test/Transform/AIRDependencyCanonicalization/prune_redundant_edges.mlir (MIT) with
+//   air-opt --mlir-print-op-generic --mlir-print-local-scope
+
+"builtin.module"() ({
+  "func.func"() <{function_type = (memref<1024xi32>) -> (), sym_name = "foo"}> ({
+  ^bb0(%arg0: memref<1024xi32>):
+    %0 = "arith.constant"() <{value = 0 : index}> : () -> index
+    %1 = "arith.constant"() <{value = 1 : index}> : () -> index
+    %2 = "air.launch"(%1, %1, %arg0) <{operandSegmentSizes = array<i32: 0, 2, 1>}> ({
+    ^bb0(%arg1: index, %arg2: index, %arg3: index, %arg4: index, %arg5: memref<1024xi32>):
+      %3 = "arith.constant"() <{value = 0 : index}> : () -> index
+      %4 = "arith.constant"() <{value = 1 : index}> : () -> index
+      %5:2 = "air.execute"() ({
+        %21 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<512xi32>
+        "air.execute_terminator"(%21) : (memref<512xi32>) -> ()
+      }) {id = 1 : i32} : () -> (!air.async.token, memref<512xi32>)
+      %6 = "air.dma_memcpy_nd"(%5#0, %5#1, %arg5, %3, %3, %3) <{operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 1, 1, 1, 1>, static_dst_offsets = array<i64>, static_dst_sizes = array<i64>, static_dst_strides = array<i64>, static_src_offsets = array<i64: -9223372036854775808>, static_src_sizes = array<i64: -9223372036854775808>, static_src_strides = array<i64: -9223372036854775808>}> {id = 1 : i32} : (!air.async.token, memref<512xi32>, memref<1024xi32>, index, index, index) -> !air.async.token
+      %7 = "air.segment"(%6, %4, %4, %5#1) <{operandSegmentSizes = array<i32: 1, 2, 1>}> ({
+      ^bb0(%arg6: index, %arg7: index, %arg8: index, %arg9: index, %arg10: memref<512xi32>):
+        %9 = "arith.constant"() <{value = 0 : index}> : () -> index
+        %10 = "arith.constant"() <{value = 1 : index}> : () -> index
+        %11:2 = "air.execute"() ({
+          %20 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<256xi32, 1>
+          "air.execute_terminator"(%20) : (memref<256xi32, 1>) -> ()
+        }) {id = 2 : i32} : () -> (!air.async.token, memref<256xi32, 1>)
+        %12 = "air.dma_memcpy_nd"(%11#0, %11#1, %arg10, %9, %9, %9) <{operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 1, 1, 1, 1>, static_dst_offsets = array<i64>, static_dst_sizes = array<i64>, static_dst_strides = array<i64>, static_src_offsets = array<i64: -9223372036854775808>, static_src_sizes = array<i64: -9223372036854775808>, static_src_strides = array<i64: -9223372036854775808>}> {id = 2 : i32} : (!air.async.token, memref<256xi32, 1>, memref<512xi32>, index, index, index) -> !air.async.token
+        %13 = "air.herd"(%12, %10, %10, %11#1) <{operandSegmentSizes = array<i32: 1, 2, 1>}> ({
+        ^bb0(%arg11: index, %arg12: index, %arg13: index, %arg14: index, %arg15: memref<256xi32, 1>):
+          %15 = "arith.constant"() <{value = 0 : index}> : () -> index
+          %16:2 = "air.execute"() ({
+            %19 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<128xi32, 2>
+            "air.execute_terminator"(%19) : (memref<128xi32, 2>) -> ()
+          }) {id = 3 : i32} : () -> (!air.async.token, memref<128xi32, 2>)
+          %17 = "air.dma_memcpy_nd"(%16#0, %16#1, %arg15, %15, %15, %15) <{operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 1, 1, 1, 1>, static_dst_offsets = array<i64>, static_dst_sizes = array<i64>, static_dst_strides = array<i64>, static_src_offsets = array<i64: -9223372036854775808>, static_src_sizes = array<i64: -9223372036854775808>, static_src_strides = array<i64: -9223372036854775808>}> {id = 3 : i32} : (!air.async.token, memref<128xi32, 2>, memref<256xi32, 1>, index, index, index) -> !air.async.token
+          %18 = "air.execute"(%17, %16#0) ({
+            "memref.dealloc"(%16#1) : (memref<128xi32, 2>) -> ()
+            "air.execute_terminator"() : () -> ()
+          }) {id = 4 : i32} : (!air.async.token, !air.async.token) -> !air.async.token
+          "air.herd_terminator"() : () -> ()
+        }) {id = 1 : i32} : (!air.async.token, index, index, memref<256xi32, 1>) -> !air.async.token
+        %14 = "air.execute"(%13, %11#0, %12) ({
+          "memref.dealloc"(%11#1) : (memref<256xi32, 1>) -> ()
+          "air.execute_terminator"() : () -> ()
+        }) {id = 5 : i32} : (!air.async.token, !air.async.token, !air.async.token) -> !air.async.token
+        "air.segment_terminator"() : () -> ()
+      }) {id = 2 : i32} : (!air.async.token, index, index, memref<512xi32>) -> !air.async.token
+      %8 = "air.execute"(%7, %6) ({
+        "memref.dealloc"(%5#1) : (memref<512xi32>) -> ()
+        "air.execute_terminator"() : () -> ()
+      }) {id = 6 : i32} : (!air.async.token, !air.async.token) -> !air.async.token
+      "air.launch_terminator"() : () -> ()
+    }) {id = 3 : i32} : (index, index, memref<1024xi32>) -> !air.async.token
+    "func.return"() : () -> ()
+  }) : () -> ()
+}) : () -> ()

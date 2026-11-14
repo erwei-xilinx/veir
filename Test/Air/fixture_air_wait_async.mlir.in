@@ -1,0 +1,12 @@
+// Generated from mlir-air 9b81b5de0 mlir/test/Dialect/AIR/air_wait_async.mlir (MIT) with
+//   air-opt --mlir-print-op-generic --mlir-print-local-scope
+
+"builtin.module"() ({
+  "func.func"() <{function_type = () -> !air.async.token, sym_name = "wait"}> ({
+    "air.wait_all"() : () -> ()
+    %0 = "air.wait_all"() : () -> !air.async.token
+    %1 = "air.wait_all"(%0) : (!air.async.token) -> !air.async.token
+    %2 = "air.wait_all"(%0, %1) : (!air.async.token, !air.async.token) -> !air.async.token
+    "func.return"(%2) : (!air.async.token) -> ()
+  }) : () -> ()
+}) : () -> ()

@@ -305,6 +305,19 @@ def parseOptionalNumericAttr : AttrParserM (Option Attribute) := do
   let value := valueToken.slice.of valueInput
   let isFloatLit : Bool := valueToken.kind == .floatLit
 
+  -- As in MLIR, an integer literal without a type is an `i64` (VEIR-002), where it ends an
+  -- element of an array, a dictionary or a list. Elsewhere the type stays required: a
+  -- `!mod_arith.int` modulus must be typed, and `1e1` is not read as `1` followed by `e1`.
+  let next := (← peekToken).kind
+  if !isFloatLit && (next == .comma || next == .rSquare || next == .rBrace || next == .rParen) then
+    let some n := numericValueToNat? value
+      | throwAt valueStartPos s!"invalid integer literal '{String.fromUTF8! value}'"
+    let literal := if isNegative then Int.negOfNat n else Int.ofNat n
+    let i64 := IntegerType.signless 64
+    if (BitVec.ofInt 64 literal).toInt != literal then
+      throwAt valueStartPos "integer constant out of range for attribute"
+    return some (IntegerAttr.ofInt literal i64 : Attribute)
+
   parsePunctuation ":"
   let startPos ← getPos
 

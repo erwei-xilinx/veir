@@ -315,10 +315,11 @@ for operand removal, which are not in VeIR yet. Its output is only printed, and 
 - **VeIR, not AIR:**
   - `llvm.load` loses its `ordering` property in a round trip, so an atomic load is printed as a
     plain one (`mlir/test/Conversion/AIRToROCDL/sym_atomic_syncscope.mlir`).
-  - VeIR rejects an integer literal without a type in an attribute (`size = [1]`), which MLIR
-    reads as `i64`. No VeIR test asserts this, so it is a conformance gap rather than a stated
-    design choice. It blocks every `air.channel` declaration. (An earlier version of this file
-    called it deliberate; the tests cited then concern malformed floats.)
+  - VeIR rejected an integer literal without a type in an attribute (`size = [1]`), which MLIR
+    reads as `i64`. That blocked every `air.channel` declaration (VEIR-002). Fixed on this branch
+    for list, array and dictionary elements only, because one VeIR test does require a typed
+    literal elsewhere (`!mod_arith.int<17>` is an error). An earlier version of this file wrongly
+    said no test asserted the rejection.
   - VeIR's `arith` verifier rejects `index` operands to integer binary ops
     (`arith.muli`: "Expected operand 0 to have integer type"). AIR's address arithmetic uses them
     throughout, so `air.execute` bodies computing on `index` are not yet importable.

@@ -32,7 +32,7 @@ is wrong; the replacement is pending or recorded).
 | D22 | Footprint of an op the model does not interpret: read and write of every memref operand's whole buffer (linalg: `ins` read, `outs` read and write); its values are opaque | ✅ 2026-11-13 | layer 2 | — |
 | D23 | Non-constant offsets, sizes and strides: evaluated when running; a footprint that is not known statically is the whole buffer | ✅ 2026-11-13 | layer 2 | — |
 | D24 | `air.dma_memcpy_nd` without `async` is synchronous: it runs in program order, and the host waits for it | ✅ 2026-11-13 | `EventKind.dmaBlocking`, `Event.implicitDeps` | `steps_between_iff` (implicit edges) |
-| D25 | A synchronous op waits only for its own dependencies, not for earlier async ops it does not name | ❓ pending (implemented this way: it matches D1, and it is the conservative choice for race checking) | `extractMem` | — |
+| D25 | A synchronous op waits only for its own dependencies, not for earlier async ops it does not name | ✅ 2026-11-13 | `extractMem` | — |
 
 ## D1. Blocking `air.wait_all` ✅
 
@@ -289,7 +289,7 @@ These are needed, for example, for dynamic partial reconfiguration through contr
 order and waits for it to complete. Everything after it is therefore ordered after it, as after
 a blocking `air.wait_all` (D1).
 
-## D25. What a synchronous op waits for ❓
+## D25. What a synchronous op waits for ✅ (A)
 
 Does a synchronous op (a blocking `air.wait_all`, a DMA without `async`) also wait for async ops
 issued before it that it does not name? Either:

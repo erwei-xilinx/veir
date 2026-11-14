@@ -140,6 +140,7 @@ def IProgram.endpoint (ip : IProgram) (v : Nat) : Except String (Option Endpoint
 def IProgram.analyzeChannels (ip : IProgram) : Except String ChanAnalysis := do
   let p := ip.prog
   let g := p.graph
+  let rows := g.reachRows
   let n := p.events.size
   let mut eps : Std.HashMap Nat Endpoint := {}
   for v in [0:n] do
@@ -151,7 +152,7 @@ def IProgram.analyzeChannels (ip : IProgram) : Except String ChanAnalysis := do
   for a in list do
     for b in list do
       if a.event < b.event && a.chan == b.chan && a.isPut == b.isPut && a.slot == b.slot &&
-          !g.reachB a.event b.event then
+          !g.reachFast rows a.event b.event then
         errors := errors ++ [s!"channel order race (D33): two {if a.isPut then "puts" else "gets"} on @{a.chan}{a.slot} (events {a.event} and {b.event}) with no token path between them"]
   -- The never-firing node, and the AND-graph's base edges.
   let never := 2 * n
@@ -185,6 +186,11 @@ def IProgram.analyzeChannels (ip : IProgram) : Except String ChanAnalysis := do
       for (G, gs, ge) in gr do
         if ps < ge && gs < pe then
           -- They share elements: a transfer between them.
+          -- Instances of one `air.launch` may run one after another, so they must not
+          -- communicate (D37).
+          if let (some (lp, pi), some (lg, gi)) := (ip.ctxs[P.event]!.launchInst, ip.ctxs[G.event]!.launchInst) then
+            if lp == lg && pi != gi then
+              errors := errors ++ [s!"@{chan}{slot}: event {P.event}'s put feeds event {G.event}'s get across two instances of one air.launch ({pi} and {gi}), which may run one after another (D37)"]
           if P.sync || G.sync then
             preds := preds.modify (2 * G.event + 1) (· ++ [2 * P.event + 1])
           else
@@ -201,7 +207,7 @@ def IProgram.analyzeChannels (ip : IProgram) : Except String ChanAnalysis := do
           -- D36(a): within the transfer, a location read at stream step i and written at step j
           -- is well defined iff i ≤ j. Only when the put and the get can overlap: if tokens or a
           -- blocking op order the put before the get, every read precedes every write.
-          if P.buf == G.buf && !g.reachB P.event G.event then
+          if P.buf == G.buf && !g.reachFast rows P.event G.event then
             let realPos := (G.dst.filter (!·.2)).map (·.1)
             let mut writeStep : Std.HashMap Int Nat := {}
             for q in realPos, k in [0:realPos.length] do

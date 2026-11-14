@@ -275,6 +275,96 @@ theorem sameReach_sound {g h : DepGraph} (hc : sameReach g h = true) :
     have hv : v < g.size := hsz ▸ mem_predsOf_lt hp
     exact reach_of_reachB ((hall v hv).2 u hp)
 
+/-! ### Reachability in polynomial time
+
+`reachB` searches without remembering what it visited, which is exponential on graphs with many
+diamonds (hierarchy ops and loop-carried tokens build them). `reachRows` computes, once and in
+numbering order, the bit set of the events reaching each event; `reachFast_eq` proves it answers
+as `reachB` does. Compiled code runs the fast versions of `sameReach` and `races` (`@[csimp]`);
+the theorems are stated, and proven, about the originals. -/
+
+/-- The bit set of every `u` with `reachB g u v`, given the rows of every `w < v`. -/
+def rowOf (g : DepGraph) (t : Array Nat) (v : Nat) : Nat :=
+  (g.predsOf v).foldl (fun acc w => if w < v then acc ||| t.getD w 0 else acc) (2 ^ v)
+
+def reachStep (g : DepGraph) (t : Array Nat) (v : Nat) : Array Nat := t.push (g.rowOf t v)
+
+/-- Row `v` is the bit set of the events that reach `v`, built once, in numbering order. -/
+def reachRows (g : DepGraph) : Array Nat :=
+  (List.range g.size).foldl g.reachStep #[]
+
+/-- `reachB` through the rows; the same answer (`reachFast_eq`), in polynomial time. -/
+def reachFast (g : DepGraph) (rows : Array Nat) (u v : Nat) : Bool :=
+  if v < rows.size then (rows.getD v 0).testBit u else g.reachB u v
+
+theorem testBit_foldl_or (t : Array Nat) (v u : Nat) (l : List Nat) (acc : Nat) :
+    (l.foldl (fun acc w => if w < v then acc ||| t.getD w 0 else acc) acc).testBit u =
+      (acc.testBit u || l.any fun w => if w < v then (t.getD w 0).testBit u else false) := by
+  induction l generalizing acc with
+  | nil => simp
+  | cons w l ih =>
+    simp only [List.foldl_cons, List.any_cons, ih]
+    split <;> simp [Nat.testBit_or, Bool.or_assoc]
+
+theorem testBit_rowOf {g : DepGraph} {t : Array Nat} {v : Nat}
+    (ht : ∀ w < v, ∀ u, (t.getD w 0).testBit u = g.reachB u w) (u : Nat) :
+    (g.rowOf t v).testBit u = g.reachB u v := by
+  rw [rowOf, testBit_foldl_or, reachB_eq, Nat.testBit_two_pow]
+  congr 1
+  · by_cases h : u = v
+    · simp [h]
+    · simp [h, Ne.symm h]
+  · congr 1
+    funext a
+    by_cases ha : a < v
+    · simp only [ha, ↓reduceIte, ↓reduceDIte]
+      exact ht a ha u
+    · simp only [ha, ↓reduceIte, ↓reduceDIte]
+
+theorem getD_push_lt {T : Array Nat} {x w : Nat} (h : w < T.size) : (T.push x).getD w 0 = T.getD w 0 := by
+  simp [Array.getD_eq_getD_getElem?, Array.getElem?_push, Nat.ne_of_lt h]
+
+theorem getD_push_size {T : Array Nat} {x : Nat} : (T.push x).getD T.size 0 = x := by
+  simp [Array.getD_eq_getD_getElem?]
+
+theorem reachRows_spec (g : DepGraph) (k : Nat) :
+    ((List.range k).foldl g.reachStep #[]).size = k ∧
+    ∀ w < k, ∀ u, (((List.range k).foldl g.reachStep #[]).getD w 0).testBit u = g.reachB u w := by
+  induction k with
+  | zero => simp
+  | succ k ih =>
+    simp only [List.range_succ, List.foldl_append, List.foldl_cons, List.foldl_nil, reachStep]
+    generalize (List.range k).foldl g.reachStep #[] = T at ih ⊢
+    obtain ⟨hs, hr⟩ := ih
+    refine ⟨by simp [hs], fun w hw u => ?_⟩
+    by_cases hwk : w < k
+    · rw [getD_push_lt (by omega)]
+      exact hr w hwk u
+    · obtain rfl : w = k := by omega
+      rw [← hs, getD_push_size, hs]
+      exact testBit_rowOf (fun w' hw' => hr w' (by omega)) u
+
+/-- **The rows answer exactly what `reachB` answers.** -/
+theorem reachFast_eq (g : DepGraph) (u v : Nat) : g.reachFast g.reachRows u v = g.reachB u v := by
+  have ⟨hs, hr⟩ := reachRows_spec g g.size
+  by_cases h : v < g.reachRows.size
+  · simp only [reachFast, h, ↓reduceIte]
+    exact hr v (by simpa [reachRows, hs] using h) u
+  · simp only [reachFast, h, ↓reduceIte]
+
+/-- `sameReach`, with each graph's rows computed once. -/
+def sameReachFast (g h : DepGraph) : Bool :=
+  let rg := g.reachRows
+  let rh := h.reachRows
+  g.size == h.size && g.forwardB && h.forwardB &&
+  (List.range g.size).all fun v =>
+    (g.predsOf v).all (fun u => h.reachFast rh u v) && (h.predsOf v).all (fun u => g.reachFast rg u v)
+
+/-- Compiled code runs `sameReachFast`; proofs keep `sameReach`. -/
+@[csimp] theorem sameReach_eq_sameReachFast : @sameReach = @sameReachFast := by
+  funext g h
+  simp [sameReach, sameReachFast, reachFast_eq]
+
 end DepGraph
 
 end

@@ -36,6 +36,7 @@
 // RUN: not air-veir run %S/Inputs/terminator_mismatch.mlir 2>&1 | filecheck %s --check-prefix=YIELD
 // YIELD: the terminator yields i32 as value #0, but the operation declares index
 
-// Scopes: AIR's launch/segment/herd hierarchy. (Loops are instantiated since layer 3: loops.mlir.)
+// Scopes: AIR's launch/segment/herd hierarchy is instantiated since layer 5 (hierarchy.mlir),
+// but reduce does not rewrite it.
 // RUN: not air-veir reduce --allow-unregistered-dialect %S/fixture_prune_redundant_edges.mlir.in 2>&1 | filecheck %s --check-prefix=HIER
-// HIER: 'air.launch' opens a nested region or scope, which is not supported
+// HIER: reduce does not support air.launch/segment/herd/rank yet

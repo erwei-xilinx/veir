@@ -1,0 +1,163 @@
+// Layer-5 cases: air.launch / air.segment / air.herd / air.rank (SEMANTICS.md D37-D44), in AIR's
+// custom syntax.
+module {
+  air.channel @drain [1]
+  air.channel @feed [1]
+  air.channel @T [2, 2]
+  air.channel @L [2]
+  air.channel @R [2]
+
+  // air-dependency's output for mlir-air's channel_drain_hierarchy.mlir: the drain get waits for
+  // the segment, whose token waits for the herd's put, which waits for the get (D38, D30).
+  func.func @drain_dep(%out: memref<4xi32>, %in: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    %l = air.launch async (%i) in (%si=%c1) args(%aout=%out, %ain=%in) : memref<4xi32>, memref<4xi32> {
+      %p = air.channel.put async @feed[] (%ain[] [] []) : (memref<4xi32>)
+      %s = air.segment @seg async args(%o=%aout) : memref<4xi32> {
+        %c1_1 = arith.constant 1 : index
+        %h = air.herd @h async tile (%x, %y) in (%sx=%c1_1, %sy=%c1_1) {
+          %t, %a = air.execute -> (memref<4xi32, 2>) {
+            %al = memref.alloc() : memref<4xi32, 2>
+            air.execute_terminator %al : memref<4xi32, 2>
+          }
+          %g = air.channel.get async [%t] @feed[] (%a[] [] []) : (memref<4xi32, 2>)
+          %q = air.channel.put async [%g] @drain[] (%a[] [] []) : (memref<4xi32, 2>)
+          %d = air.execute [%q] {
+            memref.dealloc %a : memref<4xi32, 2>
+          }
+        }
+      }
+      %r = air.channel.get async [%s] @drain[] (%aout[] [] []) : (memref<4xi32>)
+    }
+    return
+  }
+
+  // The same without the get's edge to the segment: completes, and out = in.
+  func.func @drain_fixed(%out: memref<4xi32>, %in: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    %l = air.launch async (%i) in (%si=%c1) args(%aout=%out, %ain=%in) : memref<4xi32>, memref<4xi32> {
+      %p = air.channel.put async @feed[] (%ain[] [] []) : (memref<4xi32>)
+      %s = air.segment @seg async args(%o=%aout) : memref<4xi32> {
+        %c1_1 = arith.constant 1 : index
+        %h = air.herd @h async tile (%x, %y) in (%sx=%c1_1, %sy=%c1_1) {
+          %t, %a = air.execute -> (memref<4xi32, 2>) {
+            %al = memref.alloc() : memref<4xi32, 2>
+            air.execute_terminator %al : memref<4xi32, 2>
+          }
+          %g = air.channel.get async [%t] @feed[] (%a[] [] []) : (memref<4xi32, 2>)
+          %q = air.channel.put async [%g] @drain[] (%a[] [] []) : (memref<4xi32, 2>)
+          %d = air.execute [%q] {
+            memref.dealloc %a : memref<4xi32, 2>
+          }
+        }
+      }
+      %r = air.channel.get async @drain[] (%aout[] [] []) : (memref<4xi32>)
+    }
+    return
+  }
+
+  // D37, D40: a 2x2 herd; each tile gets its own element on @T[x, y] into a private L1 buffer
+  // and copies it to its own element of the output. Completes; out = in.
+  func.func @herd_tiles(%out: memref<4xi32>, %in: memref<4xi32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c3 = arith.constant 3 : index
+    %p0 = air.channel.put async @T[%c0, %c0] (%in[%c0] [%c1] [%c1]) : (memref<4xi32>)
+    %p1 = air.channel.put async @T[%c0, %c1] (%in[%c1] [%c1] [%c1]) : (memref<4xi32>)
+    %p2 = air.channel.put async @T[%c1, %c0] (%in[%c2] [%c1] [%c1]) : (memref<4xi32>)
+    %p3 = air.channel.put async @T[%c1, %c1] (%in[%c3] [%c1] [%c1]) : (memref<4xi32>)
+    %h = air.herd async tile (%x, %y) in (%sx=%c2, %sy=%c2) args(%o=%out) : memref<4xi32> {
+      %k0 = arith.constant 0 : index
+      %k1 = arith.constant 1 : index
+      %k2 = arith.constant 2 : index
+      %t, %a = air.execute -> (memref<1xi32, 2>) {
+        %al = memref.alloc() : memref<1xi32, 2>
+        air.execute_terminator %al : memref<1xi32, 2>
+      }
+      %g = air.channel.get async [%t] @T[%x, %y] (%a[] [] []) : (memref<1xi32, 2>)
+      %row = arith.muli %x, %k2 : index
+      %idx = arith.addi %row, %y : index
+      %d = air.dma_memcpy_nd async [%g] (%o[%idx] [%k1] [%k1], %a[] [] []) : (memref<4xi32>, memref<1xi32, 2>)
+    }
+    return
+  }
+
+  // D40: every tile writes the same element of a buffer passed by reference: a race.
+  func.func @herd_shared_write(%out: memref<4xi32>, %in: memref<4xi32>) {
+    %c2 = arith.constant 2 : index
+    %h = air.herd async tile (%x, %y) in (%sx=%c2, %sy=%c2) args(%o=%out, %i=%in) : memref<4xi32>, memref<4xi32> {
+      %k0 = arith.constant 0 : index
+      %k1 = arith.constant 1 : index
+      %d = air.dma_memcpy_nd async (%o[%k0] [%k1] [%k1], %i[%k0] [%k1] [%k1]) : (memref<4xi32>, memref<4xi32>)
+    }
+    return
+  }
+
+  // D38, D39: a herd with no result blocks the host until everything inside has finished, so
+  // the DMA after it reads what the herd wrote. No race.
+  func.func @sync_herd(%out: memref<4xi32>, %in: memref<4xi32>, %b: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    air.herd tile (%x, %y) in (%sx=%c1, %sy=%c1) args(%o=%out, %i=%in) : memref<4xi32>, memref<4xi32> {
+      %d = air.dma_memcpy_nd async (%o[] [] [], %i[] [] []) : (memref<4xi32>, memref<4xi32>)
+    }
+    %e = air.dma_memcpy_nd async (%b[] [] [], %out[] [] []) : (memref<4xi32>, memref<4xi32>)
+    return
+  }
+
+  // The same herd, async and not waited for: a race.
+  func.func @async_herd_unordered(%out: memref<4xi32>, %in: memref<4xi32>, %b: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    %h = air.herd async tile (%x, %y) in (%sx=%c1, %sy=%c1) args(%o=%out, %i=%in) : memref<4xi32>, memref<4xi32> {
+      %d = air.dma_memcpy_nd async (%o[] [] [], %i[] [] []) : (memref<4xi32>, memref<4xi32>)
+    }
+    %e = air.dma_memcpy_nd async (%b[] [] [], %out[] [] []) : (memref<4xi32>, memref<4xi32>)
+    return
+  }
+
+  // D42: a token passed into the body is the outer event. The DMA inside waits for it. No race.
+  func.func @token_arg(%out: memref<4xi32>, %in: memref<4xi32>, %b: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    %w = air.dma_memcpy_nd async (%in[] [] [], %b[] [] []) : (memref<4xi32>, memref<4xi32>)
+    %h = air.herd async tile (%x, %y) in (%sx=%c1, %sy=%c1) args(%o=%out, %i=%in, %tk=%w) : memref<4xi32>, memref<4xi32>, !air.async.token {
+      %d = air.dma_memcpy_nd async [%tk] (%o[] [] [], %i[] [] []) : (memref<4xi32>, memref<4xi32>)
+    }
+    return
+  }
+
+  // D37: instance i of a launch sends to instance 1 - i; the instances may run one after another.
+  func.func @launch_talk(%out: memref<4xi32>, %in: memref<4xi32>) {
+    %c2 = arith.constant 2 : index
+    %l = air.launch async (%i) in (%si=%c2) args(%o=%out, %a=%in) : memref<4xi32>, memref<4xi32> {
+      %k1 = arith.constant 1 : index
+      %j = arith.subi %k1, %i : index
+      %p = air.channel.put async @L[%j] (%a[%i] [%k1] [%k1]) : (memref<4xi32>)
+      %g = air.channel.get async @L[%i] (%o[%i] [%k1] [%k1]) : (memref<4xi32>)
+    }
+    return
+  }
+
+  // A segment inside a segment; each level waits for everything inside (D38).
+  func.func @nested_segment(%out: memref<4xi32>, %in: memref<4xi32>, %b: memref<4xi32>) {
+    %s = air.segment async args(%o=%out, %i=%in) : memref<4xi32>, memref<4xi32> {
+      %s2 = air.segment async args(%o2=%o, %i2=%i) : memref<4xi32>, memref<4xi32> {
+        %d = air.dma_memcpy_nd async (%o2[] [] [], %i2[] [] []) : (memref<4xi32>, memref<4xi32>)
+      }
+    }
+    %e = air.dma_memcpy_nd async [%s] (%b[] [] [], %out[] [] []) : (memref<4xi32>, memref<4xi32>)
+    return
+  }
+
+  // D43: ranks run concurrently, so rank i may send to rank 1 - i (unlike launch instances).
+  func.func @rank_talk(%out: memref<4xi32>, %in: memref<4xi32>) {
+    %c2 = arith.constant 2 : index
+    %u = air.universe.alloc(%c2)
+    %r = air.rank async universe(%u) (%i) in (%si=%c2) args(%o=%out, %a=%in) : memref<4xi32>, memref<4xi32> {
+      %k1 = arith.constant 1 : index
+      %j = arith.subi %k1, %i : index
+      %p = air.channel.put async @R[%j] (%a[%i] [%k1] [%k1]) : (memref<4xi32>)
+      %g = air.channel.get async @R[%i] (%o[%i] [%k1] [%k1]) : (memref<4xi32>)
+    }
+    return
+  }
+}

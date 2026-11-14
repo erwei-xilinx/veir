@@ -147,6 +147,19 @@ theorem raceFree_of_sameReach {g h : DepGraph} {fp : Footprint} (hc : DepGraph.s
   have ⟨size, _, _, reach⟩ := DepGraph.sameReach_sound hc
   raceFree_iff_of_reach size reach
 
+
+/-- `races`, with the graph's rows computed once. -/
+def racesFast (g : DepGraph) (fp : Footprint) : List (Nat × Nat) :=
+  let rows := g.reachRows
+  (List.range g.size).flatMap fun v =>
+    (List.range v).filterMap fun u =>
+      if eventsConflictB fp u v && !g.reachFast rows u v then some (u, v) else none
+
+/-- Compiled code runs `racesFast`; proofs keep `races`. -/
+@[csimp] theorem races_eq_racesFast : @races = @racesFast := by
+  funext g fp
+  simp [races, racesFast, DepGraph.reachFast_eq]
+
 end
 
 end Veir.Air

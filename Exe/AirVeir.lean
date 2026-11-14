@@ -81,7 +81,9 @@ def topLevelFuncs (ctx : IRContext OpCode) (top : OperationPtr) : Array Operatio
   if top.getNumRegions! ctx = 0 then #[] else
   match (top.getRegion! ctx 0).getFirstBlock! ctx with
   | none => #[]
-  | some block => (blockOps ctx block).filter fun op => op.getOpType! ctx == .func .func
+  | some block => (blockOps ctx block).filter fun op =>
+    -- A declaration (`func.func private @f(...)`, no body) has nothing to analyse.
+    op.getOpType! ctx == .func .func && ((op.getRegion! ctx 0).getFirstBlock! ctx).isSome
 
 def funcName (ctx : IRContext OpCode) (func : OperationPtr) : String :=
   String.fromUTF8! (func.getProperties! ctx (OpCode.func Func.func)).sym_name.value
@@ -112,6 +114,9 @@ def kindName : EventKind → String
   | .putBlocking => "air.channel.put (sync)"
   | .get => "air.channel.get"
   | .getBlocking => "air.channel.get (sync)"
+  | .scopeStart => "start of a hierarchy op"
+  | .scopeEnd => "end of a hierarchy op"
+  | .scopeEndBlocking => "end of a hierarchy op (sync)"
 
 /-- Instantiate a function's events (Veir.Air.Instance), with the scalar arguments given. -/
 def extractOrThrow (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List Int := []) :
@@ -295,6 +300,8 @@ def cmdReduce (args : Args) (file : String) : IO Unit := do
     let ip ← extractOrThrow ctx.raw func (args.scalarArgs.getD [])
     if ip.loops > 0 then
       throw (IO.userError s!"@{funcName ctx.raw func}: reduce does not support loops yet; check can validate another tool's rewrite")
+    if ip.prog.events.any (·.kind == .scopeStart) then
+      throw (IO.userError s!"@{funcName ctx.raw func}: reduce does not support air.launch/segment/herd/rank yet; check can validate another tool's rewrite")
     let p := ip.prog
     -- The checker `sameReach_sound` covers; a `false` here would be a bug in `reducedGraph`.
     unless DepGraph.sameReach p.graph p.reducedGraph do

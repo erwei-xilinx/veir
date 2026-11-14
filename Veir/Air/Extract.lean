@@ -59,6 +59,13 @@ inductive EventKind where
   | putBlocking
   | get
   | getBlocking
+  /-- The start of an `air.launch`/`segment`/`herd`/`rank` (layer 5): it carries the op's
+  dependencies, and every event inside every instance waits for it (D39). -/
+  | scopeStart
+  /-- The end of a hierarchy op, its token: it waits for every event inside every instance
+  (D38). `scopeEndBlocking` when the op has no result (D39). -/
+  | scopeEnd
+  | scopeEndBlocking
 deriving DecidableEq, Repr, Inhabited
 
 structure Event where
@@ -235,8 +242,9 @@ def extract (ctx : IRContext OpCode) (func : OperationPtr) : Except String Progr
 /-- Events that read a result of another event without (transitively) waiting for it. Each is a
 data race: some schedule runs the reader first, and `finishEvent` reports the fault. -/
 def Program.unorderedReads (p : Program) : List (Nat × Nat) :=
+  let rows := p.graph.reachRows
   (List.range p.events.size).flatMap fun v =>
-    p.events[v]!.dataDeps.filterMap fun u => if p.graph.reachB u v then none else some (u, v)
+    p.events[v]!.dataDeps.filterMap fun u => if p.graph.reachFast rows u v then none else some (u, v)
 
 /-! ### Executable semantics -/
 

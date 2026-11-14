@@ -195,3 +195,30 @@ info: 'Veir.Air.DepGraph.no_schedule_of_stuckB' depends on axioms: [propext, Quo
 -/
 #guard_msgs in
 #print axioms no_schedule_of_stuckB
+
+-- Reachability through the rows (`reachFast_eq`). A chain of 60 diamonds has 2^60 paths, which
+-- `reachB`'s search would walk; compiled code runs `sameReachFast` (`@[csimp]`) instead.
+private def diamonds (k : Nat) : DepGraph :=
+  ⟨(List.range (3 * k + 1)).toArray.map fun v =>
+    if v = 0 then [] else if v % 3 = 0 then [v - 2, v - 1] else [v - v % 3]⟩
+#guard (diamonds 2).reachFast (diamonds 2).reachRows 0 6
+#guard !(diamonds 2).reachFast (diamonds 2).reachRows 1 2
+#guard sameReach (diamonds 60) (diamonds 60)
+
+/--
+info: 'Veir.Air.DepGraph.reachFast_eq' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms reachFast_eq
+
+/--
+info: 'Veir.Air.DepGraph.sameReach_eq_sameReachFast' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms sameReach_eq_sameReachFast
+
+/--
+info: 'Veir.Air.races_eq_racesFast' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms races_eq_racesFast

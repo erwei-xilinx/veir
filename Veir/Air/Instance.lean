@@ -44,8 +44,10 @@ structure EventCtx where
   env : Std.HashMap ValuePtr HVal := {}
   /-- The buffer each `memref.alloc` in its body creates. -/
   allocBufs : Std.HashMap OperationPtr Nat := {}
-  /-- The loop iterations it belongs to, outermost first. -/
+  /-- The loop iterations and hierarchy instances it belongs to, outermost first. -/
   path : List Int := []
+  /-- The `air.launch` instance it belongs to: the launch's start event, and the instance. -/
+  launchInst : Option (Nat × List Int) := none
 deriving Inhabited
 
 /-- An `air.channel` declaration. -/
@@ -96,6 +98,8 @@ structure IState where
   loops : Nat := 0
   chanDecls : Std.HashMap String ChanDecl := {}
   chans : Std.HashMap Nat ChanInfo := {}
+  /-- The `air.launch` instance being walked. -/
+  launchInst : Option (Nat × List Int) := none
 
 abbrev IM := StateT IState (Except String)
 
@@ -184,11 +188,19 @@ def pushEvent (e : Event) (c : EventCtx) : IM Nat := do
     throw s!"more than {maxEvents} event instances; the program is too large to instantiate"
   let id := st.events.size
   let blocking := e.kind == .waitAllBlocking || e.kind == .dmaBlocking ||
-    e.kind == .putBlocking || e.kind == .getBlocking
+    e.kind == .putBlocking || e.kind == .getBlocking || e.kind == .scopeEndBlocking
   set { st with events := st.events.push { e with implicitDeps := st.blocking },
-                ctxs := st.ctxs.push c,
+                ctxs := st.ctxs.push { c with launchInst := st.launchInst },
                 blocking := if blocking then st.blocking ++ [id] else st.blocking }
   return id
+
+/-- The hierarchy ops (layer 5). -/
+def hierarchyOps : List String := ["air.launch", "air.segment", "air.herd", "air.rank"]
+
+/-- Every point of an iteration space, outermost dimension first. -/
+def iterationPoints (sizes : List Int) : List (List Int) :=
+  sizes.foldr (init := [[]]) fun n acc =>
+    (List.range n.toNat).flatMap fun (k : Nat) => acc.map fun rest => (k : Int) :: rest
 
 mutual
 
@@ -219,6 +231,10 @@ partial def walkOps (ctx : IRContext OpCode) (ops : Array OperationPtr)
         env := env.insert (.opResult ⟨op, 0⟩) (.val (.buf b))
       else if name == "scf.for" then env ← forLoop ctx op env path
       else if name == "scf.parallel" then env ← parallelLoop ctx op env path
+      else if hierarchyOps.contains name then env ← hierarchyInstance ctx op env path
+      else if name == "air.universe.alloc" then
+        -- The pool `air.rank` instances are placed in: a resource, not modelled.
+        env := env.insert (.opResult ⟨op, 0⟩) (.val .undef)
       else if name == "memref.dealloc" then
         throw s!"{what}: a host memref.dealloc is not an event and cannot be ordered; not supported"
       else if op.getNumRegions! ctx ≠ 0 then
@@ -400,6 +416,68 @@ partial def channelInstance (ctx : IRContext OpCode) (op : OperationPtr)
                            padBefore := padBefore, padAfter := padAfter, dest := dest }
   modify fun st => { st with chans := st.chans.insert id info }
   if !blocking then return env.insert (.opResult ⟨op, 0⟩) (.tok id)
+  return env
+
+/-- An `air.launch`, `air.segment`, `air.herd` or `air.rank` (layer 5, D37-D43): a start event
+carrying its dependencies, then the body once per point of its iteration space, then an end event
+that waits for every event inside (its token). Inside an instance:
+- every event waits for the start event, and a blocking op blocks only that instance (D39);
+- each `memref.alloc` makes a new buffer, so allocations are private to the instance (D40);
+- kernel operands are the outer values themselves: memrefs by reference, tokens as the outer
+  events (D40, D42). The body is isolated from above, so nothing else is visible. -/
+partial def hierarchyInstance (ctx : IRContext OpCode) (op : OperationPtr)
+    (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
+  let name := opName ctx op
+  let what := s!"'{name}'{pathStr path}"
+  let props := unregProps ctx op
+  if (findProp props "affinity").isSome || (findProp props "concurrency").isSome then
+    throw s!"{what}: affinity/concurrency token lists are not implemented in AIR (D44)"
+  let isRank := name == "air.rank"
+  let some seg := denseInts (findProp props "operandSegmentSizes")
+    | throw s!"{what}: missing operandSegmentSizes"
+  if seg.size != (if isRank then 4 else 3) then throw s!"{what}: unexpected operand segments"
+  let nDeps := seg[0]!.toNat
+  let nUni := if isRank then seg[1]!.toNat else 0
+  let nSizes := seg[if isRank then 2 else 1]!.toNat
+  let operands := op.getOperands! ctx
+  let deps ← (operands.extract 0 nDeps).toList.mapM fun v => liftE (tokOf env ctx what v)
+  let sizes ← (operands.extract (nDeps + nUni) (nDeps + nUni + nSizes)).toList.mapM fun v =>
+    liftE (knownInt env ctx s!"{what} (size)" v)
+  let kernel ← (operands.extract (nDeps + nUni + nSizes) operands.size).toList.mapM fun v =>
+    liftE (lookupH env ctx v what)
+  let block ← liftE (singleBlock ctx op what)
+  let args := block.getArguments! ctx
+  if args.size != 2 * nSizes + kernel.length then
+    throw s!"{what}: expected {2 * nSizes + kernel.length} block arguments, found {args.size}"
+  let ops := blockOps ctx block
+  let some term := ops.back? | throw s!"{what}: expected a terminator"
+  if !(opName ctx term).endsWith "_terminator" then throw s!"{what}: expected a terminator"
+  let startEv : Event := { op := op, kind := .scopeStart, operandEvents := deps.toArray,
+                           implicitDeps := [], dataDeps := [], body := #[], yields := #[] }
+  let start ← pushEvent startEv { path := path }
+  let outer ← get
+  let mut inner : Array Nat := #[start]
+  for pt in iterationPoints sizes do
+    modify fun st => { st with
+      blocking := [start],
+      launchInst := if name == "air.launch" then some (start, pt) else st.launchInst }
+    let first := (← get).events.size
+    let mut env' : Std.HashMap ValuePtr HVal := {}
+    for a in args.toList.take nSizes, i in pt do
+      env' := env'.insert a (.val (intVal ctx a i))
+    for a in (args.toList.drop nSizes).take nSizes, n in sizes do
+      env' := env'.insert a (.val (intVal ctx a n))
+    for a in args.toList.drop (2 * nSizes), h in kernel do
+      env' := env'.insert a h
+    let _ ← walkOps ctx ops.pop env' (path ++ pt)
+    inner := inner ++ (List.range' first ((← get).events.size - first)).toArray
+  modify fun st => { st with blocking := outer.blocking, launchInst := outer.launchInst }
+  let blocking := op.getNumResults! ctx = 0
+  let endEv : Event := { op := op, kind := if blocking then .scopeEndBlocking else .scopeEnd,
+                         operandEvents := inner, implicitDeps := [], dataDeps := [],
+                         body := #[], yields := #[] }
+  let fin ← pushEvent endEv { path := path }
+  if !blocking then return env.insert (.opResult ⟨op, 0⟩) (.tok fin)
   return env
 
 /-- `scf.for`: iterations in order; only the tokens `iter_args` carry order them (D26). -/

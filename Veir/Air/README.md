@@ -29,6 +29,8 @@ Each claim is listed at its own level; they do not imply one another.
 | `air-dependency` makes programs race-free | **No**: every input of `check_dependency.py` is race-free (synchronous DMAs, D24), and `air-dependency` turns 30 of 196 (2 DMAs) and 922 of 2,744 (3 DMAs) of them into racy programs (AIR-007). |
 | Layer 4: channels (rendezvous, element streams, deadlocks) | Executable (`Channels.lean`). Every deadlock verdict carries a stuck set checked by `stuckB`, and every no-deadlock verdict a schedule checked by `scheduleB`; both checkers are proven sound (`no_schedule_of_stuckB`, `scheduleB_sound`). That the AND-graph built from the IR is the right one is **not proven**; it is tested. |
 | `air-dependency` keeps channel programs deadlock-free | **No**: of the 200 synchronous, deadlock-free channel programs of `check_channels.py`, `air-dependency` makes 93 deadlock (AIR-011). 48 of them need no edge at all (D36(a)); 45 have no correct all-async form. |
+| Layer 5: `air.launch`/`segment`/`herd`/`rank` | Executable (`Instance.lean`, `hierarchyInstance`): each op is a start event, its body once per instance, and an end event (its token). The graph and race theorems apply to the instances. |
+| `air-dependency` keeps hierarchy programs deadlock-free | **No**, under D38 (i): mlir-air's own `channel_drain_hierarchy.mlir` deadlocks after it (AIR-012); the edge comes from a general rule. |
 | `air-dependency-canonicalize` is correct | **Not claimed.** The C++ pass works on a larger graph (DMA, channels, hierarchy, loops) than the one modelled here. |
 | The extraction from IR matches the model | **Not proven.** It is tested. `Program.steps_reduce_iff` is about the extracted `Program`, not about the IR. |
 | `air-veir reduce` is correct | **Not proven.** It is checked per run: `sameReach` before printing, then re-parse and re-verify by VeIR and `air-opt`. |
@@ -50,10 +52,11 @@ Every command here was run as written. Paths are relative to the VeIR root.
 ```bash
 lake build                        # builds Veir, veir-opt, air-veir, ...
 lake test                         # Lean unit tests, including UnitTest/Air.lean
-uv run lit Test/Air -v            # the AIR lit tests (12)
+uv run lit Test/Air -v            # the AIR lit tests (13)
 uv run lit Test/ -q               # all of VeIR's lit tests
 AIR_OPT=/path/to/air-opt Test/Air/air-integration.sh            # checks that need air-opt
 AIR_OPT=/path/to/air-opt Test/Air/air-integration.sh --sweep /path/to/mlir-air/mlir/test
+AIR_OPT=/path/to/air-opt Test/Air/sweep_dependency.py /path/to/mlir-air/mlir/test/.../*.mlir   # air-dependency, then races/deadlocks
 ```
 
 `air-veir --help` describes the tool:
@@ -140,7 +143,9 @@ open, and the ninth of a stack. Its own diff adds `Veir/Interpreter/Netlist.lean
 | `scf.for`, `scf.parallel` (host level) | unregistered; round-trips | — | instantiated iteration by iteration (D26, D27); bounds must be known (`--args`) | graph and race theorems apply to the instances |
 | `air.channel` declarations | `--allow-unregistered-dialect`; round-trips (after the VEIR-002 fix) | — | bundles of subchannels (D28); `broadcast_shape` (D29) | — |
 | `air.channel.put`/`get`, async and sync | `--allow-unregistered-dialect`; round-trips | — | element streams per subchannel (D34); rendezvous when both ends are async, buffered otherwise (D30); padding (D31); D33 ordering checked; memory ordered by transfers (D36) | deadlock and schedule certificates (`Schedule.lean`); races through `raceFreeB_iff` on the graph with transfer nodes |
-| `air.launch`, `air.segment`, `air.herd`, `scf.if` | `--allow-unregistered-dialect`; round-trips | none | **refused with a diagnostic** | — |
+| `air.launch`, `air.segment` (nested too), `air.herd`, `air.rank` | `--allow-unregistered-dialect`; round-trips | operand segments, block arguments | start event, body per instance (all concurrent; launch instances must not communicate, D37), end event = token (D38); dependencies gate every instance, no result = blocking, blocking inside is per instance (D39); allocs per instance, operands by reference (D40); token operands are the outer events (D42) | via the instantiated graph |
+| `air.universe.alloc` | round-trips | — | a resource; no effect on ordering | — |
+| `affinity`/`concurrency` lists, `scf.if`, `affine.if`, `affine.apply` at host level | `--allow-unregistered-dialect`; round-trips | none | **refused with a diagnostic** (D44 for the lists) | — |
 
 ## Semantics
 
@@ -219,6 +224,8 @@ None uses `Lean.ofReduceBool` or an axiom of this development.
 | `deterministic` | in a race-free program with framed effects, every complete execution ends with the same memory (checklist C3, event level) | `g.Forward`, `Framed`, `RaceFree` |
 | `scheduleB_sound` (`Schedule.lean`) | a checked firing order of the start/finish AND-graph is a complete schedule: the program can run to completion (C2, layer 4) | — |
 | `Stuck.never_fires`, `no_schedule_of_stuckB` | a checked stuck set never fires, so no schedule exists: the program deadlocks | — |
+| `reachFast_eq` (`DepGraph.lean`) | the bit-set rows `reachRows` answer exactly as `reachB`; `reachB` alone is exponential on diamonds | — |
+| `sameReach_eq_sameReachFast`, `races_eq_racesFast` | `@[csimp]`: compiled code runs the polynomial versions, the theorems speak of the originals | — |
 | `cyclic_simultaneous_drop_unsound` (UnitTest) | on a cycle, deciding edges independently and dropping them together loses reachability | — |
 
 "Same traces" is the strongest notion here. It implies the same finishing orders (linear
@@ -258,8 +265,8 @@ for operand removal, which are not in VeIR yet. Its output is only printed, and 
 **Lean.** `lake test` passes, including `UnitTest/Air.lean`.
 
 **lit.**
-- `uv run lit Test/Air`: 12 of 12 pass.
-- `uv run lit Test/`: 1598 passed, 8 unsupported, 2 expectedly failed, 0 failed.
+- `uv run lit Test/Air`: 13 of 13 pass.
+- `uv run lit Test/`: 1599 passed, 8 unsupported, 2 expectedly failed, 0 failed.
 
 **AIR integration** (`air-integration.sh`, 2026-11-13):
 - The three fixtures round-trip identically after `air-opt` normalisation, including `id`
@@ -401,6 +408,24 @@ Status of the channel layer (layer 4):
 | C3 | Races include the transfers themselves, as virtual nodes (D36(b)), and the order within a transfer (D36(a)). `check_channels.py`: 0 of 200 inputs racy. |
 | C5 | `check_channels.py`: `air-dependency` makes 93 of 200 deadlock-free programs deadlock; `air-dependency-canonicalize` keeps all 93. The edge it adds between a put and the get it feeds is the cause (AIR-011). With only the edges D33 requires, 48 of the 93 are correct; the other 45 race, and need a buffered (sync) end. |
 | C6 | Not started. |
+
+Status of the hierarchy layer (layer 5):
+
+| # | Status |
+| --- | --- |
+| C1 | `air-verify-hierarchy-locality`, AIR's own race check for herd operands, accepts overlapping per-tile slices (AIR-013, on its positive tests). |
+| C2 | Certified as in layer 4. Under D38 (i), `air-dependency`'s drain rule deadlocks (AIR-012). |
+| C3 | Instances are concurrent, so races between tiles are found (`hierarchy.mlir`). |
+| C5 | `sweep_dependency.py` over the 201 AIR tests with a herd and channels: 73 chunks analysed. 1 deadlocks because of `air-dependency` (AIR-012); 30 are fragments with unpaired channels; 4 racy chunks are test IR (AIR-013, a lowering fixture, and `air.shrinkage`, pending). |
+| C6 | Deferred until the whole dialect is covered (below). |
+
+### Order of work (decided 2026-11-14)
+
+1. Finish the AIR dialect layer by layer: layer 5 is `air.launch` / `air.segment` / `air.herd`;
+   after it come the remaining ops (`!air.token` lists if they get implemented, `scf.if`, and the
+   rest).
+2. **Then** C6 for every layer at once: choose a target model (AIE DMA BDs and locks, streams)
+   and find what AIR cannot express, or expresses only with loss.
 
 ### What each AIR concept needs
 

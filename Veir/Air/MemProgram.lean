@@ -31,8 +31,10 @@ The meaning follows `SEMANTICS.md`:
 - **D23:** a non-constant pattern is evaluated when running and is the whole buffer statically;
 - **D17:** `memref.dealloc` writes the whole buffer.
 
+A DMA without `async` is synchronous (D24): the host waits for it, so it orders everything after
+it, as a blocking `air.wait_all` does.
+
 **Refused, each with a diagnostic:**
-- a DMA without `async` (its blocking meaning is not yet confirmed);
 - a DMA on a view (a subview or reshape result), which the canonicalizer folds away;
 - `memref.load`/`store` through a view;
 - a memref type with a non-identity layout or a dynamic shape;
@@ -332,8 +334,9 @@ def extractMem (ctx : IRContext OpCode) (func : OperationPtr) : Except String (P
         st := { st with blocking := st.blocking ++ [id] }
     | .builtin .unregistered =>
       if name == "air.dma_memcpy_nd" then
-        if op.getNumResults! ctx = 0 then
-          throw s!"{what}: an air.dma_memcpy_nd without async (blocking form) is not supported yet; its meaning is pending (SEMANTICS.md)"
+        -- Without `async` the DMA is synchronous: the host waits for it, so everything issued
+        -- after it waits for it too (D24, as D1 for air.wait_all).
+        let blocking := op.getNumResults! ctx = 0
         let id := st.events.size
         let info ← decodeDma ctx op
         let props := unregProps ctx op
@@ -354,8 +357,10 @@ def extractMem (ctx : IRContext OpCode) (func : OperationPtr) : Except String (P
           eventOf := st.eventOf.insert op id
           dmas := st.dmas.insert id info
           events := st.events.push
-            { op, kind := .dma, operandEvents, implicitDeps := st.blocking, dataDeps,
-              body := #[], yields := #[] } }
+            { op, kind := if blocking then .dmaBlocking else .dma, operandEvents,
+              implicitDeps := st.blocking, dataDeps, body := #[], yields := #[] } }
+        if blocking then
+          st := { st with blocking := st.blocking ++ [id] }
       else if name == "memref.alloc" then
         st ← newBuffer st (.opResult ⟨op, 0⟩) s!"host alloc #{idx}" ((ValuePtr.opResult ⟨op, 0⟩).getType! ctx)
         st := { st with hostOf := st.hostOf.insert op, hostOps := st.hostOps.push op }
@@ -619,7 +624,7 @@ def finishMem (ctx : IRContext OpCode) (p : Program) (mi : MemInfo) (v : Nat) (s
   | some e =>
     match e.kind with
     | .execute => finishExecute ctx mi e v s
-    | .dma =>
+    | .dma | .dmaBlocking =>
       match mi.dmas[v]? with
       | some info => finishDma mi info v s
       | none => { s with fault := some s!"event {v}: no DMA information" }
@@ -648,7 +653,7 @@ def footprints (ctx : IRContext OpCode) (p : Program) (mi : MemInfo) (init : MSt
   for e in p.events, v in [0:p.events.size] do
     let mut acc : List Access := []
     match e.kind with
-    | .dma =>
+    | .dma | .dmaBlocking =>
       let info := mi.dmas[v]!
       let some sb := staticBuf info.src.memref | fps := fps.push acc; continue
       let some db := staticBuf info.dst.memref | fps := fps.push acc; continue

@@ -26,7 +26,7 @@ Each claim is listed at its own level; they do not imply one another.
 | The theorems pass Lean's kernel | Yes. No `sorry`, no `native_decide`, no new axioms (see [Theorems](#theorems)). |
 | The `air-dependency-canonicalize` output passes the checker | Yes, on every AIR test file in the subset (4 of 4), and on the fixtures. Only for those instances. |
 | Layer 2: events' memory footprints, races, DMA semantics | Executable (`MemProgram.lean`); the race checker it uses is proven exact (`raceFreeB_iff`), and race-free programs are proven deterministic for framed effects (`deterministic`). That `finishMem` and `footprints` are framed is **not proven**; it is checked exhaustively (`check_dependency.py`: every race-free program has one outcome). |
-| `air-dependency` makes programs race-free | **No**: it leaves 30 of 196 (2 DMAs) and 922 of 2,744 (3 DMAs) small programs with a race (AIR-007). |
+| `air-dependency` makes programs race-free | **No**: every input of `check_dependency.py` is race-free (synchronous DMAs, D24), and `air-dependency` turns 30 of 196 (2 DMAs) and 922 of 2,744 (3 DMAs) of them into racy programs (AIR-007). |
 | `air-dependency-canonicalize` is correct | **Not claimed.** The C++ pass works on a larger graph (DMA, channels, hierarchy, loops) than the one modelled here. |
 | The extraction from IR matches the model | **Not proven.** It is tested. `Program.steps_reduce_iff` is about the extracted `Program`, not about the IR. |
 | `air-veir reduce` is correct | **Not proven.** It is checked per run: `sameReach` before printing, then re-parse and re-verify by VeIR and `air-opt`. |
@@ -128,7 +128,7 @@ open, and the ninth of a stack. Its own diff adds `Veir/Interpreter/Netlist.lean
 | `arith.constant` in the function | VeIR's `arith` | VeIR's | evaluated before any event | — |
 | `memref<…>` | verbatim, no meaning | none | refused | — |
 | `air.dma_memcpy_nd async` | unregistered; round-trips | operand segments and patterns decoded | stream semantics with padding (D20); overlap and repeated writes (D21); bounds checked | footprints (D14, D20); races through `raceFreeB_iff` |
-| `air.dma_memcpy_nd` (no `async`) | round-trips | — | **refused**: meaning pending (D24) | — |
+| `air.dma_memcpy_nd` (no `async`) | round-trips | — | synchronous (D24): orders everything after it; waits only for its own dependencies (D25, pending) | footprints |
 | `memref.alloc`, `dealloc`, `load`, `store` in `air.execute`; host `memref.alloc` | unregistered; round-trips | — | buffers, `undef` contents, use-after-free checked (D17) | footprints |
 | `memref.copy`, `linalg.*` and any other op in `air.execute` | unregistered; round-trips | — | opaque values; read/write of whole operand buffers (D22) | footprints |
 | `affine_map<…>`, `affine_set<…>` | verbatim, no meaning | — | — | — |

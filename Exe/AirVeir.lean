@@ -15,7 +15,7 @@ def usage : String :=
 
 Read MLIR-AIR in MLIR's generic form (`air-opt --mlir-print-op-generic`) and work on its
 async events and the memory they touch: functions whose body is air.execute, air.wait_all,
-air.dma_memcpy_nd async, arith and memref.alloc, with air.execute bodies of arith, memref and
+air.dma_memcpy_nd, arith and memref.alloc, with air.execute bodies of arith, memref and
 (uninterpreted) linalg operations. Anything else is refused with a diagnostic. See
 Veir/Air/SEMANTICS.md for what each construct means here.
 
@@ -106,6 +106,7 @@ def kindName : EventKind → String
   | .waitAll => "air.wait_all async"
   | .waitAllBlocking => "air.wait_all (blocking)"
   | .dma => "air.dma_memcpy_nd"
+  | .dmaBlocking => "air.dma_memcpy_nd (blocking)"
 
 def extractOrThrow (ctx : IRContext OpCode) (func : OperationPtr) : IO (Program × MemInfo) := do
   match extractMem ctx func with

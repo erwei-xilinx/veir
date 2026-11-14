@@ -21,7 +21,7 @@ def Program.applyReduction (ctx : IRContext OpCode) (p : Program) : IRContext Op
     -- The dependency operands come first; anything after them (a DMA's memrefs and pattern) stays.
     let deps := ((operands.extract 0 flags.size).zip flags).filterMap fun (o, k) => if k then some o else none
     ctx := e.op.setOperands! ctx (deps ++ operands.extract flags.size operands.size)
-    if e.kind == .dma then
+    if e.kind == .dma || e.kind == .dmaBlocking then
       ctx := setDependencySegment ctx e.op deps.size
   return ctx
 where

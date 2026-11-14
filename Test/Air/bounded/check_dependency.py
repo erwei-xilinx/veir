@@ -5,6 +5,7 @@ Every program of N synchronous DMAs over a 4-element L2 buffer is generated:
 - each DMA copies 1 or 2 elements either from %a (L3) into %buf (L2), or from %buf into %out (L3);
 - every offset into %buf that fits is used.
 
+Each input is race-free: its DMAs are synchronous, so they run in program order (D24).
 air-dependency turns the program into async DMAs with token dependencies. D6 says every pair of
 DMAs that touch a common element of %buf, with at least one write, must then be ordered.
 `air-veir races` checks that on air-dependency's output.
@@ -70,12 +71,23 @@ def main():
     progs = list(itertools.product(DMAS, repeat=args.dmas))
     racy, kinds, examples, failures = 0, {}, [], []
     racefree_ids, nondet = set(), []
+    inputs_racy = 0
     with tempfile.TemporaryDirectory() as tmp:
         for c in range(0, len(progs), args.chunk):
             chunk = progs[c:c + args.chunk]
             src = os.path.join(tmp, "in.mlir")
             with open(src, "w") as f:
                 f.write("module {\n" + "\n".join(emit(f"p{c + i}", p) for i, p in enumerate(chunk)) + "\n}\n")
+            # The input, in generic form, must be race-free (D24).
+            gen = subprocess.run([air_opt, src] + GENERIC, capture_output=True, text=True)
+            ginp = os.path.join(tmp, "in.g.mlir")
+            open(ginp, "w").write(gen.stdout)
+            inp = subprocess.run([AIR_VEIR, "races", "--allow-unregistered-dialect", ginp],
+                                 capture_output=True, text=True)
+            inputs_racy += sum(1 for l in inp.stdout.splitlines()
+                               if re.match(r"^@p\d+: .* [1-9]\d* race\(s\)", l))
+            if inp.stderr.strip():
+                failures.append(f"air-veir on input chunk {c}: {inp.stderr.strip()[:300]}")
             dep = os.path.join(tmp, "dep.mlir")
             r = subprocess.run([air_opt, src, "-air-dependency"] + GENERIC, capture_output=True, text=True)
             if r.returncode != 0:
@@ -114,7 +126,8 @@ def main():
                 m = re.match(r"^\s+\d+ finishing order\(s\) allowed.*?(\d+) distinct outcome", line)
                 if m and cur in racefree_ids and int(m.group(1)) != 1:
                     nondet.append(cur)
-    print(f"{len(progs)} program(s) of {args.dmas} DMA(s): {racy} left with a race by air-dependency")
+    print(f"{len(progs)} program(s) of {args.dmas} DMA(s): {inputs_racy} racy before air-dependency, "
+          f"{racy} racy after it")
     print(f"C3: {len(racefree_ids)} race-free program(s), {len(nondet)} with more than one outcome"
           + (f" (e.g. p{nondet[0]})" if nondet else ""))
     if nondet:

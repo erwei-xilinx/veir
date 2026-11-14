@@ -52,6 +52,8 @@ inductive EventKind where
   | waitAllBlocking
   /-- `air.dma_memcpy_nd async` (layer 2, `Veir.Air.MemProgram`). -/
   | dma
+  /-- `air.dma_memcpy_nd` without `async`: synchronous, so the host waits for it (D24). -/
+  | dmaBlocking
 deriving DecidableEq, Repr, Inhabited
 
 structure Event where

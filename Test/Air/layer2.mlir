@@ -1,7 +1,10 @@
 // Layer 2: buffers, DMAs and races (SEMANTICS.md D14-D23).
 
-// AIR-007, end to end: air-dependency's real output has an unordered RAW on the L2 buffer;
+// AIR-007, end to end: the input is race-free (synchronous DMAs, D24), air-dependency's real
+// output has an unordered RAW on the L2 buffer;
 // running both schedules shows the consequence; with the edge added there is no race.
+// RUN: air-veir races --allow-unregistered-dialect %S/Inputs/air007_before_air_dependency.mlir | filecheck %s --check-prefix=A7IN
+// A7IN:    @f: 2 event(s), 3 buffer(s), 0 race(s), 0 problem(s) inside single events
 // RUN: not air-veir races --allow-unregistered-dialect %S/Inputs/air007_after_air_dependency.mlir | filecheck %s --check-prefix=A7
 // RUN: air-veir run --allow-unregistered-dialect %S/Inputs/air007_after_air_dependency.mlir | filecheck %s --check-prefix=SCHED
 // RUN: air-veir races --allow-unregistered-dialect %S/Inputs/air007_fixed.mlir | filecheck %s --check-prefix=A7FIX

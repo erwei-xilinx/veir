@@ -18,8 +18,9 @@
 // UNKNOWN: type '!air.token' is not registered
 
 // Layer 2 refuses what it has not been given a meaning for yet.
-// RUN: not air-veir graph --allow-unregistered-dialect %S/Inputs/refuse_blocking_dma.mlir 2>&1 | filecheck %s --check-prefix=SYNCDMA
-// SYNCDMA: an air.dma_memcpy_nd without async (blocking form) is not supported yet; its meaning is pending (SEMANTICS.md)
+// A DMA without async is synchronous (D24): it runs, and orders what comes after it.
+// RUN: air-veir graph --allow-unregistered-dialect %S/Inputs/blocking_dma.mlir | filecheck %s --check-prefix=SYNCDMA
+// SYNCDMA: event 0: air.dma_memcpy_nd (blocking) waits for [], keeps []
 // RUN: not air-veir graph --allow-unregistered-dialect %S/Inputs/refuse_dma_on_view.mlir 2>&1 | filecheck %s --check-prefix=VIEW
 // VIEW: a DMA on a view is not supported; fold the view into the pattern first
 // RUN: not air-veir graph --allow-unregistered-dialect %S/Inputs/refuse_host_dealloc.mlir 2>&1 | filecheck %s --check-prefix=HOSTDEALLOC

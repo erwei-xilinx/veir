@@ -31,7 +31,8 @@ is wrong; the replacement is pending or recorded).
 | D21 | Within one DMA, a location read at stream step i and written at step j is well defined iff i ≤ j, otherwise an intra-DMA race; repeated writes to one location (dst stride 0): the last wins | ✅ 2026-11-13 | layer 2 | — |
 | D22 | Footprint of an op the model does not interpret: read and write of every memref operand's whole buffer (linalg: `ins` read, `outs` read and write); its values are opaque | ✅ 2026-11-13 | layer 2 | — |
 | D23 | Non-constant offsets, sizes and strides: evaluated when running; a footprint that is not known statically is the whole buffer | ✅ 2026-11-13 | layer 2 | — |
-| D24 | `air.dma_memcpy_nd` without `async`: is it blocking, like `air.wait_all` without `async` (D1)? | ❓ pending | refused with a diagnostic until confirmed | — |
+| D24 | `air.dma_memcpy_nd` without `async` is synchronous: it runs in program order, and the host waits for it | ✅ 2026-11-13 | `EventKind.dmaBlocking`, `Event.implicitDeps` | `steps_between_iff` (implicit edges) |
+| D25 | A synchronous op waits only for its own dependencies, not for earlier async ops it does not name | ❓ pending (implemented this way: it matches D1, and it is the conservative choice for race checking) | `extractMem` | — |
 
 ## D1. Blocking `air.wait_all` ✅
 
@@ -282,13 +283,18 @@ These are needed, for example, for dynamic partial reconfiguration through contr
   its whole buffer, as `air::mayOverlap` does with an unknown range. Given concrete argument values,
   the check is exact for those values.
 
-## D24. A DMA without `async` ❓
+## D24. A DMA without `async` is synchronous ✅
 
-`air.dma_memcpy_nd (...)`, with no token result: does the host wait for it to complete before
-issuing anything after it, as for a blocking `air.wait_all` (D1)?
+"不带async的这个op是synchronous的op，计算顺序为program order": the host issues it in program
+order and waits for it to complete. Everything after it is therefore ordered after it, as after
+a blocking `air.wait_all` (D1).
 
-`docs/AIRComputeModel.md` says that for `air.launch` "omitting [the result] gives the synchronous
-(blocking) form of the op". It does not say so for every async op.
+## D25. What a synchronous op waits for ❓
 
-Layer 2 refuses the form until this is confirmed. `air-dependency`'s inputs use it, but its
-outputs do not, so checking `air-dependency`'s output does not need it.
+Does a synchronous op (a blocking `air.wait_all`, a DMA without `async`) also wait for async ops
+issued before it that it does not name? Either:
+- **(A)** it waits only for the tokens it lists, as D1 says for `air.wait_all`; or
+- **(B)** it acts as a full barrier, waiting for everything issued before it.
+
+The model implements (A). It matches D1, and for race checking it is the conservative choice: if
+the truth is (B), (A) can report a race that cannot happen, but never misses one.

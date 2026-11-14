@@ -1,4 +1,4 @@
-// Refused by layer 2; see Test/Air/diagnostics.mlir.
+// A synchronous DMA (D24).
 "builtin.module"() ({
   "func.func"() <{function_type = (memref<4xi32>, memref<4xi32>) -> (), sym_name = "blocking_dma"}> ({
   ^bb0(%arg0: memref<4xi32>, %arg1: memref<4xi32>):

@@ -90,6 +90,12 @@ of accesses. Reads after reads need no ordering. This matches
 `mlir/lib/Transform/AIRDependency.cpp`, which detects RAW and WAW/WAR (lines 255–291). A conflict
 left unordered is a program error.
 
+**Confirmed 2026-11-13:** every RAW, WAR and WAW between accesses to the same memory addresses
+must be registered as a dependency, and catching all of them is `air-dependency`'s job. "Same
+addresses" means the footprints overlap. `air-dependency` currently compares start addresses
+instead, which misses overlapping accesses of different shapes; tracked as AIR-007 in
+`~/air-issues`.
+
 **Consequence for the model, once memory is added.** An unordered conflict will be a race,
 reported as a fault, not given a meaning. For race-free programs, non-conflicting bodies commute,
 so how event bodies interleave cannot change the result. That is what makes D7 safe.

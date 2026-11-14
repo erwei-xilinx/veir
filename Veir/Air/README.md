@@ -160,8 +160,8 @@ with the configuration it reaches. `air-veir run` shows the values in program or
 every allowed finishing order computes the same values.
 
 **Faults are explicit.** Reading a result of an `air.execute` that has not finished is a fault, not
-a stale value. `air-veir graph` warns statically about any read not ordered by the tokens. What
-`func.return` means for events still outstanding is undecided (`SEMANTICS.md`, D5).
+a stale value. Such a program is wrong (`SEMANTICS.md`, D4), and `air-veir graph` warns statically
+about any read not ordered by the tokens. `func.return` does not wait for outstanding events (D5).
 
 **Not modelled:**
 - memory: allocation, aliasing, views, effects of `memref.*`;

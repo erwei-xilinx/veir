@@ -38,8 +38,8 @@ every later event wait for it. The rewrite in `reducedOperands` may not remove t
 they are not operands; `steps_between_iff` is the theorem that covers keeping them.
 
 `arith.constant` in the function body is evaluated before any event, as the host does before it
-issues the first one. `func.return` is not an event, and what it means for events still
-outstanding is undecided (`SEMANTICS.md`, D5); a complete trace runs every event to completion.
+issues the first one. `func.return` is not an event: returning does not wait for outstanding
+events, and returning a token hands the wait to the caller (`SEMANTICS.md`, D5).
 
 Every choice above about what AIR means is recorded, with whether an AIR developer has confirmed
 it, in `Veir/Air/SEMANTICS.md`.

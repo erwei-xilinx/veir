@@ -12,10 +12,10 @@ is wrong; the replacement is pending or recorded).
 | D1 | Blocking `air.wait_all` | ✅ 2026-11-13 | `EventKind.waitAllBlocking`, `Event.implicitDeps` | `steps_between_iff` (applied to the AIR rewrite) |
 | D2 | `air.wait_all async` does not block | ✅ 2026-11-13 | `EventKind.waitAll` | — |
 | D3 | Unordered async ops may run in any order and overlap | ✅ 2026-11-13 | `Ready`, `Step` | all trace theorems |
-| D4 | A value is ordered by a token path, direct or transitive | ✅ / ❓ | `Program.finishEvent` (fault), `Program.unorderedReads` | `Program.steps_reduce_iff` |
-| D5 | `func.return` with events still outstanding | ❌ / ❓ | not encoded | none yet |
-| D6 | Conflicting memory accesses must be ordered by tokens | ✅ / ❓ | not encoded (memory not modelled) | none yet |
-| D7 | Effects of an `air.execute` take place at its finish | ❓ | `Sem`, `Program.sem` | `Program.steps_reduce_iff` |
+| D4 | A value is ordered by a token path, direct or transitive; with no path, the program is wrong | ✅ 2026-11-13 | `Program.finishEvent` (fault), `Program.unorderedReads` | `Program.steps_reduce_iff` |
+| D5 | `func.return` does not wait for outstanding events | ✅ 2026-11-13 | `func.return` is not an event | none yet |
+| D6 | Conflicting memory accesses (RAW, WAR, WAW) must be ordered by tokens | ✅ 2026-11-13 | not encoded (memory not modelled) | none yet |
+| D7 | Effects of an `air.execute` take place at its finish | ❓ awaits the proof described below; no question for the AIR developers | `Sem`, `Program.sem` | `Program.steps_reduce_iff` |
 | D8 | Terminator/result mismatch is an AIR verifier bug | ✅ 2026-11-13 | `executeBody` refuses it | — |
 | D9 | `!air.token` and affinity/concurrency lists are planned | ✅ 2026-11-13 | not encoded | — |
 | D10 | `air-dependency-canonicalize` is an exact transitive reduction | ✅ 2026-11-13 | `DepGraph.reduce` | `reach_reduce_iff`, `steps_reduce_iff` |
@@ -42,10 +42,10 @@ done.
 Two async ops with no token path between them may run in either order and may overlap. Having
 its dependencies met allows an op to start; it does not force it to.
 
-## D4. Using a value without its token ✅ (transitive case) / ❓ (no path at all)
+## D4. Using a value requires a token path ✅
 
-**Confirmed.** A use of an `air.execute` result need not name that execute's token directly. The
-canonicalizer removes the direct edge when an intermediate op already orders the two:
+A use of an `air.execute` result need not name that execute's token directly. The canonicalizer
+removes the direct edge when an intermediate op already orders the two:
 
 ```mlir
 %t, %v = air.execute -> (i32) { ... }
@@ -53,51 +53,49 @@ canonicalizer removes the direct edge when an intermediate op already orders the
 %u = air.execute [%m] { use %v }     // uses %v; ordered after %t through %m
 ```
 
-The model asks for a token path, direct or transitive: `reachB` in `unorderedReads`. Since the
-reduction preserves reachability (`reach_reduce_iff`), it can never break this.
+There must be a token path, direct or transitive, from the producer to every user. A program
+without one is wrong: the `air-dependency` pass should have created the path. The model reports
+that program as a data race: `air-veir graph` warns, and any schedule that runs the user first
+faults. Since the reduction preserves reachability (`reach_reduce_iff`), it can never create such
+a race.
 
-**Pending.** When there is no token path at all from the producer to the user, the model treats
-the program as wrong: a data race, and a fault in any schedule that runs the user first. Is that
-AIR's meaning, i.e. must `air-dependency` always create such a path?
+## D5. `func.return` does not wait ✅
 
-## D5. `func.return` while events are outstanding ❌ / ❓
+A function may return while events it issued are still outstanding. Returning a token hands the
+wait to the caller:
 
-**Rejected.** The model used to say that a function may return before its events complete, and
-that returning a token hands the wait to the caller. That reading came from:
-- `func.return` having no wait semantics of its own in MLIR;
-- AIR tests that return a token (`air_wait_async.mlir`: `return %e2 : !air.async.token`).
+```mlir
+func.func @wait() -> !air.async.token {
+  %e = air.wait_all async [...]
+  return %e : !air.async.token    // does not wait for %e
+}
+```
 
-**Pending, the replacement.** Which of these does AIR mean?
-- (a) `func.return` implicitly waits for every event issued in the function;
-- (b) it waits only for some of them (which ones?);
-- (c) returning with outstanding events is ill-formed, and the program must `air.wait_all` first.
+`func.return` is not an event, and a complete trace runs every event to completion. Once calls
+are modelled, the caller will see the returned token as a dependency it may wait for.
 
-And what does returning a token give the caller?
+(History: this reading was first questioned, then confirmed the same day.)
 
-**Current code.** `func.return` is not an event, and a complete trace runs every event to
-completion. No theorem talks about the state at return, so none is affected yet.
+## D6. Memory conflicts must be ordered ✅
 
-## D6. Memory conflicts ✅ / ❓
+When several `air.execute`s (and later DMAs) access the same memory, the `air-dependency` pass is
+responsible for adding token edges, direct or transitive, that order every RAW, WAR and WAW pair
+of accesses. Reads after reads need no ordering. This matches
+`mlir/lib/Transform/AIRDependency.cpp`, which detects RAW and WAW/WAR (lines 255–291). A conflict
+left unordered is a program error.
 
-**Confirmed.** When several `air.execute`s (and later DMAs) access the same memory, the
-`air-dependency` pass is responsible for adding token edges that order the conflicting accesses.
-A conflict left unordered is a program error.
+**Consequence for the model, once memory is added.** An unordered conflict will be a race,
+reported as a fault, not given a meaning. For race-free programs, non-conflicting bodies commute,
+so how event bodies interleave cannot change the result. That is what makes D7 safe.
 
-`mlir/lib/Transform/AIRDependency.cpp` detects RAW and WAW/WAR (lines 255–291), and no RAR.
-
-**Pending.** The confirmation said "RAW, WAR or RAR". Does AIR order reads after reads (RAR), or
-was WAW meant?
-
-**Consequence for the model, once memory is added.** A conflict not covered by a token path will
-be a race, reported as a fault, not given a meaning. For race-free programs, non-conflicting
-bodies commute, so how event bodies interleave cannot change the result. That is what makes D7
-safe. (Not yet proven here; it is the standard data-race-freedom argument, and a planned theorem.)
-
-## D7. Effects of an `air.execute` take place at its finish ❓
+## D7. Effects of an `air.execute` take place at its finish ❓ (awaits a proof)
 
 The model applies a body's effects atomically when the event finishes. For pure `arith` bodies
-this is unobservable. With memory, it is justified only together with D6, so it stays pending
-until memory is modelled and the race-freedom argument above is proven.
+this is unobservable. With memory, D6 makes it sound: in a race-free program, two bodies that may
+run at the same time access no memory in conflict, so any interleaving of their steps has the
+same effect as running one and then the other. This needs no further input from the AIR
+developers. It becomes ✅ when the memory model is added and that commutation argument is proven:
+fine-grained interleavings of race-free programs equal atomic ones.
 
 ## D8. Terminator/result mismatch is a bug ✅
 

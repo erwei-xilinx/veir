@@ -271,14 +271,18 @@ for operand removal, which are not in VeIR yet. Its output is only printed, and 
   `air.token.alloc` and `affinity`/`concurrency` token lists. The dialect implements
   `!air.async.token` and a single `async_dependencies` list. The former are planned (D9). This work
   follows the implementation; `!air.token` is refused (`diagnostics.mlir`).
-- **`air-dependency-canonicalize` drops a needed edge** (found by bounded exhaustive checking;
-  pending confirmation as a bug). In `%t2 = air.execute [%t0, %t1] { … %v0 … }`, where `%t1`
-  waits for `%t0` and reads its result `%v0`, the pass drops *both* of `%t2`'s dependencies
-  instead of keeping `%t1`. `%t2` then reads `%v0` with no token path to `%t0`. This happens only
-  when execute bodies use other executes' results: the pass models an execute as the chain of its
-  body ops (seen in `dump-graph`), and the dumped reduced graph still contains the edge, so it is
-  lost when the dependency lists are written back. That location is a hypothesis, not yet
-  traced in the code.
+- **`air-dependency-canonicalize` drops every outgoing edge of an `air.execute` whose body has
+  two or more ops** (found by bounded exhaustive checking). An earlier version of this note
+  blamed bodies that read other executes' results; that was a confound, since such reads add an
+  op to the body. The root cause, read in `mlir/lib/Util/Dependency.cpp`:
+  - `addVertexFromExecuteOp` builds one vertex per body op. Only the first two vertices point back
+    to the execute (`pointer_op`); later ones, including the terminator, point to their own op.
+  - Outgoing edges leave from the terminator vertex (`getVertexFromOp(…, "back")`).
+  - `fillAIRDepListUsingGraphTR` skips a source vertex whose op is not an `AsyncOpInterface`.
+
+  So with two or more body ops, every edge out of the execute is lost when the reduced graph is
+  written back. Multi-op execute bodies occur in 33 of 1,817 executes in AIR's `mlir/test`. A fix
+  is not yet written or tested. Tracked locally as AIR-002 in `~/air-issues`.
 - **`air-dependency-canonicalize` run time is superlinear in the number of functions in a module**:
   1.5 s, 7 s and 42 s for 1000, 2000 and 4000 small functions. Hypothesis, not profiled: the
   pass's `dependencyContext` (`dep_ctx`, with its `op_to_v`/`op_to_g` maps) is a member of the
@@ -289,8 +293,10 @@ for operand removal, which are not in VeIR yet. Its output is only printed, and 
 - **VeIR, not AIR:**
   - `llvm.load` loses its `ordering` property in a round trip, so an atomic load is printed as a
     plain one (`mlir/test/Conversion/AIRToROCDL/sym_atomic_syncscope.mlir`).
-  - VeIR requires typed numeric literals in attributes. That is deliberate, and VeIR's own tests
-    assert it. It blocks every `air.channel` declaration.
+  - VeIR rejects an integer literal without a type in an attribute (`size = [1]`), which MLIR
+    reads as `i64`. No VeIR test asserts this, so it is a conformance gap rather than a stated
+    design choice. It blocks every `air.channel` declaration. (An earlier version of this file
+    called it deliberate; the tests cited then concern malformed floats.)
   - VeIR's `arith` verifier rejects `index` operands to integer binary ops
     (`arith.muli`: "Expected operand 0 to have integer type"). AIR's address arithmetic uses them
     throughout, so `air.execute` bodies computing on `index` are not yet importable.
@@ -328,7 +334,7 @@ Status of the async-dependency layer:
 | C2 | True for forward graphs. Not yet a theorem. Bounded check: `Test/Air/bounded/`. |
 | C3 | Planned theorem: race-free (D4) implies the same outcome. Bounded check: race warning ⇔ some schedule differs. |
 | C4 | Trivial while only dependency lists exist (a DAG is always satisfiable). Becomes real with `concurrency` tokens (D9), which can contradict a dependency path. |
-| C5 | **Proven** for the model's reduction (`steps_reduce_iff`). `air-dependency-canonicalize`, checked exhaustively (`Test/Air/bounded/check.py`): **passes** on all 78,183 pure dependency graphs of 1–5 events; **fails** on 1,350 of the 5,330 race-free programs of up to 4 events whose `air.execute`s read each other's results, and makes 974 of them racy. Minimal reproducer: `Test/Air/bounded/repro_canonicalize_drops_edge.mlir.in`. Pending confirmation that this is an AIR bug. |
+| C5 | **Proven** for the model's reduction (`steps_reduce_iff`). `air-dependency-canonicalize`, checked exhaustively (`Test/Air/bounded/check.py`): **passes** on all 78,183 graphs of 1–5 events whose `air.execute` bodies have 0 or 1 ops. **Fails** when a body has 2 or more ops: 1,314 of the 2,448 programs of up to 4 events with 2-op bodies. The pass drops every outgoing edge of such an execute, which can make a race-free program racy (974 of 5,330 race-free programs in `--data` mode). Root cause located; see Findings. Reproducer: `Test/Air/bounded/repro_canonicalize_drops_edge.mlir.in`. |
 | C6 | Not started; needs a target model. |
 
 ### What each AIR concept needs
@@ -352,5 +358,4 @@ Concrete next tasks:
    `air-dependency-canonicalize` input.
 4. Add DMA events with region-level read/write effects, and prove token edges cover every
    conflicting pair. This is where the checker becomes a data-race checker for AIR passes.
-5. Accept untyped integer literals (as MLIR does: `i64`) if VeIR's maintainers agree; it unlocks
-   `air.channel` import.
+5. Accept untyped integer literals as `i64`, as MLIR does; it unlocks `air.channel` import.

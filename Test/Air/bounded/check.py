@@ -136,6 +136,8 @@ def main():
     ap.add_argument("--data", action="store_true")
     ap.add_argument("--show", type=int, default=10, help="failures to print")
     ap.add_argument("--chunk", type=int, default=500, help="functions per module")
+    ap.add_argument("--body-ops", type=int, default=0,
+                    help="without --data, arith.constants in every air.execute body")
     args = ap.parse_args()
     air_opt = os.environ.get("AIR_OPT")
     if not air_opt:
@@ -146,6 +148,8 @@ def main():
             cmd = [sys.executable, os.path.join(HERE, "gen.py"), "--events", str(n)]
             if args.data:
                 cmd.append("--data")
+            if args.body_ops:
+                cmd += ["--body-ops", str(args.body_ops)]
             g = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             count = int(g.stderr.split()[0])
             total += count
@@ -160,7 +164,8 @@ def main():
                     f.write('"builtin.module"() ({\n' + "".join(funcs[c:c + args.chunk]) + "}) : () -> ()\n")
                 check_file(air_opt, path, args.data, tmp, report)
             status = "ok" if len(report) == before else f"{len(report) - before} failure(s)"
-            print(f"{count:6} program(s) of {n} event(s){' with data' if args.data else ''}: {status}",
+            what = " with data" if args.data else (f" with {args.body_ops}-op bodies" if args.body_ops else "")
+            print(f"{count:6} program(s) of {n} event(s){what}: {status}",
                   flush=True)
     print(f"{total} program(s) checked, {len(report)} failure(s)")
     for line in report[: args.show]:

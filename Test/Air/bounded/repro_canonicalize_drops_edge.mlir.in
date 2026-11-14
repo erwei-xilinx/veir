@@ -2,7 +2,8 @@
 // Expected: %t2's dependencies reduce to [%t1]. Observed with air-opt at mlir-air 9b81b5de0: [].
 // %t2 then reads %v0 without any token path to %t0 (SEMANTICS.md D4).
 //   air-opt %s -air-dependency-canonicalize
-// Status: pending confirmation by an AIR developer that this is a bug (D4, D10).
+// Trigger: an air.execute whose body has two or more ops (%t1 here) loses every outgoing edge;
+// see ~/air-issues/AIR-002-canonicalize-drops-needed-edge/ISSUE.md for the root cause.
 func.func @f() {
   %t0, %v0 = air.execute -> (i32) {
     %c1 = arith.constant 1 : i32

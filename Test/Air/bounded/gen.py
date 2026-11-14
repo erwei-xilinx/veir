@@ -50,7 +50,7 @@ def programs(n, data):
     yield from go([])
 
 
-def emit(name, prog, data):
+def emit(name, prog, data, body_ops=0):
     tok = (lambda j: f"%e{j}#0") if data else (lambda j: f"%e{j}")
     lines = [f'  "func.func"() <{{function_type = () -> (), sym_name = "{name}"}}> ({{']
     for i, (kind, deps, reads) in enumerate(prog):
@@ -62,6 +62,8 @@ def emit(name, prog, data):
             lines.append(f'    %e{i} = "air.wait_all"({args}) : ({types}) -> !air.async.token')
         elif not data:
             lines.append(f'    %e{i} = "air.execute"({args}) ({{')
+            for k in range(body_ops):
+                lines.append(f'      %b{i}_{k} = "arith.constant"() <{{value = {k} : i32}}> : () -> i32')
             lines.append('      "air.execute_terminator"() : () -> ()')
             lines.append(f"    }}) : ({types}) -> !air.async.token")
         else:
@@ -85,12 +87,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--events", type=int, required=True, help="number of events in every program")
     ap.add_argument("--data", action="store_true", help="air.executes yield and read i32 values")
+    ap.add_argument("--body-ops", type=int, default=0,
+                    help="without --data, put this many arith.constants in every air.execute body")
     args = ap.parse_args()
     out = sys.stdout
     out.write('"builtin.module"() ({\n')
     count = 0
     for prog in programs(args.events, args.data):
-        out.write(emit(f"p{count}", prog, args.data) + "\n")
+        out.write(emit(f"p{count}", prog, args.data, args.body_ops) + "\n")
         count += 1
     out.write("}) : () -> ()\n")
     print(f"{count} programs of {args.events} event(s)", file=sys.stderr)

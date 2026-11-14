@@ -3,6 +3,7 @@ import Veir.Printer
 import Veir.Air.Rewrite
 import Veir.Air.Instance
 import Veir.Air.Channels
+import Veir.Air.Aie
 
 /-! # `air-veir`: AIR async programs in VeIR
 
@@ -37,11 +38,17 @@ Commands:
                        and order them identically (sameReach, proven sound in
                        Veir.Air.DepGraph); otherwise print an order one allows
                        and the other forbids
+  aie <file>           C6: explore every aie.device (after air-to-aie and
+                       airrt-to-npu; Veir/Air/AIE_SEMANTICS.md): every interleaving
+                       of locks, DMA transfers, cores and the runtime sequence.
+                       Prints a deadlock with a run reaching it, and the distinct
+                       outcomes of host memory; exit 1 if either is wrong
 
 Options:
   --allow-unregistered-dialect   accept operations VeIR does not register (needed for
                                  air.launch, air.herd, memref.alloc, ...)
   --max-orders=<n>               stop enumerating finishing orders after n (default 100000)
+  --max-states=<n>               aie: stop exploring after n states (default 200000)
   --args=<i,j,...>               values of the function's scalar (index, integer) arguments,
                                  in order. `run` uses 0 for missing ones; `races` treats
                                  missing ones as unknown, so the accesses they shape cover
@@ -53,12 +60,14 @@ structure Args where
   files : List String
   allowUnregistered : Bool := false
   maxOrders : Nat := 100000
+  maxStates : Nat := 200000
   scalarArgs : Option (List Int) := none
 
 def parseArgs (args : List String) : Except String Args := do
   let mut positional : List String := []
   let mut allowUnregistered := false
   let mut maxOrders := 100000
+  let mut maxStates := 200000
   let mut scalarArgs : Option (List Int) := none
   for a in args do
     if a == "--allow-unregistered-dialect" then allowUnregistered := true
@@ -66,6 +75,10 @@ def parseArgs (args : List String) : Except String Args := do
       let some n := (a.drop "--max-orders=".length).toString.toNat?
         | throw s!"invalid {a}"
       maxOrders := n
+    else if a.startsWith "--max-states=" then
+      let some n := (a.drop "--max-states=".length).toString.toNat?
+        | throw s!"invalid {a}"
+      maxStates := n
     else if a.startsWith "--args=" then
       let some xs := ((a.drop "--args=".length).toString.splitOn ",").mapM String.toInt?
         | throw s!"invalid {a}"
@@ -73,7 +86,7 @@ def parseArgs (args : List String) : Except String Args := do
     else if a.startsWith "-" then throw s!"unknown option {a}"
     else positional := positional ++ [a]
   match positional with
-  | command :: files => return { command, files, allowUnregistered, maxOrders, scalarArgs }
+  | command :: files => return { command, files, allowUnregistered, maxOrders, maxStates, scalarArgs }
   | [] => throw "expected a command"
 
 /-- The `func.func`s at the top level of a module. -/
@@ -117,10 +130,15 @@ def load (args : Args) (file : String) : IO (WfIRContext OpCode × OperationPtr)
     -- VeIR's verifier refuses `index` operands to arith integer ops, which MLIR allows
     -- (VEIR-003 in ~/air-issues). The model computes on `index` values, so read the program
     -- without VeIR's verifier in that case only, and say so.
-    if (e.splitOn "to have integer type").length > 1 then
+    let isIndex := (e.splitOn "to have integer type").length > 1
+    -- VeIR does not know that unregistered ops such as aie.next_bd may end a block (VEIR-005).
+    let isTerm := (e.splitOn "Expected the last operation of a block to be a terminator").length > 1
+    if isIndex || isTerm then
       match Veir.Input.parseSourceString content file args.allowUnregistered (verifyAfterParse := false) with
       | .ok (ctx, top, _) =>
-        IO.eprintln s!"warning: {file}: VeIR's verifier rejects arith on index (VEIR-003); read without it"
+        let why := if isIndex then "rejects arith on index (VEIR-003)"
+          else "requires a registered terminator at the end of each block (VEIR-005)"
+        IO.eprintln s!"warning: {file}: VeIR's verifier {why}; read without it"
         return (ctx, top)
       | .error _ => throw (IO.userError e)
     else throw (IO.userError e)
@@ -378,6 +396,38 @@ def cmdCheck (args : Args) (before after : String) : IO Bool := do
         IO.println s!"  the first allows finishing order {o}, which the second forbids"
   return ok
 
+/-- C6: explore every `aie.device` (AIE_SEMANTICS.md, `Veir.Air.Aie`). -/
+def cmdAie (args : Args) (file : String) : IO Bool := do
+  let (ctx, top) ← load args file
+  let mut ok := true
+  let some mb := (top.getRegion! ctx.raw 0).getFirstBlock! ctx.raw | return true
+  for d in blockOps ctx.raw mb do
+    if opName ctx.raw d != "aie.device" then continue
+    let name := match findProp (unregProps ctx.raw d) "sym_name" with
+      | some (.stringAttr s) => String.fromUTF8! s.value
+      | _ => "?"
+    match Aie.extract ctx.raw d with
+    | .error e =>
+      IO.println s!"@{name}: refused: {e}"
+      ok := false
+    | .ok m =>
+      let r := m.explore args.maxStates
+      IO.println s!"@{name}: {m.chans.size} DMA channel(s), {m.cores.size} core(s), {m.locks.size} lock(s), \
+        {m.tasks.size} task(s); {r.states} state(s){if r.complete then "" else " (bound reached)"}"
+      match r.deadlock with
+      | some tr =>
+        ok := false
+        IO.println s!"  DEADLOCK: the runtime sequence cannot finish; a run reaching it ({tr.size} step(s)):"
+        for l in tr.toList.drop (tr.size - min tr.size 12) do IO.println s!"    {l}"
+      | none => IO.println "  no deadlock"
+      IO.println s!"  {r.outcomes.size} distinct outcome(s) of host memory"
+      for o in r.outcomes.toList.take 2 do
+        let parts := (m.hostArgs.toList.zip o.toList).map fun (b, vs) =>
+          s!"{m.buffers[b]!.1} = [{", ".intercalate (vs.toList.take 8 |>.map showVal)}{if vs.size > 8 then ", ..." else ""}]"
+        IO.println s!"    {", ".intercalate parts}"
+      if r.outcomes.size > 1 then ok := false
+  return ok
+
 def main (argv : List String) : IO UInt32 := do
   if argv.contains "--help" || argv.contains "-h" then
     IO.println usage
@@ -394,6 +444,7 @@ def main (argv : List String) : IO UInt32 := do
       | "reduce", [f] => cmdReduce args f; return 0
       | "races", [f] => return if ← cmdRaces args f then 0 else 1
       | "check", [a, b] => return if ← cmdCheck args a b then 0 else 1
+      | "aie", [f] => return if ← cmdAie args f then 0 else 1
       | _, _ =>
         IO.eprintln s!"error: bad command line\n\n{usage}"
         return 2

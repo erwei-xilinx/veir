@@ -27,6 +27,8 @@ Each claim is listed at its own level; they do not imply one another.
 | The `air-dependency-canonicalize` output passes the checker | Yes, on every AIR test file in the subset (4 of 4), and on the fixtures. Only for those instances. |
 | Layer 2: events' memory footprints, races, DMA semantics | Executable (`MemProgram.lean`); the race checker it uses is proven exact (`raceFreeB_iff`), and race-free programs are proven deterministic for framed effects (`deterministic`). That `finishMem` and `footprints` are framed is **not proven**; it is checked exhaustively (`check_dependency.py`: every race-free program has one outcome). |
 | `air-dependency` makes programs race-free | **No**: every input of `check_dependency.py` is race-free (synchronous DMAs, D24), and `air-dependency` turns 30 of 196 (2 DMAs) and 922 of 2,744 (3 DMAs) of them into racy programs (AIR-007). |
+| Layer 4: channels (rendezvous, element streams, deadlocks) | Executable (`Channels.lean`). Every deadlock verdict carries a stuck set checked by `stuckB`, and every no-deadlock verdict a schedule checked by `scheduleB`; both checkers are proven sound (`no_schedule_of_stuckB`, `scheduleB_sound`). That the AND-graph built from the IR is the right one is **not proven**; it is tested. |
+| `air-dependency` keeps channel programs deadlock-free | **No**: of the 200 synchronous, deadlock-free channel programs of `check_channels.py`, `air-dependency` makes 93 deadlock (AIR-011). 48 of them need no edge at all (D36(a)); 45 have no correct all-async form. |
 | `air-dependency-canonicalize` is correct | **Not claimed.** The C++ pass works on a larger graph (DMA, channels, hierarchy, loops) than the one modelled here. |
 | The extraction from IR matches the model | **Not proven.** It is tested. `Program.steps_reduce_iff` is about the extracted `Program`, not about the IR. |
 | `air-veir reduce` is correct | **Not proven.** It is checked per run: `sameReach` before printing, then re-parse and re-verify by VeIR and `air-opt`. |
@@ -48,7 +50,7 @@ Every command here was run as written. Paths are relative to the VeIR root.
 ```bash
 lake build                        # builds Veir, veir-opt, air-veir, ...
 lake test                         # Lean unit tests, including UnitTest/Air.lean
-uv run lit Test/Air -v            # the AIR lit tests (7)
+uv run lit Test/Air -v            # the AIR lit tests (12)
 uv run lit Test/ -q               # all of VeIR's lit tests
 AIR_OPT=/path/to/air-opt Test/Air/air-integration.sh            # checks that need air-opt
 AIR_OPT=/path/to/air-opt Test/Air/air-integration.sh --sweep /path/to/mlir-air/mlir/test
@@ -60,6 +62,7 @@ AIR_OPT=/path/to/air-opt Test/Air/air-integration.sh --sweep /path/to/mlir-air/m
 air-opt in.mlir --mlir-print-op-generic --mlir-print-local-scope -o in.generic.mlir
 .lake/build/bin/air-veir graph  in.generic.mlir   # events, edges kept by the reduction, unordered reads
 .lake/build/bin/air-veir run    in.generic.mlir   # values, and agreement across all allowed orders
+.lake/build/bin/air-veir races  in.generic.mlir   # races, bounds, channel errors, deadlock certificates
 .lake/build/bin/air-veir reduce in.generic.mlir > out.mlir
 air-opt out.mlir                                  # AIR re-verifies it
 .lake/build/bin/air-veir check  in.generic.mlir out.mlir
@@ -77,7 +80,9 @@ air-opt in.generic.mlir -air-dependency-canonicalize --mlir-print-op-generic > c
 | Structure verifier | ODS constraints and `ExecuteOp::verify` | `verifyLocalInvariants`, plus the dominance check in `Veir/Verifier` | `Air.verifyLocalInvariants` |
 | Interpreter | — | `Veir/Interpreter/CTreeInterpreter.lean` (CFG); `Arith.interpretOp'` | `Veir/Air/Extract.lean`: `extract`, `Program.finishEvent`, `Program.sem` |
 | The pass | `AIRDependencyCanonicalize` → `dependencyCanonicalizer` (`mlir/lib/Util/Dependency.cpp`) → `DirectedAdjacencyMap::applyTransitiveReduction` | — | `DepGraph.reduce` (`Veir/Air/DepGraph.lean`), `Program.reducedOperands` and `applyReduction` (`Veir/Air/Rewrite.lean`) |
-| Proofs | — | — | `Veir/Air/DepGraph.lean`, `Veir/Air/Events.lean` |
+| Memory, DMA, loops | `air.dma_memcpy_nd`, `scf.for`/`scf.parallel` at host level; `AIRDependency.cpp` | — | `Veir/Air/MemProgram.lean` (decoding), `Veir/Air/Instance.lean` (instantiation, memory semantics, footprints) |
+| Channels | `air.channel`, `air.channel.put`/`get` (`AIR.td`); `AIRDependency.cpp` adds their token edges | — | `Veir/Air/Channels.lean` (streams, AND-graph, transfers, deadlocks) |
+| Proofs | — | — | `Veir/Air/DepGraph.lean`, `Events.lean`, `Pattern.lean`, `Race.lean`, `Determinism.lean`, `Schedule.lean` |
 | Driver and tests | `mlir/test/Dialect/AIR/air_execute.mlir`, `air_wait_async.mlir`, `mlir/test/Transform/AIRDependencyCanonicalization/prune_redundant_edges.mlir` | `Exe/VeirOpt.lean`, lit (`Test/lit.cfg`) | `Exe/AirVeir.lean` (`air-veir`), `Test/Air/`, `UnitTest/Air.lean` |
 
 ## PR #1938, read at `dd35a5cae`
@@ -133,8 +138,9 @@ open, and the ninth of a stack. Its own diff adds `Veir/Interpreter/Netlist.lean
 | `memref.copy`, `linalg.*` and any other op in `air.execute` | unregistered; round-trips | — | opaque values; read/write of whole operand buffers (D22) | footprints |
 | `affine_map<…>`, `affine_set<…>` | verbatim, no meaning | — | — | — |
 | `scf.for`, `scf.parallel` (host level) | unregistered; round-trips | — | instantiated iteration by iteration (D26, D27); bounds must be known (`--args`) | graph and race theorems apply to the instances |
-| `air.launch`, `air.segment`, `air.herd`, `air.channel.*`, `scf.if` | `--allow-unregistered-dialect`; round-trips | none | **refused with a diagnostic** | — |
-| `air.channel` declarations | **refused by VeIR's parser:** `size = [1]` is an untyped integer, and VeIR requires `1 : i64` | — | — | — |
+| `air.channel` declarations | `--allow-unregistered-dialect`; round-trips (after the VEIR-002 fix) | — | bundles of subchannels (D28); `broadcast_shape` (D29) | — |
+| `air.channel.put`/`get`, async and sync | `--allow-unregistered-dialect`; round-trips | — | element streams per subchannel (D34); rendezvous when both ends are async, buffered otherwise (D30); padding (D31); D33 ordering checked; memory ordered by transfers (D36) | deadlock and schedule certificates (`Schedule.lean`); races through `raceFreeB_iff` on the graph with transfer nodes |
+| `air.launch`, `air.segment`, `air.herd`, `scf.if` | `--allow-unregistered-dialect`; round-trips | none | **refused with a diagnostic** | — |
 
 ## Semantics
 
@@ -172,9 +178,9 @@ a stale value. Such a program is wrong (`SEMANTICS.md`, D4), and `air-veir graph
 about any read not ordered by the tokens. `func.return` does not wait for outstanding events (D5).
 
 **Not modelled:**
-- memory: allocation, aliasing, views, effects of `memref.*`;
-- DMA and channels;
-- loops and loop-carried tokens;
+- (layers 2-4 add memory, DMA, host-level loops and channels; see `SEMANTICS.md`)
+- views other than those folded into a DMA pattern;
+- loops whose bounds are not known;
 - spatial scopes (`launch`/`segment`/`herd`) and their instances;
 - resources and timing;
 - host program order, beyond blocking `air.wait_all`;
@@ -183,8 +189,7 @@ about any read not ordered by the tokens. `func.return` does not wait for outsta
 
 ## Theorems
 
-All are in `Veir/Air/DepGraph.lean` and `Veir/Air/Events.lean`, checked by Lean's kernel, with no
-`sorry`. `UnitTest/Air.lean` pins `#print axioms` for each:
+All are in `Veir/Air/*.lean`, checked by Lean's kernel, with no `sorry`. `UnitTest/Air.lean` pins `#print axioms` for each:
 - `propext` and `Quot.sound` for all of them;
 - `Program.steps_reduce_iff` also uses `Classical.choice`, through the IR types in its statement.
 
@@ -212,6 +217,8 @@ None uses `Lean.ofReduceBool` or an axiom of this development.
 | `raceFree_reduce_iff`, `raceFree_of_sameReach` | the transitive reduction, and any rewrite `check` accepts, neither creates nor hides a race | `g.Forward` |
 | `effects_commute` (`Determinism.lean`) | effects framed by non-conflicting footprints commute | `Framed` |
 | `deterministic` | in a race-free program with framed effects, every complete execution ends with the same memory (checklist C3, event level) | `g.Forward`, `Framed`, `RaceFree` |
+| `scheduleB_sound` (`Schedule.lean`) | a checked firing order of the start/finish AND-graph is a complete schedule: the program can run to completion (C2, layer 4) | — |
+| `Stuck.never_fires`, `no_schedule_of_stuckB` | a checked stuck set never fires, so no schedule exists: the program deadlocks | — |
 | `cyclic_simultaneous_drop_unsound` (UnitTest) | on a cycle, deciding edges independently and dropping them together loses reachability | — |
 
 "Same traces" is the strongest notion here. It implies the same finishing orders (linear
@@ -233,6 +240,11 @@ resources or memory are involved. Those are outside the model.
 The theorems assume the effects are framed by the footprints; that the implementation is, is
 checked exhaustively, not proven.
 
+**Layer 4's channel analysis** (`analyzeChannels`: which put feeds which get, the AND-graph's
+edges, transfer nodes, the intra-transfer check of D36(a)) is trusted, and tested
+(`channels.mlir`, `transfers.mlir`, `check_channels.py`). Its verdicts are checked: `scheduleB` or
+`stuckB` must accept the certificate before `air-veir` prints it.
+
 **Checked per run instead of trusted:** the graph that `air-veir reduce` intends to produce
 (`reducedGraph`) is proven correct. That `applyReduction` turns it into IR is not.
 `applyReduction` rewrites operand arrays on a raw `IRContext` without maintaining use-lists. Proving that well-formed would need new VeIR invariants
@@ -246,8 +258,8 @@ for operand removal, which are not in VeIR yet. Its output is only printed, and 
 **Lean.** `lake test` passes, including `UnitTest/Air.lean`.
 
 **lit.**
-- `uv run lit Test/Air`: 7 of 7 pass.
-- `uv run lit Test/`: 1593 passed, 8 unsupported, 2 expectedly failed, 0 failed.
+- `uv run lit Test/Air`: 12 of 12 pass.
+- `uv run lit Test/`: 1598 passed, 8 unsupported, 2 expectedly failed, 0 failed.
 
 **AIR integration** (`air-integration.sh`, 2026-11-13):
 - The three fixtures round-trip identically after `air-opt` normalisation, including `id`
@@ -380,6 +392,16 @@ Status of the loop layer (layer 3, host-level `scf.for` / `scf.parallel`, by ins
 | C3 | `deterministic` applies to the instances. Example: a ping-pong loop (252 schedules) computes one outcome. |
 | C5 | `check_loops.py`: across 976 loop programs, `air-dependency` leaves 324 racy (all races within one iteration, from offsets on `%i`: AIR-007), and `air-dependency-canonicalize` never changes the instantiated ordering. `air-veir reduce` refuses loops; `check` compares instantiated graphs. |
 
+Status of the channel layer (layer 4):
+
+| # | Status |
+| --- | --- |
+| C1 | Errors reported statically: D33 order races, a put no get drains, a get no put feeds, a broadcast with too few gets. |
+| C2 | **Real now:** an async put and get have no buffer (D30), so a program can deadlock. Each verdict is a certificate checked by a proven-sound checker (`scheduleB_sound`, `no_schedule_of_stuckB`). |
+| C3 | Races include the transfers themselves, as virtual nodes (D36(b)), and the order within a transfer (D36(a)). `check_channels.py`: 0 of 200 inputs racy. |
+| C5 | `check_channels.py`: `air-dependency` makes 93 of 200 deadlock-free programs deadlock; `air-dependency-canonicalize` keeps all 93. The edge it adds between a put and the get it feeds is the cause (AIR-011). With only the edges D33 requires, 48 of the 93 are correct; the other 45 race, and need a buffered (sync) end. |
+| C6 | Not started. |
+
 ### What each AIR concept needs
 
 What each AIR concept needs before it can be given a meaning:
@@ -388,7 +410,7 @@ What each AIR concept needs before it can be given a meaning:
 | --- | --- |
 | Memory | allocation identity; aliasing and views; shape, stride and offset; memory space as accessibility (`memref<…, 1>` L2, `2` L1); lifetimes bounded by `memref.dealloc` events |
 | DMA | `dma_memcpy_nd` as an event that reads and writes access-pattern regions between start and finish; a buffer must not be touched by an unordered event while a DMA on it is outstanding (the obligation the token edges discharge) |
-| Channel | `put`/`get` matching per channel *and index*; FIFO order; capacity and flow control (a `put` may block); completion; buffer reuse after the token. A message is data, and its arrival is not an async-token completion. Check `air.channel` semantics against `AIRToAIE` before treating a channel as a FIFO of values. |
+| Channel (done, layer 4) | `put`/`get` matching per channel *and index*; FIFO order; capacity and flow control (a `put` may block); completion; buffer reuse after the token. A message is data, and its arrival is not an async-token completion. Check `air.channel` semantics against `AIRToAIE` before treating a channel as a FIFO of values. |
 | Spatial scopes | each `herd`/`segment`/`launch` instance as its own events, with private (L1) and shared (L2) allocations. `launch` instances may be parallel or sequential, `segment` instances are co-resident, `herd` tiles are concurrent. Keep the logical mapping separate from physical placement. |
 | Resources | to model `air.segment` co-residency and progress, which matter once channels can block |
 
@@ -398,8 +420,8 @@ Concrete next tasks:
    check that `applyReduction` wrote what `reducedGraph` says.
 2. Prove `extract` produces forward graphs. Or keep the run-time `forwardB`, which `sameReach_sound`
    already covers.
-3. Model `scf.for` with loop-carried tokens by unrolling bounded loops, a common
+3. ~~Model `scf.for` with loop-carried tokens~~ Done for host-level loops with known bounds (layer 3). Model `scf.for` with loop-carried tokens by unrolling bounded loops, a common
    `air-dependency-canonicalize` input.
-4. Add DMA events with region-level read/write effects, and prove token edges cover every
+4. ~~Add DMA events~~ Done (layer 2). Add DMA events with region-level read/write effects, and prove token edges cover every
    conflicting pair. This is where the checker becomes a data-race checker for AIR passes.
-5. Accept untyped integer literals as `i64`, as MLIR does; it unlocks `air.channel` import.
+5. ~~Accept untyped integer literals~~ Done for list elements (VEIR-002). Accept untyped integer literals as `i64`, as MLIR does; it unlocks `air.channel` import.

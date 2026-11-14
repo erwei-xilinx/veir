@@ -35,15 +35,15 @@ is wrong; the replacement is pending or recorded).
 | D25 | A synchronous op waits only for its own dependencies, not for earlier async ops it does not name | ✅ 2026-11-13 | `extractMem` | — |
 | D26 | `scf.for` iterations are issued in program order; only the tokens `iter_args` carry order iteration N+1 after N | from `docs/AIRComputeModel.md` ("an op that does not depend on `%t_prev` may begin before iteration N's `scf.yield` fires"); consistent with D3, D25 | `Veir.Air.Instance.forLoop` | — |
 | D27 | `scf.parallel` iterations are all concurrent; the result is the reduction of their values (`air.wait_all` joins) | from `docs/AIRComputeModel.md` ("all instances concurrent, tokens reduced") | `Veir.Air.Instance.parallelLoop` | — |
-| D28 | A channel's `size` is a bundle of independent subchannels (any rank); each subchannel (one index) is its own FIFO | ✅ 2026-11-14 | layer 4 | — |
-| D29 | A channel is a spatial hardware stream between tiles. Without `broadcast_shape` it is one-to-one; with it, every put is consumed by N gets at different tiles, simultaneously. With `dest`, a packet flow routes each put to one destination chosen at run time | ✅ 2026-11-14 | layer 4 | — |
-| D30 | A transfer is buffered (unbounded) if either of its ends is sync, and a rendezvous (no buffer, so backpressure deadlock is possible) if both are async | ✅ 2026-11-14 | layer 4 | — |
-| D31 | Padding: a put inserts zeros into the stream (as D20); a get writes zeros to the padded positions of its destination and takes the rest from the stream | ✅ 2026-11-14 | layer 4 | — |
-| D32 | All channel types (`npu_dma_stream`, `npu_dma_packet`, `npu_cascade`, `npu_mmio`, `gpu_*`) have this semantics | ✅ 2026-11-14 | layer 4 | — |
-| D33 | Two endpoints on the same subchannel, in the same direction, with no token path between them, are an error (a channel FIFO-order race) | ✅ 2026-11-14 | layer 4 | — |
-| D34 | A subchannel is a stream of elements: puts and gets need not pair one to one; the i-th element put is the i-th element got. Elements no get takes leave an async put stuck (backpressure) | ✅ 2026-11-14 | layer 4 | — |
-| D35 | A sync `channel.put`/`channel.get` is a blocking event (as D24) | ✅ 2026-11-14 | layer 4 | — |
-| D36 | What a transfer orders, for memory: (a) within the transfer, a put's read of element m and its get's write of element m; (b) a get's completion orders everything after it after the feeding put's reads of the elements it received | (a) ❓ pending; (b) ✅ 2026-11-14 ("这是dependency canonicalization的transitive reduction能成立的原因") | `Veir.Air.Channels.raceEdges` | — |
+| D28 | A channel's `size` is a bundle of independent subchannels (any rank); each subchannel (one index) is its own FIFO | ✅ 2026-11-13 | layer 4 | — |
+| D29 | A channel is a spatial hardware stream between tiles. Without `broadcast_shape` it is one-to-one; with it, every put is consumed by N gets at different tiles, simultaneously. With `dest`, a packet flow routes each put to one destination chosen at run time | ✅ 2026-11-13 | layer 4 | — |
+| D30 | A transfer is buffered (unbounded) if either of its ends is sync, and a rendezvous (no buffer, so backpressure deadlock is possible) if both are async | ✅ 2026-11-13 | layer 4 | — |
+| D31 | Padding: a put inserts zeros into the stream (as D20); a get writes zeros to the padded positions of its destination and takes the rest from the stream | ✅ 2026-11-13 | layer 4 | — |
+| D32 | All channel types (`npu_dma_stream`, `npu_dma_packet`, `npu_cascade`, `npu_mmio`, `gpu_*`) have this semantics | ✅ 2026-11-13 | layer 4 | — |
+| D33 | Two endpoints on the same subchannel, in the same direction, with no token path between them, are an error (a channel FIFO-order race) | ✅ 2026-11-13 | layer 4 | — |
+| D34 | A subchannel is a stream of elements: puts and gets need not pair one to one; the i-th element put is the i-th element got. Elements no get takes leave an async put stuck (backpressure) | ✅ 2026-11-13 | layer 4 | — |
+| D35 | A sync `channel.put`/`channel.get` is a blocking event (as D24) | ✅ 2026-11-13 | layer 4 | — |
+| D36 | What a transfer orders, for memory: (a) within the transfer, a location read at stream step i and written at step j is defined iff i ≤ j; (b) a get's completion orders everything after it after the feeding put's reads of the elements it received | (a) ✅ 2026-11-13 (AIR-011); (b) ✅ 2026-11-13 ("这是dependency canonicalization的transitive reduction能成立的原因") | `Veir.Air.Channels.raceEdges` | — |
 
 ## D1. Blocking `air.wait_all` ✅
 
@@ -338,7 +338,7 @@ iterations is added.
 
 ## D28–D32. Channels (layer 4)
 
-Confirmed 2026-11-14:
+Confirmed 2026-11-13:
 - **D28.** `air.channel @C [4, 4]` is a bundle of 16 independent subchannels. `size` is the
   bundle's shape, not a capacity. Each subchannel is its own ordered stream.
 - **D29.** A channel is a spatial, hardware, tile-to-tile stream:
@@ -366,6 +366,25 @@ Confirmed 2026-11-14:
 - **D35.** A sync put or get is a blocking event (D24): it orders everything after it in program
   order.
 - **D32.** Every channel type shares this semantics; none is refused for being of another type.
+
+- **D36.** What a transfer orders, for memory:
+  - (a) Within one transfer, a location read at stream step i and written at step j is well
+    defined iff i ≤ j: the write at step j carries the value read at step j, and reads happen in
+    stream order. A location read after it is written (i > j) is a race.
+  - (b) A get's completion orders everything after it after the feeding put's reads of the
+    elements it received: "get 完成，put 已经读完了它供给的那些元素，所以这样写是安全的。这是
+    dependency canonicalization的transitive reduction的能成立的原因".
+
+  Examples, `put async @C (%x[0..2))` and `get async @C (%x[k..k+2))` with no token between them:
+  - `same_place` (k = 0): every element is read and written at the same step; race-free, x is
+    unchanged.
+  - `shift_down` (put reads x[1..3), get writes x[0..2)): x[1] is read at step 0, written at step
+    1; race-free.
+  - `shift_up` (put reads x[0..2), get writes x[1..3)): x[1] is written at step 0 and read at
+    step 1; a race.
+
+  `air-dependency` instead adds a token edge between such a put and get, which deadlocks the
+  rendezvous of D30 (AIR-011).
 
 `docs/AIRComputeModel.md`'s `depth` attribute (default 1) does not exist, and contradicts D30
 (AIR-010).

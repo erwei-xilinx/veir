@@ -1,6 +1,7 @@
 import Veir.Air.Extract
 import Veir.Air.Determinism
 import Veir.Air.Pattern
+import Veir.Air.Schedule
 
 /-! Tests for the AIR event-graph model.
 
@@ -174,3 +175,23 @@ info: 'Veir.Air.foldAsAIR_wrong' does not depend on any axioms
 -/
 #guard_msgs in
 #print axioms foldAsAIR_wrong
+
+-- Layer 4: a schedule certificate and a deadlock certificate, each checked.
+#guard scheduleB ⟨#[[], [0], [0, 1]]⟩ [0, 1, 2]
+#guard !scheduleB ⟨#[[], [0], [0, 1]]⟩ [1, 0, 2]
+-- A rendezvous with a token edge from the put to the get: nodes are start/finish of the put
+-- (0, 1) and of the get (2, 3). F(P) waits for S(G), S(G) waits for F(P): stuck.
+#guard stuckB ⟨#[[], [0, 2], [1], [2]]⟩ [1, 2]
+#guard !stuckB ⟨#[[], [0, 2], [1], [2]]⟩ [0]
+
+/--
+info: 'Veir.Air.DepGraph.scheduleB_sound' depends on axioms: [propext, Quot.sound]
+-/
+#guard_msgs in
+#print axioms scheduleB_sound
+
+/--
+info: 'Veir.Air.DepGraph.no_schedule_of_stuckB' depends on axioms: [propext, Quot.sound]
+-/
+#guard_msgs in
+#print axioms no_schedule_of_stuckB

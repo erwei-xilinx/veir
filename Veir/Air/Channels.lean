@@ -93,10 +93,15 @@ structure ChanAnalysis where
   /-- Start/finish AND-graph: node `2e` starts event `e`, `2e + 1` finishes it; the last node
   never fires. -/
   andGraph : DepGraph
-  /-- Orderings channels add for races: `u` happens before `v`. -/
+  /-- Orderings channels add for races: `u` happens before `v`. Nodes `≥ n` (the number of events)
+  are the transfer events of `xfers`, in order. -/
   raceEdges : List (Nat × Nat)
   /-- For each get, its elements' sources. -/
   transfers : Std.HashMap Nat (Array Transfer)
+  /-- The transfer events: a put reading the elements one get receives (D36). -/
+  xfers : Array (Nat × Nat) := #[]
+  /-- Problems inside one transfer: a location read after it may already be written (D36(a)). -/
+  xferIssues : List String := []
 
 /-- The endpoint of a channel event, from what is known before running. -/
 def IProgram.endpoint (ip : IProgram) (v : Nat) : Except String (Option Endpoint) := do
@@ -156,6 +161,8 @@ def IProgram.analyzeChannels (ip : IProgram) : Except String ChanAnalysis := do
     preds := preds.set! (2 * v + 1) [2 * v]
   preds := preds.set! never [never]
   let mut raceEdges : List (Nat × Nat) := []
+  let mut xfers : Array (Nat × Nat) := #[]
+  let mut xferIssues : List String := []
   let mut transfers : Std.HashMap Nat (Array Transfer) := {}
   -- Streams, one per (channel, subchannel) that a get reads or a put feeds.
   let slots := (list.flatMap fun ep => ep.feeds.map (ep.chan, ·)).foldl
@@ -180,12 +187,33 @@ def IProgram.analyzeChannels (ip : IProgram) : Except String ChanAnalysis := do
           -- They share elements: a transfer between them.
           if P.sync || G.sync then
             preds := preds.modify (2 * G.event + 1) (· ++ [2 * P.event + 1])
-            raceEdges := raceEdges ++ [(P.event, G.event)]
           else
             preds := preds.modify (2 * G.event + 1) (· ++ [2 * P.event])
             preds := preds.modify (2 * P.event + 1) (· ++ [2 * G.event])
-            let pe := p.events[P.event]!
-            raceEdges := raceEdges ++ ((pe.operandEvents.toList ++ pe.implicitDeps).map (·, G.event))
+          -- The transfer event: P's reads of what G receives. It starts after P's predecessors
+          -- and is over before G completes (D36(b)) and before P completes.
+          let t := n + xfers.size
+          xfers := xfers.push (P.event, G.event)
+          let pEv := p.events[P.event]!
+          raceEdges := raceEdges ++ ((pEv.operandEvents.toList ++ pEv.implicitDeps).map (·, t)) ++
+            [(t, G.event), (t, P.event)]
+          if P.sync || G.sync then raceEdges := raceEdges ++ [(P.event, G.event)]
+          -- D36(a): within the transfer, a location read at stream step i and written at step j
+          -- is well defined iff i ≤ j. Only when the put and the get can overlap: if tokens or a
+          -- blocking op order the put before the get, every read precedes every write.
+          if P.buf == G.buf && !g.reachB P.event G.event then
+            let realPos := (G.dst.filter (!·.2)).map (·.1)
+            let mut writeStep : Std.HashMap Int Nat := {}
+            for q in realPos, k in [0:realPos.length] do
+              if !writeStep.contains q then writeStep := writeStep.insert q (gs + k)
+            for (q, isPad) in G.dst do
+              if isPad && !writeStep.contains q then writeStep := writeStep.insert q gs
+            for m in [max ps gs : min pe ge] do
+              if let some (some q) := P.stream[m - ps]? then
+                if let some j := writeStep[q]? then
+                  if m > j then
+                    xferIssues := xferIssues ++ [s!"race inside the transfer from event {P.event} to event {G.event} on @{chan}{slot}: {ip.buffers[P.buf]!.name} element {q} is read at stream step {m}, after it may already be written at step {j} (D36(a))"]
+                    break
           let mut ts := transfers.getD G.event #[]
           for m in [max ps gs : min pe ge] do
             ts := ts.push { put := P.event, putIdx := m - ps, get := G.event, getIdx := m - gs }
@@ -204,7 +232,8 @@ def IProgram.analyzeChannels (ip : IProgram) : Except String ChanAnalysis := do
         if ge > pstart then
           preds := preds.modify (2 * G.event + 1) (· ++ [never])
           errors := errors ++ [s!"@{chan}{slot}: event {G.event}'s get waits for {ge - max gs pstart} element(s) no put provides"]
-  return { endpoints := eps, errors, warnings, andGraph := ⟨preds⟩, raceEdges, transfers }
+  return { endpoints := eps, errors, warnings, andGraph := ⟨preds⟩, raceEdges, transfers,
+           xfers, xferIssues }
 
 /-! ### Deadlock -/
 
@@ -232,30 +261,47 @@ race checker needs), with the renumbering. `none` if it has a cycle. -/
 def IProgram.raceGraph (ip : IProgram) (ca : ChanAnalysis) : Option (DepGraph × Array Nat) := do
   let g := ip.prog.graph
   let n := g.size
-  let mut preds := g.preds
+  let total := n + ca.xfers.size
+  let mut preds : Array (List Nat) := g.preds ++ Array.replicate ca.xfers.size []
   for (u, v) in ca.raceEdges do
-    if v < n then preds := preds.modify v (· ++ [u])
+    if v < total then preds := preds.modify v (· ++ [u])
   let g2 : DepGraph := ⟨preds⟩
   let .inl order := DepGraph.kahn g2 | none
   -- `pos[v]` is v's new number.
-  let mut pos : Array Nat := Array.replicate n 0
+  let mut pos : Array Nat := Array.replicate total 0
   for v in order, i in [0:order.length] do
     pos := pos.set! v i
-  let mut renum : Array (List Nat) := Array.replicate n []
-  for v in [0:n] do
+  let mut renum : Array (List Nat) := Array.replicate total []
+  for v in [0:total] do
     renum := renum.set! pos[v]! ((g2.predsOf v).map (pos[·]!))
   let g3 : DepGraph := ⟨renum⟩
   if !g3.forwardB then none
   return (g3, pos)
 
-/-- The footprints of channel endpoints: a put reads its source, a get writes its destination
-(padding included). -/
-def ChanAnalysis.footprint (ca : ChanAnalysis) (v : Nat) : List Access :=
-  match ca.endpoints[v]? with
-  | none => []
-  | some ep =>
-    if ep.isPut then [⟨ep.buf, .read, ep.stream.filterMap id⟩]
-    else [⟨ep.buf, .write, ep.dst.map (·.1)⟩]
+/-- The footprints channels contribute, for events and transfer events alike (node `≥ n` is
+transfer `node - n`):
+- a put reads the elements no get receives;
+- a transfer reads the elements its get receives;
+- a get writes its destination (padding included). -/
+def ChanAnalysis.footprint (ca : ChanAnalysis) (n : Nat) (node : Nat) : List Access :=
+  if node ≥ n then
+    match ca.xfers[node - n]? with
+    | none => []
+    | some (P, G) =>
+      match ca.endpoints[P]? with
+      | none => []
+      | some ep =>
+        let idxs := ((ca.transfers.getD G #[]).filter (·.put == P)).map (·.putIdx)
+        [⟨ep.buf, .read, idxs.toList.filterMap fun i => ep.stream[i]?.join⟩]
+  else
+    match ca.endpoints[node]? with
+    | none => []
+    | some ep =>
+      if ep.isPut then
+        let delivered := (ca.transfers.toList.flatMap fun (_, ts) => ts.toList.filter (·.put == node)).map (·.putIdx)
+        let rest := ep.stream.zipIdx.filterMap fun (x, i) => if delivered.contains i then none else x
+        [⟨ep.buf, .read, rest⟩]
+      else [⟨ep.buf, .write, ep.dst.map (·.1)⟩]
 
 /-! ### Running -/
 

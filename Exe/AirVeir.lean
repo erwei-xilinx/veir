@@ -245,33 +245,46 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
         let evs := (stuck.filter (· < 2 * p.events.size)).map fun node =>
           s!"{if node % 2 == 0 then "start" else "finish"} of {eventAt (node / 2)}"
         chanLines := chanLines ++ [s!"  DEADLOCK: no schedule exists; stuck (checked by stuckB): {", ".intercalate evs}"]
-      let fps := (List.range p.events.size).toArray.map fun v => fps0[v]! ++ ca.footprint v
+      chanLines := chanLines ++ ca.xferIssues.map (s!"  " ++ ·)
+      let n := p.events.size
+      let total := n + ca.xfers.size
+      let fps := (List.range total).toArray.map fun v =>
+        (if v < n then fps0[v]! else []) ++ ca.footprint n v
+      -- A node's name: an event, or a transfer (`node ≥ n`).
+      let nodeAt (v : Nat) : String :=
+        if v < n then eventAt v
+        else match ca.xfers[v - n]? with
+          | some (P, G) => s!"the transfer from {eventAt P} to event {G}"
+          | none => s!"node {v}"
       match ip.raceGraph ca with
       | none => chanLines := chanLines ++ ["  races not checked: the orderings form a cycle"]
       | some (g3, pos) =>
-        let mut inv : Array Nat := Array.replicate p.events.size 0
-        for v in [0:p.events.size] do inv := inv.set! pos[v]! v
+        let mut inv : Array Nat := Array.replicate total 0
+        for v in [0:total] do inv := inv.set! pos[v]! v
         let fp : Footprint := fun i => fps[inv[i]!]?.getD []
-        reports := (races g3 fp).filterMap fun (i, j) => do
-          for a in fp i do
-            for b in fp j do
-              if a.conflictsB b then
-                let bs : Std.HashSet Int := Std.HashSet.ofList b.elems
-                if let some x := a.elems.find? bs.contains then
-                  let kind := match a.kind, b.kind with
-                    | .write, .read => "RAW" | .read, .write => "WAR" | _, _ => "WAW"
-                  let (u, v) := if inv[i]! < inv[j]! then (inv[i]!, inv[j]!) else (inv[j]!, inv[i]!)
-                  return { first := u, second := v, kind, buffer := ip.buffers[a.buf]!.name, element := x }
-          none
+        for (i, j) in races g3 fp do
+          let (u, v) := if inv[i]! < inv[j]! then (inv[i]!, inv[j]!) else (inv[j]!, inv[i]!)
+          let witness := (fp i).findSome? fun a => (fp j).findSome? fun b =>
+            if a.conflictsB b then
+              let bs : Std.HashSet Int := Std.HashSet.ofList b.elems
+              (a.elems.find? bs.contains).map fun x =>
+                let kind := match a.kind, b.kind with
+                  | .write, .read => "RAW" | .read, .write => "WAR" | _, _ => "WAW"
+                (kind, ip.buffers[a.buf]!.name, x)
+            else none
+          if let some (kind, buffer, x) := witness then
+            chanLines := chanLines ++ [s!"  race: {kind} on {buffer} element {x} between {nodeAt u} and {nodeAt v}, with no token path between them"]
+    let raceCount := reports.length + (chanLines.filter (·.startsWith "  race")).length
     IO.println s!"@{name}: {p.events.size} event(s), {ip.buffers.size} buffer(s), \
-      {reports.length} race(s), {issues.size} problem(s) inside single events"
+      {raceCount} race(s), {issues.size} problem(s) inside single events"
     for l in chanLines do IO.println l
     for r in reports do
       IO.println s!"  race: {r.kind} on {r.buffer} element {r.element} between {eventAt r.first} and \
         {eventAt r.second}, with no token path between them"
     for i in issues do
       IO.println s!"  event {i.event}{pathStr ip.ctxs[i.event]!.path}: {i.msg}"
-    let chanBad := chanLines.any fun l => l.startsWith "  error" || l.startsWith "  DEADLOCK" || l.startsWith "  internal" || l.startsWith "  races not"
+    let chanBad := chanLines.any fun l => l.startsWith "  error" || l.startsWith "  DEADLOCK" ||
+      l.startsWith "  internal" || l.startsWith "  races not" || l.startsWith "  race"
     if !reports.isEmpty || !issues.isEmpty || chanBad then clean := false
   return clean
 

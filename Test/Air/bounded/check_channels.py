@@ -50,6 +50,22 @@ def describe(prog):
     return "; ".join(f"{k}{n}({b})" for k, n, b in prog)
 
 
+def emit_ideal(name, prog):
+    """The async program D33 asks for and no more: puts chained, gets chained, no token
+    dependency between a put and a get (D30: one would deadlock a rendezvous)."""
+    L = [f"  func.func @{name}(%a : memref<4xi32>, %x : memref<4xi32>, %y : memref<4xi32>) {{",
+         "    %c0 = arith.constant 0 : index", "    %c1 = arith.constant 1 : index",
+         "    %c2 = arith.constant 2 : index", "    %c4 = arith.constant 4 : index"]
+    last = {"put": None, "get": None}
+    for j, (kind, n, b) in enumerate(prog):
+        dep = f" [{last[kind]}]" if last[kind] else ""
+        L.append(f"    %t{j} = air.channel.{kind} async{dep} @C[] (%{b}[%c0] [%c{n}] [%c1]) : (memref<4xi32>)")
+        last[kind] = f"%t{j}"
+    L.append("    return")
+    L.append("  }")
+    return "\n".join(L)
+
+
 def emit(name, prog):
     L = [f"  func.func @{name}(%a : memref<4xi32>, %x : memref<4xi32>, %y : memref<4xi32>) {{",
          "    %c0 = arith.constant 0 : index", "    %c1 = arith.constant 1 : index",
@@ -89,7 +105,7 @@ def main():
     args = ap.parse_args()
     air_opt = os.environ.get("AIR_OPT") or sys.exit("set AIR_OPT to an air-opt binary")
     progs = [p for k in range(2, args.endpoints + 1) for p in itertools.product(KINDS, repeat=k) if sync_ok(p)]
-    stats = {key: [0, 0, 0, 0] for key in ("input", "air-dependency", "canonicalize")}
+    stats = {key: [0, 0, 0, 0] for key in ("input", "air-dependency", "canonicalize", "D33 only")}
     examples, failures = [], []
     with tempfile.TemporaryDirectory() as tmp:
         for c in range(0, len(progs), args.chunk):
@@ -97,9 +113,16 @@ def main():
             src = os.path.join(tmp, "in.mlir")
             open(src, "w").write("module {\n  air.channel @C []\n" + "\n".join(
                 emit(f"p{c + i}", p) for i, p in enumerate(chunk)) + "\n}\n")
+            ideal = os.path.join(tmp, "ideal.mlir")
+            open(ideal, "w").write("module {\n  air.channel @C []\n" + "\n".join(
+                emit_ideal(f"p{c + i}", p) for i, p in enumerate(chunk)) + "\n}\n")
             for key, passes in (("input", []), ("air-dependency", ["-air-dependency"]),
-                                ("canonicalize", ["-air-dependency", "-air-dependency-canonicalize"])):
-                r = subprocess.run([air_opt, src] + passes + GENERIC, capture_output=True, text=True)
+                                ("canonicalize", ["-air-dependency", "-air-dependency-canonicalize"]),
+                                ("D33 only", None)):
+                if passes is None:
+                    r = subprocess.run([air_opt, ideal] + GENERIC, capture_output=True, text=True)
+                else:
+                    r = subprocess.run([air_opt, src] + passes + GENERIC, capture_output=True, text=True)
                 if r.returncode != 0:
                     failures.append(f"air-opt {passes}: {r.stderr[:200]}")
                     continue
@@ -125,7 +148,7 @@ def main():
         print(e)
     for f in failures[:5]:
         print("FAILURE:", f)
-    bad = any(sum(stats[k]) for k in ("input", "air-dependency", "canonicalize")) or failures
+    bad = any(sum(stats[k]) for k in ("input", "air-dependency", "canonicalize", "D33 only")) or failures
     sys.exit(1 if bad else 0)
 
 

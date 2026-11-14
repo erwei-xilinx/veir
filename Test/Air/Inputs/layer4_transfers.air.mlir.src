@@ -1,0 +1,50 @@
+// Layer-4 cases: memory ordered by a transfer itself (SEMANTICS.md D36), in AIR's custom syntax.
+module {
+  air.channel @C []
+
+  // D36(a): each element is read and written at the same stream step: race-free, x unchanged.
+  func.func @same_place(%x : memref<4xi32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %p = air.channel.put async @C[] (%x[%c0] [%c2] [%c1]) : (memref<4xi32>)
+    %g = air.channel.get async @C[] (%x[%c0] [%c2] [%c1]) : (memref<4xi32>)
+    return
+  }
+
+  // D36(a): x[1] is read at step 0 and written at step 1: race-free.
+  func.func @shift_down(%x : memref<4xi32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %p = air.channel.put async @C[] (%x[%c1] [%c2] [%c1]) : (memref<4xi32>)
+    %g = air.channel.get async @C[] (%x[%c0] [%c2] [%c1]) : (memref<4xi32>)
+    return
+  }
+
+  // D36(a): x[1] is written at step 0 and read at step 1: a race.
+  func.func @shift_up(%x : memref<4xi32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %p = air.channel.put async @C[] (%x[%c0] [%c2] [%c1]) : (memref<4xi32>)
+    %g = air.channel.get async @C[] (%x[%c1] [%c2] [%c1]) : (memref<4xi32>)
+    return
+  }
+
+  // D36(b): writing a after the get that received it is ordered after the put's reads of a.
+  func.func @reuse_after_get(%a : memref<4xi32>, %x : memref<4xi32>, %b : memref<4xi32>) {
+    %p = air.channel.put async @C[] (%a[] [] []) : (memref<4xi32>)
+    %g = air.channel.get async @C[] (%x[] [] []) : (memref<4xi32>)
+    %d = air.dma_memcpy_nd async [%g] (%a[] [] [], %b[] [] []) : (memref<4xi32>, memref<4xi32>)
+    return
+  }
+
+  // Without D36(b), the same write races with the put.
+  func.func @reuse_unordered(%a : memref<4xi32>, %x : memref<4xi32>, %b : memref<4xi32>) {
+    %p = air.channel.put async @C[] (%a[] [] []) : (memref<4xi32>)
+    %g = air.channel.get async @C[] (%x[] [] []) : (memref<4xi32>)
+    %d = air.dma_memcpy_nd async (%a[] [] [], %b[] [] []) : (memref<4xi32>, memref<4xi32>)
+    return
+  }
+}

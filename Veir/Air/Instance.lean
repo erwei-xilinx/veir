@@ -188,11 +188,94 @@ def pushEvent (e : Event) (c : EventCtx) : IM Nat := do
     throw s!"more than {maxEvents} event instances; the program is too large to instantiate"
   let id := st.events.size
   let blocking := e.kind == .waitAllBlocking || e.kind == .dmaBlocking ||
-    e.kind == .putBlocking || e.kind == .getBlocking || e.kind == .scopeEndBlocking
+    e.kind == .putBlocking || e.kind == .getBlocking || e.kind == .scopeEndBlocking ||
+    e.kind == .syncOp
   set { st with events := st.events.push { e with implicitDeps := st.blocking },
                 ctxs := st.ctxs.push { c with launchInst := st.launchInst },
                 blocking := if blocking then st.blocking ++ [id] else st.blocking }
   return id
+
+/-- What a body (an `air.execute`'s, or the single op of a synchronous op, D45) captures:
+the values from outside it, the events whose results it reads, the buffers its allocations
+create, and which of its values name buffers or views. -/
+structure Captured where
+  captured : Std.HashMap ValuePtr HVal
+  dataDeps : List Nat
+  allocBufs : Std.HashMap OperationPtr Nat
+  localBuf : Std.HashMap ValuePtr Nat
+  localView : Std.HashSet ValuePtr
+
+def captureBody (ctx : IRContext OpCode) (what : String) (ops : Array OperationPtr)
+    (env : Std.HashMap ValuePtr HVal) (id : Nat) (path : List Int) : IM Captured := do
+  let mut captured : Std.HashMap ValuePtr HVal := {}
+  let mut dataDeps : List Nat := []
+  let mut inBody : Std.HashSet OperationPtr := {}
+  let mut allocBufs : Std.HashMap OperationPtr Nat := {}
+  let mut localBuf : Std.HashMap ValuePtr Nat := {}
+  let mut localView : Std.HashSet ValuePtr := {}
+  for inner in ops do
+    let iname := opName ctx inner
+    let isOpaque := !(iname.startsWith "arith." || iname.startsWith "memref.") || iname == "memref.copy"
+    if inner.getNumRegions! ctx ≠ 0 && !isOpaque then
+      throw s!"{what}: '{iname}' has a region, which is not supported"
+    -- Values from outside the body, including those an uninterpreted op's regions use.
+    let uses := (inner.getOperands! ctx) ++ (if isOpaque then memrefOperands ctx inner else #[])
+    for v in uses do
+      let isLocal := match v with
+        | .opResult ⟨d, _⟩ => inBody.contains d
+        | .blockArgument _ => false
+      if isLocal || captured.contains v then continue
+      match env[v]? with
+      | some h =>
+        if let .tok _ := h then throw s!"{what}: '{iname}' uses a token as a value"
+        if let .result e _ := h then
+          if !dataDeps.contains e then dataDeps := dataDeps ++ [e]
+        captured := captured.insert v h
+      | none =>
+        -- A value defined inside an uninterpreted op's region needs nothing from outside.
+        if isOpaque then continue
+        match v with
+        | .opResult ⟨d, _⟩ => throw s!"{what}: '{iname}' reads a value of '{opName ctx d}', which is not supported"
+        | .blockArgument _ => throw s!"{what}: '{iname}' reads a block argument the host does not know"
+    if iname == "memref.alloc" then
+      let nb ← newBufferI s!"alloc in event {id}{pathStr path}" ((ValuePtr.opResult ⟨inner, 0⟩).getType! ctx)
+      allocBufs := allocBufs.insert inner nb
+      localBuf := localBuf.insert (.opResult ⟨inner, 0⟩) nb
+    else if viewOps.contains iname then
+      let src := (inner.getOperands! ctx)[0]!
+      let sb := localBuf[src]? <|> (captured[src]? >>= staticBuf (← get))
+      if let some sb := sb then localBuf := localBuf.insert (.opResult ⟨inner, 0⟩) sb
+      localView := localView.insert (.opResult ⟨inner, 0⟩)
+    else if iname == "memref.load" || iname == "memref.store" then
+      let m := (inner.getOperands! ctx)[if iname == "memref.load" then 0 else 1]!
+      if localView.contains m then throw s!"{what}: '{iname}' through a view is not supported"
+    inBody := inBody.insert inner
+  return { captured, dataDeps, allocBufs, localBuf, localView }
+
+/-- An op without `async` that is not otherwise an event (`memref.dealloc`, `linalg.*`,
+`func.call`, ...): a blocking event whose body is the op itself, so the host issues nothing after
+it until it finished (D45). Its results are available once it finished, as an `air.execute`'s. -/
+def syncOpInstance (ctx : IRContext OpCode) (op : OperationPtr)
+    (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
+  let what := s!"'{opName ctx op}'{pathStr path}"
+  let id := (← get).events.size
+  let cap ← captureBody ctx what #[op] env id path
+  let yields := (List.range (op.getNumResults! ctx)).toArray.map fun i => ValuePtr.opResult ⟨op, i⟩
+  let ev : Event := { op := op, kind := .syncOp, operandEvents := #[], implicitDeps := [],
+                      dataDeps := cap.dataDeps, body := #[op], yields := yields }
+  let _ ← pushEvent ev { env := cap.captured, allocBufs := cap.allocBufs, path := path }
+  let mut out := env
+  for y in yields, i in [0:yields.size] do
+    out := out.insert y (.result id (i + 1))
+    if let some b := cap.localBuf[y]? then
+      modify fun st => { st with resultBufs := st.resultBufs.insert (id, i + 1) b }
+    if cap.localView.contains y then
+      modify fun st => { st with viewResults := st.viewResults.insert (id, i + 1) }
+  return out
+
+/-- Ops that are control flow or address arithmetic, not effects: never a synchronous op. -/
+def notSyncOp (name : String) : Bool :=
+  ["scf.", "affine.", "air.", "cf."].any fun (p : String) => name.startsWith p
 
 /-- The hierarchy ops (layer 5). -/
 def hierarchyOps : List String := ["air.launch", "air.segment", "air.herd", "air.rank"]
@@ -235,11 +318,14 @@ partial def walkOps (ctx : IRContext OpCode) (ops : Array OperationPtr)
       else if name == "air.universe.alloc" then
         -- The pool `air.rank` instances are placed in: a resource, not modelled.
         env := env.insert (.opResult ⟨op, 0⟩) (.val .undef)
-      else if name == "memref.dealloc" then
-        throw s!"{what}: a host memref.dealloc is not an event and cannot be ordered; not supported"
-      else if op.getNumRegions! ctx ≠ 0 then
+      else if notSyncOp name then
+        if op.getNumRegions! ctx ≠ 0 then
+          throw s!"{what}: '{name}' opens a nested region or scope, which is not supported"
+        else throw s!"{what}: '{name}' is not supported in a function body"
+      else if op.getNumRegions! ctx ≠ 0 && !name.startsWith "linalg." then
         throw s!"{what}: '{name}' opens a nested region or scope, which is not supported"
-      else throw s!"{what}: '{name}' is not supported in a function body"
+      else env ← syncOpInstance ctx op env path
+    | .func .call => env ← syncOpInstance ctx op env path
     | _ =>
       if op.getNumRegions! ctx ≠ 0 then
         throw s!"{what}: '{name}' opens a nested region or scope, which is not supported"
@@ -258,49 +344,12 @@ partial def executeInstance (ctx : IRContext OpCode) (op : OperationPtr)
     | throw s!"{what}: expected the body to end in air.execute_terminator"
   let body := bops.pop
   let id := (← get).events.size
-  let mut captured : Std.HashMap ValuePtr HVal := {}
-  let mut dataDeps : List Nat := []
-  let mut inBody : Std.HashSet OperationPtr := {}
-  let mut allocBufs : Std.HashMap OperationPtr Nat := {}
-  let mut localBuf : Std.HashMap ValuePtr Nat := {}
-  let mut localView : Std.HashSet ValuePtr := {}
-  for inner in body ++ #[term] do
-    let iname := opName ctx inner
-    let isOpaque := !(iname.startsWith "arith." || iname.startsWith "memref.") || iname == "memref.copy"
-    if inner.getNumRegions! ctx ≠ 0 && !isOpaque then
-      throw s!"{what}: '{iname}' has a region, which is not supported"
-    -- Values from outside the body, including those an uninterpreted op's regions use.
-    let uses := (inner.getOperands! ctx) ++ (if isOpaque then memrefOperands ctx inner else #[])
-    for v in uses do
-      let isLocal := match v with
-        | .opResult ⟨d, _⟩ => inBody.contains d
-        | .blockArgument _ => false
-      if isLocal || captured.contains v then continue
-      match env[v]? with
-      | some h =>
-        if let .tok _ := h then throw s!"{what}: '{iname}' uses a token as a value"
-        if let .result e _ := h then
-          if !dataDeps.contains e then dataDeps := dataDeps ++ [e]
-        captured := captured.insert v h
-      | none =>
-        -- A value defined inside an uninterpreted op's region needs nothing from outside.
-        if isOpaque then continue
-        match v with
-        | .opResult ⟨d, _⟩ => throw s!"{what}: '{iname}' reads a value of '{opName ctx d}', which is not supported"
-        | .blockArgument _ => throw s!"{what}: '{iname}' reads a block argument the host does not know"
-    if iname == "memref.alloc" then
-      let nb ← newBufferI s!"alloc in event {id}{pathStr path}" ((ValuePtr.opResult ⟨inner, 0⟩).getType! ctx)
-      allocBufs := allocBufs.insert inner nb
-      localBuf := localBuf.insert (.opResult ⟨inner, 0⟩) nb
-    else if viewOps.contains iname then
-      let src := (inner.getOperands! ctx)[0]!
-      let sb := localBuf[src]? <|> (captured[src]? >>= staticBuf (← get))
-      if let some sb := sb then localBuf := localBuf.insert (.opResult ⟨inner, 0⟩) sb
-      localView := localView.insert (.opResult ⟨inner, 0⟩)
-    else if iname == "memref.load" || iname == "memref.store" then
-      let m := (inner.getOperands! ctx)[if iname == "memref.load" then 0 else 1]!
-      if localView.contains m then throw s!"{what}: '{iname}' through a view is not supported"
-    inBody := inBody.insert inner
+  let cap ← captureBody ctx what (body ++ #[term]) env id path
+  let captured := cap.captured
+  let dataDeps := cap.dataDeps
+  let allocBufs := cap.allocBufs
+  let localBuf := cap.localBuf
+  let localView := cap.localView
   let yields := term.getOperands! ctx
   let results := op.getResultTypes! ctx
   if yields.size + 1 ≠ results.size then
@@ -797,7 +846,7 @@ def IProgram.finish (ctx : IRContext OpCode) (ip : IProgram) (v : Nat) (s : MSta
   | none => { s with fault := some s!"event {v} does not exist" }
   | some e =>
     match e.kind with
-    | .execute => ip.finishExecute ctx v s
+    | .execute | .syncOp => ip.finishExecute ctx v s
     | .dma | .dmaBlocking => ip.finishDma v s
     | _ => s
 
@@ -864,7 +913,7 @@ def IProgram.footprints (ctx : IRContext OpCode) (ip : IProgram) :
                   if i > j then
                     issues := issues.push ⟨v, s!"race inside air.dma_memcpy_nd on {ip.buffers[sb]!.name}: element {x} is read at step {i}, after it may already be written at step {j} (D21)"⟩
                     break
-    | .execute =>
+    | .execute | .syncOp =>
       let mut vals : Std.HashMap ValuePtr Val := {}
       let mut localBuf : Std.HashMap ValuePtr Nat := {}
       for inner in e.body do
@@ -890,6 +939,9 @@ def IProgram.footprints (ctx : IRContext OpCode) (ip : IProgram) :
           if let some b := c.allocBufs[inner]? then localBuf := localBuf.insert (.opResult ⟨inner, 0⟩) b
         else if viewOps.contains iname then
           if let some b := operands[0]? >>= bufOf then localBuf := localBuf.insert (.opResult ⟨inner, 0⟩) b
+          -- `memref.reshape` reads its shape operand.
+          if iname == "memref.reshape" then
+            if let some b := operands[1]? >>= bufOf then acc := acc ++ [⟨b, .read, whole b⟩]
         else if iname == "memref.dealloc" then
           if let some b := operands[0]? >>= bufOf then acc := acc ++ [⟨b, .write, whole b⟩]
         else if iname == "memref.load" then

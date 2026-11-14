@@ -52,7 +52,7 @@ Every command here was run as written. Paths are relative to the VeIR root.
 ```bash
 lake build                        # builds Veir, veir-opt, air-veir, ...
 lake test                         # Lean unit tests, including UnitTest/Air.lean
-uv run lit Test/Air -v            # the AIR lit tests (13)
+uv run lit Test/Air -v            # the AIR lit tests (14)
 uv run lit Test/ -q               # all of VeIR's lit tests
 AIR_OPT=/path/to/air-opt Test/Air/air-integration.sh            # checks that need air-opt
 AIR_OPT=/path/to/air-opt Test/Air/air-integration.sh --sweep /path/to/mlir-air/mlir/test
@@ -145,6 +145,7 @@ open, and the ninth of a stack. Its own diff adds `Veir/Interpreter/Netlist.lean
 | `air.channel.put`/`get`, async and sync | `--allow-unregistered-dialect`; round-trips | — | element streams per subchannel (D34); rendezvous when both ends are async, buffered otherwise (D30); padding (D31); D33 ordering checked; memory ordered by transfers (D36) | deadlock and schedule certificates (`Schedule.lean`); races through `raceFreeB_iff` on the graph with transfer nodes |
 | `air.launch`, `air.segment` (nested too), `air.herd`, `air.rank` | `--allow-unregistered-dialect`; round-trips | operand segments, block arguments | start event, body per instance (all concurrent; launch instances must not communicate, D37), end event = token (D38); dependencies gate every instance, no result = blocking, blocking inside is per instance (D39); allocs per instance, operands by reference (D40); token operands are the outer events (D42) | via the instantiated graph |
 | `air.universe.alloc` | round-trips | — | a resource; no effect on ordering | — |
+| any other op without `async` (`memref.dealloc`, `memref.load`/`store`/`copy`, `linalg.*`, `func.call`, ...) at host level or in a hierarchy body | round-trips | — | a blocking event whose body is the op (D45), so `air-dependency`'s *input* can be checked too | footprints |
 | `affinity`/`concurrency` lists, `scf.if`, `affine.if`, `affine.apply` at host level | `--allow-unregistered-dialect`; round-trips | none | **refused with a diagnostic** (D44 for the lists) | — |
 
 ## Semantics
@@ -265,8 +266,8 @@ for operand removal, which are not in VeIR yet. Its output is only printed, and 
 **Lean.** `lake test` passes, including `UnitTest/Air.lean`.
 
 **lit.**
-- `uv run lit Test/Air`: 13 of 13 pass.
-- `uv run lit Test/`: 1599 passed, 8 unsupported, 2 expectedly failed, 0 failed.
+- `uv run lit Test/Air`: 14 of 14 pass.
+- `uv run lit Test/`: 1600 passed, 8 unsupported, 2 expectedly failed, 0 failed.
 
 **AIR integration** (`air-integration.sh`, 2026-11-13):
 - The three fixtures round-trip identically after `air-opt` normalisation, including `id`
@@ -416,7 +417,7 @@ Status of the hierarchy layer (layer 5):
 | C1 | `air-verify-hierarchy-locality`, AIR's own race check for herd operands, accepts overlapping per-tile slices (AIR-013, on its positive tests). |
 | C2 | Certified as in layer 4. Under D38 (i), `air-dependency`'s drain rule deadlocks (AIR-012). |
 | C3 | Instances are concurrent, so races between tiles are found (`hierarchy.mlir`). |
-| C5 | `sweep_dependency.py` over the 201 AIR tests with a herd and channels: 73 chunks analysed. 1 deadlocks because of `air-dependency` (AIR-012); 30 are fragments with unpaired channels; 4 racy chunks are test IR (AIR-013, a lowering fixture, and `air.shrinkage`, pending). |
+| C5 | `sweep_dependency.py` analyses each chunk before and after `air-dependency` (D45 makes the input analysable). Over 232 AIR test files (all of `AIRDependency/`, and every test with a herd and channels): 100 functions analysed; 50 ok, 22 problems already in the input, 25 fragments (a sync put nothing gets), and **3 introduced by `air-dependency`**: AIR-012 (drain edge deadlock) and AIR-014 (channel FIFO order lost across a loop, twice). |
 | C6 | Deferred until the whole dialect is covered (below). |
 
 ### Order of work (decided 2026-11-14)

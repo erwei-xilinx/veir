@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """Translation-validate air-dependency on mlir-air's own tests.
 
-Each input file (split at `// -----`) goes through `air-opt -air-dependency`; then `air-veir races`
-reports, per function, deadlocks (with a checked stuck set), races and channel errors. A deadlock in a
-file whose channels are unpaired (a fragment, as many unit tests are) is marked as such; one with
-every channel paired is caused by the dependencies. Files the model does not cover are listed
-with the first reason.
+Each input file is split at `// -----`. Each chunk is analysed by `air-veir races` twice: as written
+(its non-async ops are blocking events, D45) and after `air-opt -air-dependency`. For each
+function the verdict is:
+- `introduced`: the input is fine, and the output deadlocks or races. air-dependency broke it.
+- `inherited`: the input already deadlocks or races (e.g. a fragment whose channels have no
+  partner).
+- `fragment`: the input puts elements nothing gets; buffered, since its puts are sync (D30), so it
+  completes; once async the puts cannot. The input is not a whole program.
+- `ok`: neither.
+- `output only`: the input could not be analysed, so the output's problems cannot be attributed.
+Chunks the model does not cover are listed with the first reason.
 
   AIR_OPT=/path/to/air-opt Test/Air/sweep_dependency.py /path/to/mlir-air/mlir/test/Transform/AIRDependency/*.mlir
 """
@@ -17,45 +23,87 @@ import sys
 import tempfile
 
 AIR_VEIR = ".lake/build/bin/air-veir"
+GENERIC = ["--mlir-print-op-generic", "--mlir-print-local-scope"]
+
+
+def analyse(path):
+    """{function: (deadlock, races, errors)}, or a refusal string."""
+    try:
+        v = subprocess.run([AIR_VEIR, "races", "--allow-unregistered-dialect", path],
+                           capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT"
+    errs = [l for l in v.stderr.splitlines() if not l.startswith("warning")]
+    if errs:
+        return errs[0][:160]
+    out, cur = {}, None
+    for line in v.stdout.splitlines():
+        m = re.match(r"^@(\w+):.*?(\d+) race\(s\)", line)
+        if m:
+            cur = m.group(1)
+            out[cur] = [False, int(m.group(2)), 0, False]
+        elif cur and "DEADLOCK" in line:
+            out[cur][0] = True
+        elif cur and line.startswith("  error"):
+            out[cur][2] += 1
+        elif cur and "are never got" in line:
+            # Elements a sync put buffers and nothing takes: a fragment of a program.
+            out[cur][3] = True
+    return out
+
+
+def chunks(air_opt, f, passes):
+    r = subprocess.run([air_opt, f, "-split-input-file"] + passes + GENERIC, capture_output=True, text=True)
+    if r.returncode:
+        return None
+    return r.stdout.split("// -----")
+
+
+def bad(t):
+    return t[0] or t[1] > 0 or t[2] > 0
 
 
 def main():
     air_opt = os.environ.get("AIR_OPT") or sys.exit("set AIR_OPT to an air-opt binary")
+    totals = {}
     with tempfile.TemporaryDirectory() as tmp:
         for f in sys.argv[1:]:
             base = os.path.basename(f)[:-len(".mlir")]
-            r = subprocess.run([air_opt, f, "-split-input-file", "-air-dependency",
-                                "--mlir-print-op-generic", "--mlir-print-local-scope"],
-                               capture_output=True, text=True)
-            if r.returncode:
+            ins, outs = chunks(air_opt, f, []), chunks(air_opt, f, ["-air-dependency"])
+            if outs is None:
                 print(f"{base}: air-opt failed")
                 continue
-            for k, chunk in enumerate(r.stdout.split("// -----")):
+            for k, chunk in enumerate(outs):
                 if "func.func" not in chunk:
                     continue
-                p = os.path.join(tmp, f"{base}_{k}.mlir")
-                open(p, "w").write(chunk)
                 tag = f"{base}#{k}"
-                try:
-                    v = subprocess.run([AIR_VEIR, "races", "--allow-unregistered-dialect", p],
-                                       capture_output=True, text=True, timeout=300)
-                except subprocess.TimeoutExpired:
-                    print(f"{tag}: TIMEOUT")
+                po, pi = os.path.join(tmp, "out.mlir"), os.path.join(tmp, "in.mlir")
+                open(po, "w").write(chunk)
+                o = analyse(po)
+                if isinstance(o, str):
+                    print(f"{tag}: REFUSED: {o}")
+                    totals["refused"] = totals.get("refused", 0) + 1
                     continue
-                errs = [l for l in v.stderr.splitlines() if not l.startswith("warning")]
-                if errs:
-                    print(f"{tag}: REFUSED: {errs[0][:160]}")
-                    continue
-                funcs = re.findall(r"^@(\w+):.*?(\d+) race\(s\)", v.stdout, re.M)
-                dead = re.findall(r"^@(\w+):(?:(?!^@).)*?DEADLOCK", v.stdout, re.M | re.S)
-                races = sum(int(n) for _, n in funcs)
-                cerr = len(re.findall(r"^  error", v.stdout, re.M))
-                # A put no get drains, or a get no put feeds: the file is a fragment, and deadlocks
-                # by construction.
-                unpaired = len(re.findall(r"no put provides|no get takes", v.stdout))
-                kind = "" if not dead else (" (fragment: unpaired channels)" if unpaired else " (DEPENDENCIES)")
-                print(f"{tag}: functions={len(funcs)} deadlocked={len(dead)}{kind} {dead if dead else ''} "
-                      f"races={races} channel-errors={cerr} unpaired={unpaired}")
+                i = "input not split alike"
+                if ins is not None and len(ins) == len(outs):
+                    open(pi, "w").write(ins[k])
+                    i = analyse(pi)
+                for fn, t in o.items():
+                    if isinstance(i, str) or fn not in i:
+                        verdict = "output only" if bad(t) else "ok"
+                    elif bad(t) and i[fn][3]:
+                        verdict = "fragment"
+                    elif bad(t) and not bad(i[fn]):
+                        verdict = "introduced"
+                    elif bad(i[fn]):
+                        verdict = "inherited"
+                    else:
+                        verdict = "ok"
+                    totals[verdict] = totals.get(verdict, 0) + 1
+                    if verdict != "ok":
+                        why = f" (input refused: {i[:90]})" if isinstance(i, str) and verdict == "output only" else ""
+                        print(f"{tag} @{fn}: {verdict}: deadlock={t[0]} races={t[1]} errors={t[2]}{why}")
+    print("totals:", totals)
 
 
 if __name__ == "__main__":

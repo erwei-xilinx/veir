@@ -156,7 +156,7 @@ def isMemRefType (t : TypeAttr) : Bool := (typeString t).startsWith "memref<"
 /-- The ops that only re-describe a buffer. -/
 def viewOps : List String :=
   ["memref.subview", "memref.expand_shape", "memref.collapse_shape", "memref.cast",
-   "memref.reinterpret_cast", "memref.view", "memref.transpose"]
+   "memref.reinterpret_cast", "memref.view", "memref.transpose", "memref.reshape"]
 
 /-- `INT64_MIN`, MLIR's marker for a dynamic entry of a static array. -/
 def dynamicMarker : Int := -9223372036854775808

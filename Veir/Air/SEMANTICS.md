@@ -45,13 +45,15 @@ is wrong; the replacement is pending or recorded).
 | D35 | A sync `channel.put`/`channel.get` is a blocking event (as D24) | ✅ 2026-11-13 | layer 4 | — |
 | D36 | What a transfer orders, for memory: (a) within the transfer, a location read at stream step i and written at step j is defined iff i ≤ j; (b) a get's completion orders everything after it after the feeding put's reads of the elements it received | (a) ✅ 2026-11-13 (AIR-011); (b) ✅ 2026-11-13 ("这是dependency canonicalization的transitive reduction能成立的原因") | `Veir.Air.Channels.raceEdges` | — |
 | D37 | Instances: `herd` tiles and `segment` instances all run concurrently; `launch` instances may run in parallel or in any sequential order, so instances of one launch must not communicate (a channel between two of them is an error) | ✅ 2026-11-14 | layer 5 | — |
-| D38 | When a hierarchy op's token fires: after every event inside it, in every instance, has finished, including events nothing inside awaits (unlike `func.return`, D5). Conflicts with `channel_drain_hierarchy.mlir` under D30 | ✅ 2026-11-14 (reading (i), "我倾向这个"); `channel_drain_hierarchy.mlir`'s output then deadlocks | layer 5 | — |
+| D38 | When a hierarchy op's token fires: after every event inside it, in every instance, has finished, including events nothing inside awaits (unlike `func.return`, D5). Conflicts with `channel_drain_hierarchy.mlir` under D30 | ✅ 2026-11-14 (reading (i), "我倾向这个"; reconfirmed "坚持(i)" after seeing that NPU erases segment tokens); `channel_drain_hierarchy.mlir`'s output then deadlocks | layer 5 | — |
 | D39 | A hierarchy op's dependencies gate the start of every instance; without a result it is blocking (as D24); a sync op inside an instance blocks only that instance | ✅ 2026-11-14 | layer 5 | — |
 | D40 | `memref.alloc` inside a body is private to each instance (each herd tile has its own L1 buffer); kernel operands are passed by reference (the same buffer as outside) | ✅ 2026-11-14 | layer 5 | — |
 | D41 | A hierarchy op's memory footprint, for races, is the union of the events inside it (precise), not every buffer in its `args` (what `air-dependency` assumes) | ✅ 2026-11-14 | layer 5 | — |
 | D42 | A token passed into a body through `args` is the outer event; inner events listing it wait for it | ✅ 2026-11-14 | layer 5 | — |
 | D43 | `air.rank` follows the same rules as `segment`/`herd` (D37-D42): its instances (ranks, e.g. GPUs) run concurrently | ✅ 2026-11-14 ("和herd/segment的hierarchy的规矩应该一样的") | layer 5 | — |
 | D44 | `affinity`/`concurrency` token lists are refused: not implemented in AIR (D9) | ✅ 2026-11-14 | layer 5 | — |
+| D45 | An op without `async` that is not otherwise an event (`memref.dealloc`, `linalg.*`, `func.call`, `memref.copy`, ... at host level or in a hierarchy body) is a blocking event, in program order, as D24/D35 ("可以，当作阻塞事件") | ✅ 2026-11-14 | layer 5 | — |
+| D46 | `air.shrinkage = true` on an alloc outside a herd: per-PE private copy? | ❓ pending (user asked for examples) | layer 5 | — |
 
 ## D1. Blocking `air.wait_all` ✅
 

@@ -1,0 +1,64 @@
+// Ops without `async` as blocking events in program order (SEMANTICS.md D45), in AIR's custom
+// syntax.
+module {
+  air.channel @C [1, 1]
+  func.func private @kernel(memref<4xi32>)
+
+  // The dealloc is a blocking event; the DMA after it uses the freed buffer: a fault.
+  func.func @use_after_dealloc(%in: memref<4xi32>) {
+    %a = memref.alloc() : memref<4xi32>
+    memref.dealloc %a : memref<4xi32>
+    %d = air.dma_memcpy_nd async (%a[] [] [], %in[] [] []) : (memref<4xi32>, memref<4xi32>)
+    return
+  }
+
+  // A synchronous call blocks the host, so the async DMA after it is ordered after it. No race.
+  func.func @call_then_dma(%a: memref<4xi32>, %b: memref<4xi32>) {
+    func.call @kernel(%a) : (memref<4xi32>) -> ()
+    %d = air.dma_memcpy_nd async (%b[] [] [], %a[] [] []) : (memref<4xi32>, memref<4xi32>)
+    return
+  }
+
+  // An async DMA, then a synchronous call on the same buffer, with no token between them: a race.
+  func.func @dma_then_call(%a: memref<4xi32>, %b: memref<4xi32>) {
+    %d = air.dma_memcpy_nd async (%b[] [] [], %a[] [] []) : (memref<4xi32>, memref<4xi32>)
+    func.call @kernel(%a) : (memref<4xi32>) -> ()
+    return
+  }
+
+  // A synchronous herd body (before air-dependency): the dealloc follows the get in program order.
+  func.func @sync_herd_body(%in: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    air.channel.put @C[] (%in[] [] []) : (memref<4xi32>)
+    air.herd tile (%x, %y) in (%sx=%c1, %sy=%c1) {
+      %a = memref.alloc() : memref<4xi32, 2>
+      air.channel.get @C[] (%a[] [] []) : (memref<4xi32, 2>)
+      memref.dealloc %a : memref<4xi32, 2>
+    }
+    return
+  }
+
+  // mlir-air's emit_lock.mlir (func5), as written: sync puts in program order, one before a loop
+  // and eight in it. air-dependency's output loses the order of the first (AIR-014).
+  func.func @fifo_before_loop(%arg0 : memref<1024xi32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c8 = arith.constant 8 : index
+    air.channel.put @C[] (%arg0[] [] []) : (memref<1024xi32>)
+    scf.for %i = %c0 to %c8 step %c1 {
+      air.channel.put @C[] (%arg0[] [] []) : (memref<1024xi32>)
+    }
+    %alloc = memref.alloc() : memref<1024xi32, 2>
+    air.herd tile(%tx, %ty) in (%sx = %c1, %sy = %c1) args (%arg1=%alloc) : memref<1024xi32, 2> {
+      %k0 = arith.constant 0 : index
+      %k1 = arith.constant 1 : index
+      %k8 = arith.constant 8 : index
+      air.channel.get @C[] (%arg1[] [] []) : (memref<1024xi32, 2>)
+      scf.for %j = %k0 to %k8 step %k1 {
+        air.channel.get @C[] (%arg1[] [] []) : (memref<1024xi32, 2>)
+      }
+    }
+    memref.dealloc %alloc : memref<1024xi32, 2>
+    return
+  }
+}

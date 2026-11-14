@@ -117,6 +117,7 @@ def kindName : EventKind → String
   | .scopeStart => "start of a hierarchy op"
   | .scopeEnd => "end of a hierarchy op"
   | .scopeEndBlocking => "end of a hierarchy op (sync)"
+  | .syncOp => "a synchronous op"
 
 /-- Instantiate a function's events (Veir.Air.Instance), with the scalar arguments given. -/
 def extractOrThrow (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List Int := []) :

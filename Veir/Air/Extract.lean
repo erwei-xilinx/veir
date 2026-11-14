@@ -66,6 +66,9 @@ inductive EventKind where
   (D38). `scopeEndBlocking` when the op has no result (D39). -/
   | scopeEnd
   | scopeEndBlocking
+  /-- An op without `async` that is not otherwise an event (`memref.dealloc`, `linalg.*`,
+  `func.call`, ...): a blocking event whose body is the op itself (D45). -/
+  | syncOp
 deriving DecidableEq, Repr, Inhabited
 
 structure Event where

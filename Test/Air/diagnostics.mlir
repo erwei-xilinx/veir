@@ -23,8 +23,7 @@
 // SYNCDMA: event 0: air.dma_memcpy_nd (blocking) waits for [], keeps []
 // RUN: not air-veir graph --allow-unregistered-dialect %S/Inputs/refuse_dma_on_view.mlir 2>&1 | filecheck %s --check-prefix=VIEW
 // VIEW: a DMA on a view is not supported; fold the view into the pattern first
-// RUN: not air-veir graph --allow-unregistered-dialect %S/Inputs/refuse_host_dealloc.mlir 2>&1 | filecheck %s --check-prefix=HOSTDEALLOC
-// HOSTDEALLOC: a host memref.dealloc is not an event and cannot be ordered; not supported
+// A host memref.dealloc is a blocking event since D45 (sync_ops.mlir).
 
 // Memory inside an air.execute is modelled since layer 2.
 // RUN: air-veir run --allow-unregistered-dialect %S/Inputs/memref_in_execute.mlir | filecheck %s --check-prefix=MEMREF

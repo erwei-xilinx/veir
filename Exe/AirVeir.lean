@@ -88,8 +88,29 @@ def topLevelFuncs (ctx : IRContext OpCode) (top : OperationPtr) : Array Operatio
 def funcName (ctx : IRContext OpCode) (func : OperationPtr) : String :=
   String.fromUTF8! (func.getProperties! ctx (OpCode.func Func.func)).sym_name.value
 
+/-- VeIR's `arith.constant` holds only integers and `index` (VEIR-004). Rename every
+`arith.constant` whose result is not an integer or `index` (floats, dense vectors) to the
+unregistered `veir.opaque_constant`, whose value the model treats as opaque (D22). Only lines in
+MLIR's generic form are rewritten, and only when VeIR refused the file for this reason. -/
+def renameNonIntegerConstants (text : String) : String :=
+  "\n".intercalate <| (text.splitOn "\n").map fun line =>
+    if (line.splitOn "\"arith.constant\"()").length > 1 then
+      let ty := ((line.splitOn "() -> ").getLast?.getD "").trimAscii.toString
+      let isInt := ty == "index" || (ty.startsWith "i" && (ty.drop 1).toString.toNat?.isSome)
+      if isInt then line else line.replace "\"arith.constant\"()" "\"veir.opaque_constant\"()"
+    else line
+
 def load (args : Args) (file : String) : IO (WfIRContext OpCode × OperationPtr) := do
-  let content ← IO.FS.readBinFile file
+  let content₀ ← IO.FS.readBinFile file
+  let floatRefused (e : String) := (e.splitOn "expected 'value' to be an integer or index attribute").length > 1
+  -- First try as written; on VEIR-004 retry with non-integer constants renamed.
+  let content ← match Veir.Input.parseSourceString content₀ file args.allowUnregistered with
+    | .error e =>
+      if floatRefused e && args.allowUnregistered then
+        IO.eprintln s!"warning: {file}: VeIR's arith.constant holds integers only (VEIR-004); non-integer constants read as opaque values"
+        pure (renameNonIntegerConstants (String.fromUTF8! content₀)).toUTF8
+      else pure content₀
+    | .ok _ => pure content₀
   match Veir.Input.parseSourceString content file args.allowUnregistered with
   | .ok (ctx, top, _) => return (ctx, top)
   | .error e =>

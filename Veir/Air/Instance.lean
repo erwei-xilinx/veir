@@ -1,6 +1,7 @@
 module
 
 public import Veir.Air.MemProgram
+public import Veir.Air.Affine
 
 namespace Veir.Air
 
@@ -156,6 +157,12 @@ def intVal (ctx : IRContext OpCode) (v : ValuePtr) (n : Int) : Val :=
       | _ => 64
   .rv (.int w (.val (BitVec.ofInt w n)))
 
+/-- Whether every result of an op is an integer or `index`. -/
+def isIntegerResult (ctx : IRContext OpCode) (op : OperationPtr) : Bool :=
+  (op.getResultTypes! ctx).all fun t =>
+    let s := typeString t
+    s == "index" || (s.startsWith "i" && (s.drop 1).toString.toNat?.isSome)
+
 /-- Host arithmetic: computed when its operands are known, `undef` otherwise. -/
 def evalHostArith (ctx : IRContext OpCode) (op : OperationPtr) (env : Std.HashMap ValuePtr HVal) :
     Except String (Std.HashMap ValuePtr HVal) := do
@@ -166,9 +173,16 @@ def evalHostArith (ctx : IRContext OpCode) (op : OperationPtr) (env : Std.HashMa
   let mut env := env
   match ins.mapM (·.bind toRuntime?) with
   | some rs =>
-    let results ← evalArith ctx op rs.toArray
-    for r in results, i in [0:results.size] do
-      env := env.insert (.opResult ⟨op, i⟩) (.val (.rv r))
+    match evalArith ctx op rs.toArray with
+    | .ok results =>
+      for r in results, i in [0:results.size] do
+        env := env.insert (.opResult ⟨op, i⟩) (.val (.rv r))
+    | .error e =>
+      -- VeIR's arith computes on integers only: a float result is an opaque value (D22).
+      if !isIntegerResult ctx op then
+        for i in [0:op.getNumResults! ctx] do
+          env := env.insert (.opResult ⟨op, i⟩) (.val (opaqueOf op [] i))
+      else throw e
   | none =>
     for i in [0:op.getNumResults! ctx] do
       env := env.insert (.opResult ⟨op, i⟩) (.val .undef)
@@ -275,6 +289,61 @@ def syncOpInstance (ctx : IRContext OpCode) (op : OperationPtr)
       modify fun st => { st with viewResults := st.viewResults.insert (id, i + 1) }
   return out
 
+/-- The integer a host value is, if it is known. -/
+def knownIntH? (h : HVal) : Option Int :=
+  match h with
+  | .val x => x.toInt?
+  | _ => none
+
+/-- An affine attribute's text (kept verbatim by VeIR's parser). -/
+def affineText (ctx : IRContext OpCode) (op : OperationPtr) (prop : String) : Option String :=
+  match findProp (unregProps ctx op) prop with
+  | some (.unregisteredAttr u) => some u.value
+  | _ => none
+
+/-- `affine.apply`: evaluated when its operands are known, `undef` otherwise. The map's dims
+come first among the operands, then its symbols. -/
+def affineApply (ctx : IRContext OpCode) (op : OperationPtr)
+    (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
+  let what := s!"affine.apply{pathStr path}"
+  let some map := affineText ctx op "map" | throw s!"{what}: missing map"
+  let ins ← (op.getOperands! ctx).toList.mapM fun v => liftE (lookupH env ctx v what)
+  let res := ValuePtr.opResult ⟨op, 0⟩
+  match ins.mapM knownIntH? with
+  | none => return env.insert res (.val .undef)
+  | some ns =>
+    let nDims := Affine.numDims "affine_map" map
+    match Affine.evalMap map (ns.take nDims) (ns.drop nDims) with
+    | .ok [v] => return env.insert res (.val (intVal ctx res v))
+    | .ok _ => throw s!"{what}: expected a map with one result"
+    | .error e => throw s!"{what}: {e}"
+
+/-- Which region of `scf.if`, `affine.if` or `scf.index_switch` runs (`none`: no region, as in
+an `scf.if` without `else` whose condition is false). The choice must be known before running:
+a branch on a runtime value is refused. -/
+def chosenRegion (ctx : IRContext OpCode) (op : OperationPtr)
+    (env : Std.HashMap ValuePtr HVal) (what : String) : IM (Option Nat) := do
+  let name := opName ctx op
+  let ins ← (op.getOperands! ctx).toList.mapM fun v => liftE (lookupH env ctx v what)
+  let unknown := s!"{what}: the branch condition is not known before running (a branch on a runtime value is not supported)"
+  if name == "scf.if" then
+    let some c := ins.head? >>= knownIntH? | throw unknown
+    return if c != 0 then some 0 else some 1
+  else if name == "affine.if" then
+    let some set := affineText ctx op "condition" | throw s!"{what}: missing condition"
+    let some ns := ins.mapM knownIntH? | throw unknown
+    let nDims := Affine.numDims "affine_set" set
+    match Affine.evalSet set (ns.take nDims) (ns.drop nDims) with
+    | .ok b => return if b then some 0 else some 1
+    | .error e => throw s!"{what}: {e}"
+  else
+    -- scf.index_switch: region 0 is the default, region i + 1 the i-th case.
+    let some a := ins.head? >>= knownIntH? | throw unknown
+    let cases := (denseInts (findProp (unregProps ctx op) "cases")).getD #[]
+    match cases.toList.findIdx? (· == a) with
+    | some i => return some (i + 1)
+    | none => return some 0
+
 /-- Ops that are control flow or address arithmetic, not effects: never a synchronous op. -/
 def notSyncOp (name : String) : Bool :=
   ["scf.", "affine.", "air.", "cf."].any fun (p : String) => name.startsWith p
@@ -317,6 +386,12 @@ partial def walkOps (ctx : IRContext OpCode) (ops : Array OperationPtr)
       else if name == "scf.for" then env ← forLoop ctx op env path
       else if name == "scf.parallel" then env ← parallelLoop ctx op env path
       else if hierarchyOps.contains name then env ← hierarchyInstance ctx op env path
+      else if name == "affine.apply" then env ← affineApply ctx op env path
+      else if name == "veir.opaque_constant" then
+        -- A non-integer constant (VEIR-004): an opaque value (D22).
+        env := env.insert (.opResult ⟨op, 0⟩) (.val (opaqueOf op [] 0))
+      else if name == "scf.if" || name == "affine.if" || name == "scf.index_switch" then
+        env ← branchInstance ctx op env path
       else if name == "air.universe.alloc" then
         -- The pool `air.rank` instances are placed in: a resource, not modelled.
         env := env.insert (.opResult ⟨op, 0⟩) (.val .undef)
@@ -530,6 +605,26 @@ partial def hierarchyInstance (ctx : IRContext OpCode) (op : OperationPtr)
   let fin ← pushEvent endEv { path := path }
   if !blocking then return env.insert (.opResult ⟨op, 0⟩) (.tok fin)
   return env
+
+/-- `scf.if`, `affine.if`, `scf.index_switch`: the host runs the region the (known) condition
+selects, as upstream MLIR does; its results are what that region yields. -/
+partial def branchInstance (ctx : IRContext OpCode) (op : OperationPtr)
+    (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
+  let what := s!"'{opName ctx op}'{pathStr path}"
+  let some r ← chosenRegion ctx op env what | return env
+  if r ≥ op.getNumRegions! ctx then
+    if op.getNumResults! ctx = 0 then return env
+    throw s!"{what}: the chosen region does not exist"
+  let some block := (op.getRegion! ctx r).getFirstBlock! ctx
+    | if op.getNumResults! ctx = 0 then return env else throw s!"{what}: the chosen region is empty"
+  let ops := blockOps ctx block
+  let some term := ops.back? | throw s!"{what}: expected a terminator"
+  let inner ← walkOps ctx ops.pop env path
+  let ys ← (term.getOperands! ctx).toList.mapM fun v => liftE (lookupH inner ctx v what)
+  let mut out := env
+  for i in [0:op.getNumResults! ctx], h in ys do
+    out := out.insert (.opResult ⟨op, i⟩) h
+  return out
 
 /-- `scf.for`: iterations in order; only the tokens `iter_args` carry order them (D26). -/
 partial def forLoop (ctx : IRContext OpCode) (op : OperationPtr)
@@ -818,7 +913,11 @@ def IProgram.finishExecute (ctx : IRContext OpCode) (ip : IProgram) (v : Nat) (s
         | .ok results =>
           for r in results, i in [0:results.size] do
             vals := vals.insert (.opResult ⟨inner, i⟩) (.rv r)
-        | .error m => return fail m
+        | .error m =>
+          if isIntegerResult ctx inner then return fail m
+          -- A float result: opaque (D22).
+          for i in [0:inner.getNumResults! ctx] do
+            vals := vals.insert (.opResult ⟨inner, i⟩) (opaqueOf inner ins.toList i)
       | none =>
         let r : Val := if ins.any (· == .undef) then .undef else opaqueOf inner ins.toList 0
         for i in [0:inner.getNumResults! ctx] do vals := vals.insert (.opResult ⟨inner, i⟩) r

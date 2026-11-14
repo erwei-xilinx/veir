@@ -1,0 +1,16 @@
+// Refused: the branch condition is a value an event computes.
+module {
+  func.func @runtime_branch(%flag: memref<1xi32>, %out: memref<4xi32>, %in: memref<4xi32>) {
+    %t, %v = air.execute -> (i32) {
+      %c0 = arith.constant 0 : index
+      %l = memref.load %flag[%c0] : memref<1xi32>
+      air.execute_terminator %l : i32
+    }
+    %z = arith.constant 0 : i32
+    %c = arith.cmpi ne, %v, %z : i32
+    scf.if %c {
+      %d = air.dma_memcpy_nd async [%t] (%out[] [] [], %in[] [] []) : (memref<4xi32>, memref<4xi32>)
+    }
+    return
+  }
+}

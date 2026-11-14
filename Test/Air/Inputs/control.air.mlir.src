@@ -1,0 +1,95 @@
+// Upstream control flow and affine arithmetic at host level and in hierarchy bodies, decided by
+// values known before running (tile ids, constants, loop induction variables), in AIR's custom
+// syntax.
+#tile = affine_map<(d0) -> (d0 * 4)>
+#first = affine_set<(d0) : (-d0 >= 0)>
+module {
+  // scf.if on the tile id: tile 0 copies the first half, tile 1 the second.
+  func.func @if_on_tile(%out: memref<8xi32>, %in: memref<8xi32>) {
+    %c2 = arith.constant 2 : index
+    %c1 = arith.constant 1 : index
+    %h = air.herd async tile (%x, %y) in (%sx=%c2, %sy=%c1) args(%o=%out, %i=%in) : memref<8xi32>, memref<8xi32> {
+      %k0 = arith.constant 0 : index
+      %k1 = arith.constant 1 : index
+      %k4 = arith.constant 4 : index
+      %is0 = arith.cmpi eq, %x, %k0 : index
+      scf.if %is0 {
+        %d = air.dma_memcpy_nd async (%o[%k0] [%k4] [%k1], %i[%k0] [%k4] [%k1]) : (memref<8xi32>, memref<8xi32>)
+      } else {
+        %d = air.dma_memcpy_nd async (%o[%k4] [%k4] [%k1], %i[%k4] [%k4] [%k1]) : (memref<8xi32>, memref<8xi32>)
+      }
+    }
+    return
+  }
+
+  // affine.apply computes each tile's offset.
+  func.func @apply_offset(%out: memref<8xi32>, %in: memref<8xi32>) {
+    %c2 = arith.constant 2 : index
+    %c1 = arith.constant 1 : index
+    %h = air.herd async tile (%x, %y) in (%sx=%c2, %sy=%c1) args(%o=%out, %i=%in) : memref<8xi32>, memref<8xi32> {
+      %k1 = arith.constant 1 : index
+      %k4 = arith.constant 4 : index
+      %off = affine.apply #tile(%x)
+      %d = air.dma_memcpy_nd async (%o[%off] [%k4] [%k1], %i[%off] [%k4] [%k1]) : (memref<8xi32>, memref<8xi32>)
+    }
+    return
+  }
+
+  // affine.if: only tile 0 copies, the whole buffer.
+  func.func @affine_if(%out: memref<8xi32>, %in: memref<8xi32>) {
+    %c2 = arith.constant 2 : index
+    %c1 = arith.constant 1 : index
+    %h = air.herd async tile (%x, %y) in (%sx=%c2, %sy=%c1) args(%o=%out, %i=%in) : memref<8xi32>, memref<8xi32> {
+      affine.if #first(%x) {
+        %d = air.dma_memcpy_nd async (%o[] [] [], %i[] [] []) : (memref<8xi32>, memref<8xi32>)
+      }
+    }
+    return
+  }
+
+  // scf.index_switch on the tile id; tile 1 falls to the default.
+  func.func @index_switch(%out: memref<8xi32>, %in: memref<8xi32>) {
+    %c2 = arith.constant 2 : index
+    %c1 = arith.constant 1 : index
+    %h = air.herd async tile (%x, %y) in (%sx=%c2, %sy=%c1) args(%o=%out, %i=%in) : memref<8xi32>, memref<8xi32> {
+      %k0 = arith.constant 0 : index
+      %k1 = arith.constant 1 : index
+      %k4 = arith.constant 4 : index
+      scf.index_switch %x
+      case 0 {
+        %d = air.dma_memcpy_nd async (%o[%k0] [%k4] [%k1], %i[%k0] [%k4] [%k1]) : (memref<8xi32>, memref<8xi32>)
+        scf.yield
+      }
+      default {
+        %d = air.dma_memcpy_nd async (%o[%k4] [%k4] [%k1], %i[%k4] [%k4] [%k1]) : (memref<8xi32>, memref<8xi32>)
+        scf.yield
+      }
+    }
+    return
+  }
+
+  // Both tiles take the same branch and write the same half: a race.
+  func.func @if_same_branch(%out: memref<8xi32>, %in: memref<8xi32>) {
+    %c2 = arith.constant 2 : index
+    %c1 = arith.constant 1 : index
+    %h = air.herd async tile (%x, %y) in (%sx=%c2, %sy=%c1) args(%o=%out, %i=%in) : memref<8xi32>, memref<8xi32> {
+      %k0 = arith.constant 0 : index
+      %k1 = arith.constant 1 : index
+      %k4 = arith.constant 4 : index
+      %lt = arith.cmpi ult, %x, %k4 : index
+      scf.if %lt {
+        %d = air.dma_memcpy_nd async (%o[%k0] [%k4] [%k1], %i[%k0] [%k4] [%k1]) : (memref<8xi32>, memref<8xi32>)
+      }
+    }
+    return
+  }
+
+  // A float constant (VEIR-004) filling a buffer: an opaque value (D22).
+  func.func @float_fill(%out: memref<4xf32>) {
+    %t = air.execute {
+      %z = arith.constant 0.0 : f32
+      linalg.fill ins(%z : f32) outs(%out : memref<4xf32>)
+    }
+    return
+  }
+}

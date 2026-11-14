@@ -608,6 +608,21 @@ def parseOptionalUnregisteredType (name : String) (short := false) :
   return some ⟨UnregisteredAttr.mk ("!" ++ name ++ String.fromUTF8! body) true none, by grind⟩
 
 /--
+  Parse a builtin `memref<...>` type, keeping everything between `<` and `>` verbatim.
+  VeIR gives memrefs no meaning; this only lets a program that passes them around -- AIR's
+  data-movement operations do -- be read and printed back unchanged.
+-/
+def parseOptionalMemRefType : AttrParserM (Option TypeAttr) := do
+  if !(← parseOptionalKeyword "memref".toByteArray) then return none
+  let startPos ← getPos
+  parsePunctuation "<"
+  let _ ← parseUnregisteredAttrBody
+  let endPos := (← peekToken).slice.stop
+  parsePunctuation ">"
+  let body := (Slice.mk startPos endPos).of (← getThe ParserState).input
+  return some ⟨UnregisteredAttr.mk ("memref" ++ String.fromUTF8! body) true none, by grind⟩
+
+/--
   Attributes VeIR registers but does not interpret: everything between `<` and
   `>` is kept verbatim and printed back unchanged.
 -/
@@ -1410,6 +1425,10 @@ partial def parseOptionalType : AttrParserM (Option TypeAttr) := do
       return some llvmParameterlessType
   if let some llvmTargetType ← parseOptionalUnregisteredType "llvm.target" then
     return some llvmTargetType
+  if let some airAsyncTokenType ← parseOptionalUnregisteredSingletonType "air.async.token" then
+    return some airAsyncTokenType
+  if let some memRefType ← parseOptionalMemRefType then
+    return some memRefType
   if let some cudaTilePointerType := ← parseOptionalCudaTilePointerType then
     return some cudaTilePointerType
   if let some ioAddressType := ← parseOptionalIoAddressType then

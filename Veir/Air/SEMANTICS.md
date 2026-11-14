@@ -55,6 +55,7 @@ is wrong; the replacement is pending or recorded).
 | D45 | An op without `async` that is not otherwise an event (`memref.dealloc`, `linalg.*`, `func.call`, `memref.copy`, ... at host level or in a hierarchy body) is a blocking event, in program order, as D24/D35 ("可以，当作阻塞事件") | ✅ 2026-11-14 | layer 5 | — |
 | D46 | An L1 alloc outside a herd, used by one herd, is **one shared buffer** (reading A; D40 unchanged): `AIRToAIE`'s per-core clone is an implementation, equivalent only when tiles' accesses are disjoint. `air.shrinkage` has no meaning of its own | ✅ 2026-11-14 ("A") | layer 5 | AIR-015 |
 | D47 | Under D46 = A, two patterns AIR privatises today are races in the IR: an L1 scratch buffer outside a herd that every core reads and writes whole, and a kernel called on every core with the whole buffer ("ubiquitous call = replication" in `herdBufferHasCrossCoreDependence`; the verifier's "pass 1"). Treat them as invalid IR, or as an exception to A? Decides how AIR-016 can be fixed without regressions (AIR-017 analysis) | ❓ pending (deferred by the user, 2026-11-14) | — | AIR-016, AIR-017 |
+| D48 | `air-to-aie` test inputs that put a sync `channel.get` in a segment before the herd feeding it are lowering fixtures, not valid programs; D35 stands (they deadlock under it) | ✅ 2026-11-14 ("a，那些只是lowering的测试写法") | sweep verdicts `async bad` | — |
 
 ## D1. Blocking `air.wait_all` ✅
 

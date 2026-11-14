@@ -35,6 +35,11 @@ is wrong; the replacement is pending or recorded).
 | D25 | A synchronous op waits only for its own dependencies, not for earlier async ops it does not name | ✅ 2026-11-13 | `extractMem` | — |
 | D26 | `scf.for` iterations are issued in program order; only the tokens `iter_args` carry order iteration N+1 after N | from `docs/AIRComputeModel.md` ("an op that does not depend on `%t_prev` may begin before iteration N's `scf.yield` fires"); consistent with D3, D25 | `Veir.Air.Instance.forLoop` | — |
 | D27 | `scf.parallel` iterations are all concurrent; the result is the reduction of their values (`air.wait_all` joins) | from `docs/AIRComputeModel.md` ("all instances concurrent, tokens reduced") | `Veir.Air.Instance.parallelLoop` | — |
+| D28 | A channel's `size` is a bundle of independent subchannels (any rank); each subchannel (one index) is its own FIFO | ✅ 2026-11-14 | layer 4 | — |
+| D29 | A channel is a spatial hardware stream between tiles. Without `broadcast_shape` it is one-to-one; with it, every put is consumed by N gets at different tiles, simultaneously. With `dest`, a packet flow routes each put to one destination chosen at run time | ✅ 2026-11-14 | layer 4 | — |
+| D30 | Buffering depends on the endpoints' form: async put/get see a channel with no buffer (rendezvous, so backpressure deadlock is possible); sync put/get see a channel with unbounded buffer (a put is not held back by a get later in program order) | ✅ 2026-11-14 (exact rules for mixed forms ❓) | layer 4 | — |
+| D31 | Padding on `channel.put`/`channel.get` is the DMA padding of D20 | ✅ 2026-11-14 (meaning on the get side ❓) | layer 4 | — |
+| D32 | All channel types (`npu_dma_stream`, `npu_dma_packet`, `npu_cascade`, `npu_mmio`, `gpu_*`) have this semantics | ✅ 2026-11-14 | layer 4 | — |
 
 ## D1. Blocking `air.wait_all` ✅
 
@@ -326,3 +331,24 @@ iterations is added.
 - the result is the fold of the `scf.reduce` regions over the iterations' values, in iteration
   order. For the `air.wait_all` joins AIR uses, the order does not matter: the result waits for
   every iteration either way.
+
+## D28–D32. Channels (layer 4)
+
+Confirmed 2026-11-14:
+- **D28.** `air.channel @C [4, 4]` is a bundle of 16 independent subchannels. `size` is the
+  bundle's shape, not a capacity. Each subchannel is its own ordered stream.
+- **D29.** A channel is a spatial, hardware, tile-to-tile stream:
+  - without `broadcast_shape`, one-to-one;
+  - with it, one put is consumed by N gets on different tiles at the same time, and until all N
+    consume it, the put is back-pressured;
+  - with `dest(%d)` (packet flow), routing is dynamic on a compile-time-determined spatial
+    datapath, and each packet is delivered to the destination it selects.
+- **D30.** "channel 是没有buffer的FIFO". For async endpoints the channel has no buffer: a put and its
+  get complete together, so a program can deadlock through backpressure. For sync endpoints
+  the channel is understood to have unbounded buffer space: "程序进行到put的时候，不会因为下一行马上
+  就是get而导致backpressure".
+- **D31.** Padding on a channel endpoint is the same concept as on `air.dma_memcpy_nd` (D20).
+- **D32.** Every channel type shares this semantics; none is refused for being of another type.
+
+`docs/AIRComputeModel.md`'s `depth` attribute (default 1) does not exist, and contradicts D30
+(AIR-010).

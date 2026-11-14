@@ -52,7 +52,7 @@ Every command here was run as written. Paths are relative to the VeIR root.
 ```bash
 lake build                        # builds Veir, veir-opt, air-veir, ...
 lake test                         # Lean unit tests, including UnitTest/Air.lean
-uv run lit Test/Air -v            # the AIR lit tests (15)
+uv run lit Test/Air -v            # the AIR lit tests (16)
 uv run lit Test/ -q               # all of VeIR's lit tests
 AIR_OPT=/path/to/air-opt Test/Air/air-integration.sh            # checks that need air-opt
 AIR_OPT=/path/to/air-opt Test/Air/air-integration.sh --sweep /path/to/mlir-air/mlir/test
@@ -149,6 +149,8 @@ open, and the ninth of a stack. Its own diff adds `Veir/Interpreter/Netlist.lean
 | `scf.if`, `affine.if`, `scf.index_switch` | round-trips | — | the region the condition selects runs, as upstream MLIR defines it; the condition must be known before running (tile ids, constants, induction variables), otherwise refused | via the instantiated graph |
 | `affine.apply` | round-trips | — | evaluated from the verbatim map (`Affine.lean`: `floordiv`, `ceildiv`, `mod`) when its operands are known, `undef` otherwise | — |
 | non-integer `arith.constant` (float, dense) | refused by VeIR (VEIR-004); `air-veir` renames them to `veir.opaque_constant` | — | opaque values (D22) | — |
+| `air.custom` | round-trips | — | an event (async with a result, blocking without); reads and writes each memref operand whole, opaque values (D49) | footprints |
+| `memref.alloc {air.symmetric}`, cross-rank DMA (`src_rank`/`dst_rank`), `air.translate` | round-trips | — | one buffer per rank as a family; a cross-rank side or a translate addresses rank R's buffer (D49); one-dimensional `air.rank` only | races across ranks through the instantiated graph |
 | `affinity`/`concurrency` lists | `--allow-unregistered-dialect`; round-trips | none | **refused with a diagnostic** (D44) | — |
 
 ## Semantics
@@ -269,7 +271,7 @@ for operand removal, which are not in VeIR yet. Its output is only printed, and 
 **Lean.** `lake test` passes, including `UnitTest/Air.lean`.
 
 **lit.**
-- `uv run lit Test/Air`: 15 of 15 pass.
+- `uv run lit Test/Air`: 16 of 16 pass.
 - `uv run lit Test/`: 1601 passed, 8 unsupported, 2 expectedly failed, 0 failed.
 
 **AIR integration** (`air-integration.sh`, 2026-11-13):

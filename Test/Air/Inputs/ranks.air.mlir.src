@@ -1,0 +1,76 @@
+// Symmetric memory across air.rank instances, cross-rank DMAs, air.translate and air.custom
+// (SEMANTICS.md D49), in AIR's custom syntax.
+module {
+  air.channel @Sig [] {channel_type = "gpu_symmetric_heap"}
+  func.func private @kernel(memref<4xi32>)
+
+  // Rank 0 fills its symmetric buffer and signals rank 1; rank 1 then reads rank 0's buffer.
+  // Race-free; out = in.
+  func.func @signalled_read(%out: memref<4xi32>, %in: memref<4xi32>) {
+    %c2 = arith.constant 2 : index
+    air.rank (%r) in (%sr=%c2) args(%o=%out, %i=%in) : memref<4xi32>, memref<4xi32> {
+      %k0 = arith.constant 0 : index
+      %sym = memref.alloc() {air.symmetric} : memref<4xi32>
+      %flag = memref.alloc() : memref<1xi32>
+      %is0 = arith.cmpi eq, %r, %k0 : index
+      scf.if %is0 {
+        air.dma_memcpy_nd (%sym[] [] [], %i[] [] []) : (memref<4xi32>, memref<4xi32>)
+        air.channel.put @Sig[] (%flag[] [] []) : (memref<1xi32>)
+      } else {
+        air.channel.get @Sig[] (%flag[] [] []) : (memref<1xi32>)
+        air.dma_memcpy_nd (%o[] [] [], %sym[] [] []) {src_rank = 0 : i64} : (memref<4xi32>, memref<4xi32>)
+      }
+    }
+    return
+  }
+
+  // The same without the signal: rank 1's read races with rank 0's write.
+  func.func @unsignalled_read(%out: memref<4xi32>, %in: memref<4xi32>) {
+    %c2 = arith.constant 2 : index
+    air.rank (%r) in (%sr=%c2) args(%o=%out, %i=%in) : memref<4xi32>, memref<4xi32> {
+      %k0 = arith.constant 0 : index
+      %sym = memref.alloc() {air.symmetric} : memref<4xi32>
+      %is0 = arith.cmpi eq, %r, %k0 : index
+      scf.if %is0 {
+        air.dma_memcpy_nd (%sym[] [] [], %i[] [] []) : (memref<4xi32>, memref<4xi32>)
+      } else {
+        air.dma_memcpy_nd (%o[] [] [], %sym[] [] []) {src_rank = 0 : i64} : (memref<4xi32>, memref<4xi32>)
+      }
+    }
+    return
+  }
+
+  // air.translate: rank 1 views rank 0's buffer and copies it, after the signal. out = in.
+  func.func @translate_read(%out: memref<4xi32>, %in: memref<4xi32>, %bases: memref<2xindex>) {
+    %c2 = arith.constant 2 : index
+    air.rank (%r) in (%sr=%c2) args(%o=%out, %i=%in, %b=%bases) : memref<4xi32>, memref<4xi32>, memref<2xindex> {
+      %k0 = arith.constant 0 : index
+      %sym = memref.alloc() {air.symmetric} : memref<4xi32>
+      %flag = memref.alloc() : memref<1xi32>
+      %is0 = arith.cmpi eq, %r, %k0 : index
+      scf.if %is0 {
+        air.dma_memcpy_nd (%sym[] [] [], %i[] [] []) : (memref<4xi32>, memref<4xi32>)
+        air.channel.put @Sig[] (%flag[] [] []) : (memref<1xi32>)
+      } else {
+        %peer = air.translate %sym, %r, %k0, %b : memref<4xi32>, memref<2xindex>
+        air.channel.get @Sig[] (%flag[] [] []) : (memref<1xi32>)
+        air.dma_memcpy_nd (%o[] [] [], %peer[] [] []) : (memref<4xi32>, memref<4xi32>)
+      }
+    }
+    return
+  }
+
+  // air.custom: async, waited for by the DMA after it. No race.
+  func.func @custom_ordered(%a: memref<4xi32>, %b: memref<4xi32>) {
+    %t = air.custom @kernel async operands (%a) : memref<4xi32>
+    %d = air.dma_memcpy_nd async [%t] (%b[] [] [], %a[] [] []) : (memref<4xi32>, memref<4xi32>)
+    return
+  }
+
+  // air.custom not waited for: a race.
+  func.func @custom_unordered(%a: memref<4xi32>, %b: memref<4xi32>) {
+    %t = air.custom @kernel async operands (%a) : memref<4xi32>
+    %d = air.dma_memcpy_nd async (%b[] [] [], %a[] [] []) : (memref<4xi32>, memref<4xi32>)
+    return
+  }
+}

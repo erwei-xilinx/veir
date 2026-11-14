@@ -101,6 +101,14 @@ structure IState where
   chans : Std.HashMap Nat ChanInfo := {}
   /-- The `air.launch` instance being walked. -/
   launchInst : Option (Nat × List Int) := none
+  /-- The `air.rank` instance being walked: its start event, the length of the path before its
+  point, its point and its sizes (D49). -/
+  rankInst : Option (Nat × Nat × List Int × List Int) := none
+  /-- Each family of `memref.alloc {air.symmetric}` buffers, one per rank (D49), by the rank
+  execution, the alloc and the path outside the rank's point. -/
+  families : Std.HashMap (Nat × OperationPtr × List Int) (Array Nat) := {}
+  /-- The family and rank of each symmetric buffer. -/
+  symOf : Std.HashMap Nat ((Nat × OperationPtr × List Int) × Nat) := {}
 
 abbrev IM := StateT IState (Except String)
 
@@ -119,6 +127,45 @@ def pathStr : List Int → String
 def newBufferI (name : String) (t : TypeAttr) : IM Nat := do
   let ty ← liftE (parseMemRefType (typeString t))
   modifyGet fun st => (st.buffers.size, { st with buffers := st.buffers.push { name, type := ty } })
+
+/-- Whether an op carries a discardable unit attribute such as `air.symmetric`. -/
+def hasAttrNamed (ctx : IRContext OpCode) (op : OperationPtr) (name : String) : Bool :=
+  (op.getAttributes! ctx).entries.any (·.1 == name.toUTF8)
+
+/-- The single rank index of the rank instance being walked (D49). Cross-rank addressing names a
+rank by one integer, so only a one-dimensional `air.rank` is supported. -/
+def rankIndexSpace (what : String) : IM (Nat × Nat) := do
+  let some (_, _, pt, sizes) := (← get).rankInst
+    | throw s!"{what}: symmetric memory needs an enclosing air.rank (D49)"
+  match pt, sizes with
+  | [r], [n] => return (r.toNat, n.toNat)
+  | _, _ => throw s!"{what}: symmetric memory in a multi-dimensional air.rank is not supported (a rank is named by one integer)"
+
+/-- The buffer of `memref.alloc {air.symmetric}` for the current rank. The first time any rank
+reaches the alloc, the whole family is created, one buffer per rank, so a rank can name a peer's
+buffer before that peer has been walked (D49). -/
+def symmetricBuffer (alloc : OperationPtr) (name : String) (t : TypeAttr) (path : List Int) : IM Nat := do
+  let (r, n) ← rankIndexSpace s!"memref.alloc (air.symmetric){pathStr path}"
+  let some (rs, pre, pt, _) := (← get).rankInst | unreachable!
+  let key := (rs, alloc, path.take pre ++ path.drop (pre + pt.length))
+  if let some fam := (← get).families[key]? then return fam[r]!
+  let mut fam := #[]
+  for k in [0:n] do
+    let b ← newBufferI s!"{name} (symmetric, rank {k})" t
+    fam := fam.push b
+    modify fun st => { st with symOf := st.symOf.insert b (key, k) }
+  modify fun st => { st with families := st.families.insert key fam }
+  return fam[r]!
+
+/-- Rank `to`'s buffer of the family `b` belongs to (D49). -/
+def peerBuffer (what : String) (b : Nat) (to : Int) : IM Nat := do
+  let st ← get
+  let some (key, _) := st.symOf[b]?
+    | throw s!"{what}: cross-rank access to a buffer not allocated with air.symmetric (D49)"
+  let fam := st.families[key]!
+  if to < 0 || to.toNat ≥ fam.size then
+    throw s!"{what}: rank {to} is outside the air.rank's {fam.size} rank(s)"
+  return fam[to.toNat]!
 
 def lookupH (env : Std.HashMap ValuePtr HVal) (ctx : IRContext OpCode) (v : ValuePtr) (what : String) :
     Except String HVal :=
@@ -243,7 +290,10 @@ def captureBody (ctx : IRContext OpCode) (what : String) (ops : Array OperationP
       if isLocal || captured.contains v then continue
       match env[v]? with
       | some h =>
-        if let .tok _ := h then throw s!"{what}: '{iname}' uses a token as a value"
+        if let .tok _ := h then
+          -- air.custom lists its dependencies among its operands (D49).
+          if iname == "air.custom" then continue
+          throw s!"{what}: '{iname}' uses a token as a value"
         if let .result e _ := h then
           if !dataDeps.contains e then dataDeps := dataDeps ++ [e]
         captured := captured.insert v h
@@ -254,7 +304,10 @@ def captureBody (ctx : IRContext OpCode) (what : String) (ops : Array OperationP
         | .opResult ⟨d, _⟩ => throw s!"{what}: '{iname}' reads a value of '{opName ctx d}', which is not supported"
         | .blockArgument _ => throw s!"{what}: '{iname}' reads a block argument the host does not know"
     if iname == "memref.alloc" then
-      let nb ← newBufferI s!"alloc in event {id}{pathStr path}" ((ValuePtr.opResult ⟨inner, 0⟩).getType! ctx)
+      let ty := (ValuePtr.opResult ⟨inner, 0⟩).getType! ctx
+      let nb ← if hasAttrNamed ctx inner "air.symmetric" then
+          symmetricBuffer inner s!"alloc in event {id}{pathStr path}" ty path
+        else newBufferI s!"alloc in event {id}{pathStr path}" ty
       allocBufs := allocBufs.insert inner nb
       localBuf := localBuf.insert (.opResult ⟨inner, 0⟩) nb
     else if viewOps.contains iname then
@@ -348,6 +401,44 @@ def chosenRegion (ctx : IRContext OpCode) (op : OperationPtr)
 def notSyncOp (name : String) : Bool :=
   ["scf.", "affine.", "air.", "cf."].any fun (p : String) => name.startsWith p
 
+/-- `air.translate %src, %from, %to, %bases`: rank `%to`'s buffer of `%src`'s family; `%src` must
+be rank `%from`'s (D49). The heap bases are a runtime detail and play no part. -/
+def translateInstance (ctx : IRContext OpCode) (op : OperationPtr)
+    (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
+  let what := s!"air.translate{pathStr path}"
+  let ops := op.getOperands! ctx
+  if ops.size != 4 then throw s!"{what}: expected 4 operands"
+  let src ← liftE (lookupH env ctx ops[0]! what)
+  let fromR ← liftE (knownInt env ctx s!"{what} (from rank)" ops[1]!)
+  let toR ← liftE (knownInt env ctx s!"{what} (to rank)" ops[2]!)
+  let some b := staticBuf (← get) src | throw s!"{what}: the source does not name a buffer the model knows"
+  let some (_, k) := (← get).symOf[b]?
+    | throw s!"{what}: the source is not allocated with air.symmetric (D49)"
+  if (k : Int) != fromR then
+    throw s!"{what}: the source is rank {k}'s buffer, not rank {fromR}'s (undefined, D49)"
+  let pb ← peerBuffer what b toR
+  return env.insert (.opResult ⟨op, 0⟩) (.val (.buf pb))
+
+/-- `air.custom`: a user op, an event like an `air.execute` whose body is the op itself. It reads
+and writes each memref operand whole and its values are opaque (D22); with a result it is async
+and waits for its dependencies, without one it is blocking (D49). -/
+def customInstance (ctx : IRContext OpCode) (op : OperationPtr)
+    (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
+  let what := s!"air.custom{pathStr path}"
+  let some seg := denseInts (findProp (unregProps ctx op) "operandSegmentSizes")
+    | throw s!"{what}: missing operandSegmentSizes"
+  let nDeps := (seg[0]?.getD 0).toNat
+  let deps ← ((op.getOperands! ctx).extract 0 nDeps).toList.mapM fun v => liftE (tokOf env ctx what v)
+  let id := (← get).events.size
+  let cap ← captureBody ctx what #[op] env id path
+  let blocking := op.getNumResults! ctx = 0
+  let ev : Event := { op := op, kind := if blocking then .syncOp else .execute,
+                      operandEvents := deps.toArray, implicitDeps := [], dataDeps := cap.dataDeps,
+                      body := #[op], yields := #[] }
+  let _ ← pushEvent ev { env := cap.captured, allocBufs := cap.allocBufs, path := path }
+  if blocking then return env
+  return env.insert (.opResult ⟨op, 0⟩) (.tok id)
+
 /-- The hierarchy ops (layer 5). -/
 def hierarchyOps : List String := ["air.launch", "air.segment", "air.herd", "air.rank"]
 
@@ -381,13 +472,16 @@ partial def walkOps (ctx : IRContext OpCode) (ops : Array OperationPtr)
       else if name == "air.channel.put" then env ← channelInstance ctx op env path true
       else if name == "air.channel.get" then env ← channelInstance ctx op env path false
       else if name == "memref.alloc" then
-        let b ← newBufferI s!"host alloc{pathStr path}" ((ValuePtr.opResult ⟨op, 0⟩).getType! ctx)
+        let ty := (ValuePtr.opResult ⟨op, 0⟩).getType! ctx
+        let b ← if hasAttrNamed ctx op "air.symmetric" then
+            symmetricBuffer op s!"host alloc{pathStr path}" ty path
+          else newBufferI s!"host alloc{pathStr path}" ty
         env := env.insert (.opResult ⟨op, 0⟩) (.val (.buf b))
       else if name == "scf.for" then env ← forLoop ctx op env path
       else if name == "scf.parallel" then env ← parallelLoop ctx op env path
       else if hierarchyOps.contains name then env ← hierarchyInstance ctx op env path
-      else if name == "air.translate" || name == "air.custom" then
-        throw s!"{what}: '{name}' is not supported yet (its semantics is pending, D49)"
+      else if name == "air.translate" then env ← translateInstance ctx op env path
+      else if name == "air.custom" then env ← customInstance ctx op env path
       else if name == "affine.apply" then env ← affineApply ctx op env path
       else if name == "veir.opaque_constant" then
         -- A non-integer constant (VEIR-004): an opaque value (D22).
@@ -454,8 +548,11 @@ partial def dmaInstance (ctx : IRContext OpCode) (op : OperationPtr)
     (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
   let what := s!"air.dma_memcpy_nd{pathStr path}"
   let props := unregProps ctx op
-  if (findProp props "src_rank").isSome || (findProp props "dst_rank").isSome then
-    throw s!"{what}: a cross-rank DMA (src_rank/dst_rank) is not supported yet (its semantics is pending, D49)"
+  let rankOf (n : String) : Option Int := match findProp props n with
+    | some (.integerAttr i) => some i.value
+    | _ => none
+  let srcRank := rankOf "src_rank"
+  let dstRank := rankOf "dst_rank"
   let info ← liftE (decodeDma ctx op)
   let nDeps := ((denseInts (findProp (unregProps ctx op) "operandSegmentSizes")).getD #[0])[0]!.toNat
   let operands := op.getOperands! ctx
@@ -468,6 +565,15 @@ partial def dmaInstance (ctx : IRContext OpCode) (op : OperationPtr)
     if let .result e _ := h then
       if !dataDeps.contains e then dataDeps := dataDeps ++ [e]
     captured := captured.insert v h
+  -- A cross-rank side addresses that rank's buffer of the family (D49).
+  if (srcRank.isSome || dstRank.isSome) && info.src.memref == info.dst.memref && srcRank != dstRank then
+    throw s!"{what}: one memref on both sides with different ranks is not supported"
+  for (m, r?) in [(info.src.memref, srcRank), (info.dst.memref, dstRank)] do
+    if let some r := r? then
+      let _ ← rankIndexSpace what
+      let some b := staticBuf (← get) captured[m]! | throw s!"{what}: the DMA's memref does not name a buffer the model knows"
+      let pb ← peerBuffer what b r
+      captured := captured.insert m (.val (.buf pb))
   for m in [info.dst.memref, info.src.memref] do
     let st ← get
     if let .result e i := captured[m]! then
@@ -591,7 +697,8 @@ partial def hierarchyInstance (ctx : IRContext OpCode) (op : OperationPtr)
   for pt in iterationPoints sizes do
     modify fun st => { st with
       blocking := [start],
-      launchInst := if name == "air.launch" then some (start, pt) else st.launchInst }
+      launchInst := if name == "air.launch" then some (start, pt) else st.launchInst,
+      rankInst := if isRank then some (start, path.length, pt, sizes) else st.rankInst }
     let first := (← get).events.size
     let mut env' : Std.HashMap ValuePtr HVal := {}
     for a in args.toList.take nSizes, i in pt do
@@ -602,7 +709,8 @@ partial def hierarchyInstance (ctx : IRContext OpCode) (op : OperationPtr)
       env' := env'.insert a h
     let _ ← walkOps ctx ops.pop env' (path ++ pt)
     inner := inner ++ (List.range' first ((← get).events.size - first)).toArray
-  modify fun st => { st with blocking := outer.blocking, launchInst := outer.launchInst }
+  modify fun st => { st with blocking := outer.blocking, launchInst := outer.launchInst,
+                              rankInst := outer.rankInst }
   let blocking := op.getNumResults! ctx = 0
   let endEv : Event := { op := op, kind := if blocking then .scopeEndBlocking else .scopeEnd,
                          operandEvents := inner, implicitDeps := [], dataDeps := [],
@@ -867,6 +975,7 @@ def IProgram.finishExecute (ctx : IRContext OpCode) (ip : IProgram) (v : Nat) (s
     let operands := inner.getOperands! ctx
     let mut ins := #[]
     for o in operands do
+      if Air.isAsyncToken (o.getType! ctx).val then continue
       match vals[o]? with
       | some x => ins := ins.push x
       | none =>

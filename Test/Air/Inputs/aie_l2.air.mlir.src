@@ -1,0 +1,31 @@
+module {
+  air.channel @In [1, 1]
+  air.channel @ToL1 [1, 1]
+  air.channel @FromL1 [1, 1]
+  air.channel @Out [1, 1]
+  func.func @l2(%in: memref<64xi32>, %out: memref<64xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%lx) in (%ls=%c1) args(%ain=%in, %aout=%out) : memref<64xi32>, memref<64xi32> {
+      air.channel.put @In[] (%ain[] [] []) : (memref<64xi32>)
+      air.segment @seg {
+        %c1_0 = arith.constant 1 : index
+        %l2 = memref.alloc() : memref<64xi32, 1>
+        %l2o = memref.alloc() : memref<64xi32, 1>
+        air.channel.get @In[] (%l2[] [] []) : (memref<64xi32, 1>)
+        air.channel.put @ToL1[] (%l2[] [] []) : (memref<64xi32, 1>)
+        air.herd @h tile (%x, %y) in (%sx=%c1_0, %sy=%c1_0) {
+          %a = memref.alloc() : memref<64xi32, 2>
+          air.channel.get @ToL1[%x, %y] (%a[] [] []) : (memref<64xi32, 2>)
+          air.channel.put @FromL1[%x, %y] (%a[] [] []) : (memref<64xi32, 2>)
+          memref.dealloc %a : memref<64xi32, 2>
+        }
+        air.channel.get @FromL1[] (%l2o[] [] []) : (memref<64xi32, 1>)
+        air.channel.put @Out[] (%l2o[] [] []) : (memref<64xi32, 1>)
+        memref.dealloc %l2 : memref<64xi32, 1>
+        memref.dealloc %l2o : memref<64xi32, 1>
+      }
+      air.channel.get @Out[] (%aout[] [] []) : (memref<64xi32>)
+    }
+    return
+  }
+}

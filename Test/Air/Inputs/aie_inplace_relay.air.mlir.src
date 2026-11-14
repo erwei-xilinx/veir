@@ -1,0 +1,36 @@
+module {
+  air.channel @In [1, 1]
+  air.channel @Out [1, 1]
+  func.func @loop(%in: memref<64xi32>, %out: memref<64xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%lx) in (%ls=%c1) args(%ain=%in, %aout=%out) : memref<64xi32>, memref<64xi32> {
+      %c0 = arith.constant 0 : index
+      %c4 = arith.constant 4 : index
+      %c16 = arith.constant 16 : index
+      %c1_1 = arith.constant 1 : index
+      scf.for %i = %c0 to %c4 step %c1_1 {
+        %o = arith.muli %i, %c16 : index
+        air.channel.put @In[%c0, %c0] (%ain[%o] [%c16] [%c1_1]) : (memref<64xi32>)
+      }
+      air.segment @seg {
+        %c1_0 = arith.constant 1 : index
+        air.herd @h tile (%x, %y) in (%sx=%c1_0, %sy=%c1_0) {
+          %k0 = arith.constant 0 : index
+          %k1 = arith.constant 1 : index
+          %k4 = arith.constant 4 : index
+          scf.for %j = %k0 to %k4 step %k1 {
+            %a = memref.alloc() : memref<16xi32, 2>
+            air.channel.get @In[%x, %y] (%a[] [] []) : (memref<16xi32, 2>)
+            air.channel.put @Out[%x, %y] (%a[] [] []) : (memref<16xi32, 2>)
+            memref.dealloc %a : memref<16xi32, 2>
+          }
+        }
+      }
+      scf.for %i = %c0 to %c4 step %c1_1 {
+        %o = arith.muli %i, %c16 : index
+        air.channel.get @Out[%c0, %c0] (%aout[%o] [%c16] [%c1_1]) : (memref<64xi32>)
+      }
+    }
+    return
+  }
+}

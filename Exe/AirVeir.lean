@@ -396,6 +396,25 @@ def cmdCheck (args : Args) (before after : String) : IO Bool := do
         IO.println s!"  the first allows finishing order {o}, which the second forbids"
   return ok
 
+/-- Values as runs: consecutive integers `a..b`, repeated values `v x n`. -/
+def runs (vs : List Val) : String :=
+  let rec go (acc : List String) (xs : List Val) : String := match xs with
+    | [] => ", ".intercalate acc.reverse
+    | v :: rest =>
+      match v.toInt? with
+      | some a =>
+        let n := (rest.zip (List.range rest.length)).takeWhile (fun (w, k) => w.toInt? == some (a + k + 1)) |>.length
+        if n ≥ 2 then go (s!"{a}..{a + n}" :: acc) (rest.drop n)
+        else
+          let m := rest.takeWhile (· == v) |>.length
+          if m ≥ 2 then go (s!"{showVal v} x {m + 1}" :: acc) (rest.drop m) else go (showVal v :: acc) rest
+      | none =>
+        let m := rest.takeWhile (· == v) |>.length
+        if m ≥ 1 then go (s!"{showVal v} x {m + 1}" :: acc) (rest.drop m) else go (showVal v :: acc) rest
+  termination_by xs.length
+  decreasing_by all_goals simp_wf; all_goals (try simp [List.length_drop]); all_goals omega
+  go [] vs
+
 /-- C6: explore every `aie.device` (AIE_SEMANTICS.md, `Veir.Air.Aie`). -/
 def cmdAie (args : Args) (file : String) : IO Bool := do
   let (ctx, top) ← load args file
@@ -421,9 +440,9 @@ def cmdAie (args : Args) (file : String) : IO Bool := do
         for l in tr.toList.drop (tr.size - min tr.size 12) do IO.println s!"    {l}"
       | none => IO.println "  no deadlock"
       IO.println s!"  {r.outcomes.size} distinct outcome(s) of host memory"
-      for o in r.outcomes.toList.take 2 do
+      for o in r.outcomes.toList.take 4 do
         let parts := (m.hostArgs.toList.zip o.toList).map fun (b, vs) =>
-          s!"{m.buffers[b]!.1} = [{", ".intercalate (vs.toList.take 8 |>.map showVal)}{if vs.size > 8 then ", ..." else ""}]"
+          s!"{m.buffers[b]!.1} = [{runs vs.toList}]"
         IO.println s!"    {", ".intercalate parts}"
       if r.outcomes.size > 1 then ok := false
   return ok

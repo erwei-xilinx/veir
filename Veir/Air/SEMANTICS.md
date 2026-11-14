@@ -22,8 +22,8 @@ is wrong; the replacement is pending or recorded).
 | D11 | Function-level `arith.constant` runs before any event | not a semantic choice | `Program.initState` | — |
 | D12 | An op's async dependencies are waited for before it starts, DMAs included | ✅ 2026-11-13 | `Ready` | all trace theorems |
 | D13 | A DMA is an async op with read and write footprints; correctness is that conflicting accesses are ordered by tokens | ✅ 2026-11-13 (my time-window model ❌) | layer 2, not yet encoded | — |
-| D14 | Access-pattern addressing: AIR's own convention or `memref.subview`'s | ❓ conflict between the answer and the code | layer 2 | — |
-| D15 | DMA src and dst have their own patterns; stride 0 repeats; unequal element counts are invalid | ✅ 2026-11-13 (counts: "应该是吧") | layer 2 | — |
+| D14 | Access-pattern addressing: element `k` at `Σ (offsets[i] + k[i]) · strides[i]` (the code's convention, not `memref.subview`'s) | ✅ for now, 2026-11-13; long-term alignment with subview open | layer 2 | — |
+| D15 | DMA src and dst have their own patterns; stride 0 repeats; `N(dst) = N(src) + padding` | ✅ 2026-11-13 | layer 2 | — |
 | D16 | Memory spaces 0 = L3, 1 = L2, 2 = L1; disjoint address spaces at function scope | ✅ 2026-11-13 | layer 2 | — |
 | D17 | `memref.dealloc` ends a lifetime; deallocating a buffer with an unordered access is an error | ✅ 2026-11-13 | layer 2 | — |
 
@@ -158,7 +158,7 @@ whatever the timing, so the window adds nothing.
 Consequence: once a program is race-free, applying each op's effect atomically at its finish
 (D7) cannot be told apart from any interleaving. Layer 2 proves that.
 
-## D14. How an access pattern addresses memory ❓
+## D14. How an access pattern addresses memory ✅ (for now)
 
 The answer was: "完全按照 upstream mlir memref subview 的格式". The code uses a different
 convention, consistently:
@@ -187,13 +187,20 @@ layout strides; they differ otherwise. Pending: which one is AIR's semantics?
 So the whole toolchain implements "offset in units of the dimension's stride". Only the
 mlir-aie doc and the `memref.subview` analogy say otherwise.
 
+**Decided 2026-11-13: follow the code's convention for now.** Whether AIR should move to
+`memref.subview`'s convention in the long term is open.
+
+AIR's own subview folding (`air-copy-to-dma`, the DMA canonicalizer) copies a subview's offsets
+unchanged, as if the convention were subview's. With a non-unit step, the lowering then moves the
+wrong elements: AIR-009.
+
 ## D15. DMA patterns ✅
 
 - src and dst each have their own offsets, sizes and strides.
 - A stride of 0 repeats that dimension (the same elements are read again).
-- src and dst must describe the same number of elements, otherwise the program is invalid
-  (otherwise one side would back-pressure). Confirmed with "应该是吧", so recorded as the intended
-  rule but worth re-checking against `DmaMemcpyNdOp::verify`.
+- src and dst must describe the same number of elements, except that padding adds to dst:
+  `N(dst) = N(src) + padding` (confirmed). Otherwise one side would back-pressure.
+  `DmaMemcpyNdOp::verify` does not check this: AIR-008.
 - Empty lists mean the whole memref.
 - Strides count elements.
 

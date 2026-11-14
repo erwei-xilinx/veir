@@ -1,7 +1,7 @@
 import Veir.Input
 import Veir.Printer
 import Veir.Air.Rewrite
-import Veir.Air.MemProgram
+import Veir.Air.Instance
 
 /-! # `air-veir`: AIR async programs in VeIR
 
@@ -108,13 +108,18 @@ def kindName : EventKind → String
   | .dma => "air.dma_memcpy_nd"
   | .dmaBlocking => "air.dma_memcpy_nd (blocking)"
 
-def extractOrThrow (ctx : IRContext OpCode) (func : OperationPtr) : IO (Program × MemInfo) := do
-  match extractMem ctx func with
-  | .ok (p, mi) =>
-    unless p.graph.forwardB do
+/-- Instantiate a function's events (Veir.Air.Instance), with the scalar arguments given. -/
+def extractOrThrow (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List Int := []) :
+    IO IProgram := do
+  match instantiate ctx func scalars with
+  | .ok ip =>
+    unless ip.prog.graph.forwardB do
       throw (IO.userError s!"@{funcName ctx func}: the event graph is not topologically numbered")
-    return (p, mi)
+    return ip
   | .error e => throw (IO.userError s!"@{funcName ctx func}: {e}")
+
+/-- `run` takes missing scalar arguments to be 0. -/
+def runScalars (args : Args) : List Int := (args.scalarArgs.getD []) ++ List.replicate 64 0
 
 /-- A value as MLIR would write it. -/
 def showValue : RuntimeValue → String
@@ -129,20 +134,21 @@ def showMemVal : Val → String
 
 /-- What a run computed: each execute's yielded values, the final contents of the argument
 buffers, or the fault. -/
-def outcome (p : Program) (mi : MemInfo) (s : MState) : String :=
+def outcome (ip : IProgram) (s : MState) : String :=
   match s.fault with
   | some f => s!"fault: {f}"
   | none =>
+    let p := ip.prog
     let parts := (List.range p.events.size).filterMap fun v =>
       let e := p.events[v]!
       if e.kind ≠ .execute || e.yields.isEmpty then none else
         let vals := (List.range e.yields.size).map fun i =>
-          match s.values[ValuePtr.opResult ⟨e.op, i + 1⟩]? with
+          match s.results[(v, i + 1)]? with
           | some r => showMemVal r
           | none => "?"
         some s!"event {v} = {vals}"
-    let mems := (mi.args.toList.filterMap fun (v, _) => mi.bufOf[v]?).map fun b =>
-      let buf := mi.buffers[b]!
+    let mems := ip.argBufs.toList.map fun b =>
+      let buf := ip.buffers[b]!
       let n := buf.type.numel
       let vals := (List.range n).map fun (q : Nat) => showMemVal (s.mem[(b, (q : Int))]?.getD .undef)
       if n ≤ 64 then s!"{buf.name} = {vals}" else s!"{buf.name} = <{n} elements, hash {hash (toString vals) % 1000000}>"
@@ -152,13 +158,14 @@ def outcome (p : Program) (mi : MemInfo) (s : MState) : String :=
 def cmdGraph (args : Args) (file : String) : IO Unit := do
   let (ctx, top) ← load args file
   for func in topLevelFuncs ctx.raw top do
-    let (p, _) ← extractOrThrow ctx.raw func
+    let ip ← extractOrThrow ctx.raw func (args.scalarArgs.getD [])
+    let p := ip.prog
     IO.println s!"@{funcName ctx.raw func}: {p.events.size} event(s)"
     let keep := p.reducedOperands
     for e in p.events, v in [0:p.events.size] do
       let ops := e.operandEvents.toList
       let kept := ((e.operandEvents.zip keep[v]!).filterMap fun (u, k) => if k then some u else none).toList
-      IO.println s!"  event {v}: {kindName e.kind} waits for {ops}, keeps {kept}\
+      IO.println s!"  event {v}{pathStr ip.ctxs[v]!.path}: {kindName e.kind} waits for {ops}, keeps {kept}\
         {if e.implicitDeps.isEmpty then "" else s!", after blocking {e.implicitDeps}"}\
         {if e.dataDeps.isEmpty then "" else s!", reads results of {e.dataDeps}"}"
     for (u, v) in p.unorderedReads do
@@ -167,11 +174,10 @@ def cmdGraph (args : Args) (file : String) : IO Unit := do
 def cmdRun (args : Args) (file : String) : IO Unit := do
   let (ctx, top) ← load args file
   for func in topLevelFuncs ctx.raw top do
-    let (p, mi) ← extractOrThrow ctx.raw func
-    let init := mi.initState ctx.raw (args.scalarArgs.getD [])
-    let run (o : List Nat) := outcome p mi (runMem ctx.raw p mi init o)
-    let g := p.graph
-    IO.println s!"@{funcName ctx.raw func}: program order: {run (List.range p.events.size)}"
+    let ip ← extractOrThrow ctx.raw func (runScalars args)
+    let run (o : List Nat) := outcome ip (ip.run ctx.raw o)
+    let g := ip.prog.graph
+    IO.println s!"@{funcName ctx.raw func}: program order: {run (List.range ip.prog.events.size)}"
     let orders := g.orders args.maxOrders
     let outcomes := orders.map fun o => (o, run o)
     let distinct := outcomes.foldl (init := ([] : List String)) fun acc (_, r) =>
@@ -187,18 +193,18 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
   let (ctx, top) ← load args file
   let mut clean := true
   for func in topLevelFuncs ctx.raw top do
-    let (p, mi) ← extractOrThrow ctx.raw func
-    let init := mi.initState ctx.raw (args.scalarArgs.getD []) (unknownScalars := args.scalarArgs.isNone)
-    let (fps, issues) := footprints ctx.raw p mi init
-    let reports := raceReports p mi fps
-    IO.println s!"@{funcName ctx.raw func}: {p.events.size} event(s), {mi.buffers.size} buffer(s), \
+    let ip ← extractOrThrow ctx.raw func (args.scalarArgs.getD [])
+    let (fps, issues) := ip.footprints ctx.raw
+    let reports := ip.raceReports fps
+    let p := ip.prog
+    IO.println s!"@{funcName ctx.raw func}: {p.events.size} event(s), {ip.buffers.size} buffer(s), \
       {reports.length} race(s), {issues.size} problem(s) inside single events"
+    let eventAt (v : Nat) := s!"event {v}{pathStr ip.ctxs[v]!.path} ({kindName p.events[v]!.kind})"
     for r in reports do
-      IO.println s!"  race: {r.kind} on {r.buffer} element {r.element} between event {r.first} \
-        ({kindName p.events[r.first]!.kind}) and event {r.second} ({kindName p.events[r.second]!.kind}), \
-        with no token path between them"
+      IO.println s!"  race: {r.kind} on {r.buffer} element {r.element} between {eventAt r.first} and \
+        {eventAt r.second}, with no token path between them"
     for i in issues do
-      IO.println s!"  event {i.event}: {i.msg}"
+      IO.println s!"  event {i.event}{pathStr ip.ctxs[i.event]!.path}: {i.msg}"
     if !reports.isEmpty || !issues.isEmpty then clean := false
   return clean
 
@@ -206,7 +212,10 @@ def cmdReduce (args : Args) (file : String) : IO Unit := do
   let (ctx, top) ← load args file
   let mut programs := #[]
   for func in topLevelFuncs ctx.raw top do
-    let (p, _) ← extractOrThrow ctx.raw func
+    let ip ← extractOrThrow ctx.raw func (args.scalarArgs.getD [])
+    if ip.loops > 0 then
+      throw (IO.userError s!"@{funcName ctx.raw func}: reduce does not support loops yet; check can validate another tool's rewrite")
+    let p := ip.prog
     -- The checker `sameReach_sound` covers; a `false` here would be a bug in `reducedGraph`.
     unless DepGraph.sameReach p.graph p.reducedGraph do
       throw (IO.userError s!"@{funcName ctx.raw func}: internal error: the reduction changed reachability")
@@ -232,8 +241,10 @@ def cmdCheck (args : Args) (before after : String) : IO Bool := do
   let mut ok := true
   for f1 in fs1, f2 in fs2 do
     let name := funcName c1.raw f1
-    let (p1, m1) ← extractOrThrow c1.raw f1
-    let (p2, _) ← extractOrThrow c2.raw f2
+    let ip1 ← extractOrThrow c1.raw f1 (args.scalarArgs.getD [])
+    let ip2 ← extractOrThrow c2.raw f2 (args.scalarArgs.getD [])
+    let p1 := ip1.prog
+    let p2 := ip2.prog
     if p1.events.size ≠ p2.events.size then
       IO.println s!"FAIL @{name}: {p1.events.size} event(s) before, {p2.events.size} after"
       ok := false; continue
@@ -253,7 +264,7 @@ def cmdCheck (args : Args) (before after : String) : IO Bool := do
       IO.println s!"FAIL @{name}: the dependency graphs order the events differently"
       if let some o := counterexample p1.graph p2.graph args.maxOrders then
         IO.println s!"  the second allows finishing order {o}, which the first forbids"
-        IO.println s!"  running that order: {outcome p1 m1 (runMem c1.raw p1 m1 (m1.initState c1.raw (args.scalarArgs.getD [])) o)}"
+        IO.println s!"  running that order: {outcome ip1 (ip1.run c1.raw o)}"
       if let some o := counterexample p2.graph p1.graph args.maxOrders then
         IO.println s!"  the first allows finishing order {o}, which the second forbids"
   return ok

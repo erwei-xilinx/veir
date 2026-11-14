@@ -33,6 +33,8 @@ is wrong; the replacement is pending or recorded).
 | D23 | Non-constant offsets, sizes and strides: evaluated when running; a footprint that is not known statically is the whole buffer | ✅ 2026-11-13 | layer 2 | — |
 | D24 | `air.dma_memcpy_nd` without `async` is synchronous: it runs in program order, and the host waits for it | ✅ 2026-11-13 | `EventKind.dmaBlocking`, `Event.implicitDeps` | `steps_between_iff` (implicit edges) |
 | D25 | A synchronous op waits only for its own dependencies, not for earlier async ops it does not name | ✅ 2026-11-13 | `extractMem` | — |
+| D26 | `scf.for` iterations are issued in program order; only the tokens `iter_args` carry order iteration N+1 after N | from `docs/AIRComputeModel.md` ("an op that does not depend on `%t_prev` may begin before iteration N's `scf.yield` fires"); consistent with D3, D25 | `Veir.Air.Instance.forLoop` | — |
+| D27 | `scf.parallel` iterations are all concurrent; the result is the reduction of their values (`air.wait_all` joins) | from `docs/AIRComputeModel.md` ("all instances concurrent, tokens reduced") | `Veir.Air.Instance.parallelLoop` | — |
 
 ## D1. Blocking `air.wait_all` ✅
 
@@ -298,3 +300,29 @@ issued before it that it does not name? Either:
 
 The model implements (A). It matches D1, and for race checking it is the conservative choice: if
 the truth is (B), (A) can report a race that cannot happen, but never misses one.
+
+## D26. `scf.for` (from the compute model)
+
+`docs/AIRComputeModel.md`, "`scf.for` — loop-carried token dependencies":
+- "`scf.for` iterations are logically sequential in program order, but the async token model
+  allows controlled overlap between consecutive iterations."
+- "An op in iteration N+1 that lists `%t_prev` in its `dependency` list does not begin until
+  iteration N has signaled that token. An op that does **not** depend on `%t_prev` may begin
+  before iteration N's `scf.yield` fires."
+
+**Model:** iterations are instantiated in order. Each instance captures that iteration's
+induction variable and the tokens its `iter_args` received. No other ordering between
+iterations is added.
+
+`air-dependency`'s outputs chain each iteration after the previous one. In the bounded check
+(`check_loops.py`), every race it leaves is within one iteration, none across.
+
+## D27. `scf.parallel` (from the compute model)
+
+`docs/AIRComputeModel.md`: "`scf.parallel` regions (all instances concurrent, tokens reduced)".
+
+**Model:**
+- every point of the iteration space is instantiated, with no order between them;
+- the result is the fold of the `scf.reduce` regions over the iterations' values, in iteration
+  order. For the `air.wait_all` joins AIR uses, the order does not matter: the result waits for
+  every iteration either way.

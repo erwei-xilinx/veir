@@ -1,0 +1,118 @@
+// Layer-3 cases (loops), in AIR's custom syntax.
+
+// D26: a one-chain pipeline: every DMA of iteration k waits for iteration k-1's token.
+func.func @chain(%src : memref<8xi32>, %dst : memref<8xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c4 = arith.constant 4 : index
+  %t0, %buf = air.execute -> (memref<2xi32, 1>) {
+    %a = memref.alloc() : memref<2xi32, 1>
+    air.execute_terminator %a : memref<2xi32, 1>
+  }
+  %r = scf.for %i = %c0 to %c4 step %c1 iter_args(%t = %t0) -> (!air.async.token) {
+    %off = arith.muli %i, %c2 : index
+    %in = air.dma_memcpy_nd async [%t] (%buf[] [] [], %src[%off] [%c2] [%c1]) : (memref<2xi32, 1>, memref<8xi32>)
+    %out = air.dma_memcpy_nd async [%in] (%dst[%off] [%c2] [%c1], %buf[] [] []) : (memref<8xi32>, memref<2xi32, 1>)
+    scf.yield %out : !air.async.token
+  }
+  return
+}
+
+// D26: the same, but the load into %buf does not wait for the previous iteration: iteration k+1
+// may overwrite %buf before iteration k has copied it out.
+func.func @chain_broken(%src : memref<8xi32>, %dst : memref<8xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c4 = arith.constant 4 : index
+  %t0, %buf = air.execute -> (memref<2xi32, 1>) {
+    %a = memref.alloc() : memref<2xi32, 1>
+    air.execute_terminator %a : memref<2xi32, 1>
+  }
+  %r = scf.for %i = %c0 to %c4 step %c1 iter_args(%t = %t0) -> (!air.async.token) {
+    %off = arith.muli %i, %c2 : index
+    %in = air.dma_memcpy_nd async [%t0] (%buf[] [] [], %src[%off] [%c2] [%c1]) : (memref<2xi32, 1>, memref<8xi32>)
+    %out = air.dma_memcpy_nd async [%in, %t] (%dst[%off] [%c2] [%c1], %buf[] [] []) : (memref<8xi32>, memref<2xi32, 1>)
+    scf.yield %out : !air.async.token
+  }
+  return
+}
+
+// D26: ping-pong. Two buffers; even iterations use %a, odd ones %b; each buffer's loads wait
+// for that buffer's last drain, carried by its own iter_arg.
+func.func @ping_pong(%src : memref<8xi32>, %dst : memref<8xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c4 = arith.constant 4 : index
+  %ta, %a = air.execute -> (memref<2xi32, 1>) {
+    %x = memref.alloc() : memref<2xi32, 1>
+    air.execute_terminator %x : memref<2xi32, 1>
+  }
+  %tb, %b = air.execute -> (memref<2xi32, 1>) {
+    %x = memref.alloc() : memref<2xi32, 1>
+    air.execute_terminator %x : memref<2xi32, 1>
+  }
+  %r:2 = scf.for %i = %c0 to %c4 step %c2 iter_args(%pa = %ta, %pb = %tb) -> (!air.async.token, !air.async.token) {
+    %off0 = arith.muli %i, %c2 : index
+    %off1 = arith.addi %off0, %c2 : index
+    %ina = air.dma_memcpy_nd async [%pa] (%a[] [] [], %src[%off0] [%c2] [%c1]) : (memref<2xi32, 1>, memref<8xi32>)
+    %outa = air.dma_memcpy_nd async [%ina] (%dst[%off0] [%c2] [%c1], %a[] [] []) : (memref<8xi32>, memref<2xi32, 1>)
+    %inb = air.dma_memcpy_nd async [%pb] (%b[] [] [], %src[%off1] [%c2] [%c1]) : (memref<2xi32, 1>, memref<8xi32>)
+    %outb = air.dma_memcpy_nd async [%inb] (%dst[%off1] [%c2] [%c1], %b[] [] []) : (memref<8xi32>, memref<2xi32, 1>)
+    scf.yield %outa, %outb : !air.async.token, !air.async.token
+  }
+  return
+}
+
+// D27: scf.parallel writing disjoint 2-element tiles, then a DMA ordered after all of them by
+// the reduced token.
+func.func @parallel_tiles(%src : memref<8xi32>, %dst : memref<8xi32>, %out : memref<8xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c8 = arith.constant 8 : index
+  %t0 = air.wait_all async
+  %r = scf.parallel (%i) = (%c0) to (%c8) step (%c2) init (%t0) -> !air.async.token {
+    %t = air.dma_memcpy_nd async [%t0] (%dst[%i] [%c2] [%c1], %src[%i] [%c2] [%c1]) : (memref<8xi32>, memref<8xi32>)
+    scf.reduce(%t : !air.async.token) {
+    ^bb0(%l : !air.async.token, %rr : !air.async.token):
+      %j = air.wait_all async [%l, %rr]
+      scf.reduce.return %j : !air.async.token
+    }
+  }
+  %fin = air.dma_memcpy_nd async [%r] (%out[] [] [], %dst[] [] []) : (memref<8xi32>, memref<8xi32>)
+  return
+}
+
+// D27: the same with 3-element tiles, which overlap: concurrent iterations race.
+func.func @parallel_overlap(%src : memref<8xi32>, %dst : memref<8xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  %c6 = arith.constant 6 : index
+  %t0 = air.wait_all async
+  %r = scf.parallel (%i) = (%c0) to (%c6) step (%c2) init (%t0) -> !air.async.token {
+    %t = air.dma_memcpy_nd async [%t0] (%dst[%i] [%c3] [%c1], %src[%i] [%c3] [%c1]) : (memref<8xi32>, memref<8xi32>)
+    scf.reduce(%t : !air.async.token) {
+    ^bb0(%l : !air.async.token, %rr : !air.async.token):
+      %j = air.wait_all async [%l, %rr]
+      scf.reduce.return %j : !air.async.token
+    }
+  }
+  return
+}
+
+// D23: a loop whose trip count is an argument.
+func.func @dynamic_trips(%n : index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %t0 = air.wait_all async
+  %r = scf.for %i = %c0 to %n step %c1 iter_args(%t = %t0) -> (!air.async.token) {
+    %w = air.wait_all async [%t]
+    scf.yield %w : !air.async.token
+  }
+  return
+}

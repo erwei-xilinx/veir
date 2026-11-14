@@ -132,7 +132,8 @@ open, and the ninth of a stack. Its own diff adds `Veir/Interpreter/Netlist.lean
 | `memref.alloc`, `dealloc`, `load`, `store` in `air.execute`; host `memref.alloc` | unregistered; round-trips | — | buffers, `undef` contents, use-after-free checked (D17) | footprints |
 | `memref.copy`, `linalg.*` and any other op in `air.execute` | unregistered; round-trips | — | opaque values; read/write of whole operand buffers (D22) | footprints |
 | `affine_map<…>`, `affine_set<…>` | verbatim, no meaning | — | — | — |
-| `air.launch`, `air.segment`, `air.herd`, `air.channel.*`, `scf.*` | `--allow-unregistered-dialect`; round-trips | none | **refused with a diagnostic** | — |
+| `scf.for`, `scf.parallel` (host level) | unregistered; round-trips | — | instantiated iteration by iteration (D26, D27); bounds must be known (`--args`) | graph and race theorems apply to the instances |
+| `air.launch`, `air.segment`, `air.herd`, `air.channel.*`, `scf.if` | `--allow-unregistered-dialect`; round-trips | none | **refused with a diagnostic** | — |
 | `air.channel` declarations | **refused by VeIR's parser:** `size = [1]` is an untyped integer, and VeIR requires `1 : i64` | — | — | — |
 
 ## Semantics
@@ -368,6 +369,15 @@ Status of the memory and DMA layer (layer 2, function scope):
 | C4 | Not applicable yet (no affinity/concurrency). |
 | C5 | Canonicalize preserves race-freedom (`raceFree_reduce_iff`). `air-dependency` does **not** establish it (AIR-007, exhaustively above). |
 | C6 | Not started. |
+
+Status of the loop layer (layer 3, host-level `scf.for` / `scf.parallel`, by instantiation):
+
+| # | Status |
+| --- | --- |
+| C1 | Bounds must be known; otherwise refused with a diagnostic. |
+| C2 | `progress` applies to the instantiated graph. |
+| C3 | `deterministic` applies to the instances. Example: a ping-pong loop (252 schedules) computes one outcome. |
+| C5 | `check_loops.py`: across 976 loop programs, `air-dependency` leaves 324 racy (all races within one iteration, from offsets on `%i`: AIR-007), and `air-dependency-canonicalize` never changes the instantiated ordering. `air-veir reduce` refuses loops; `check` compares instantiated graphs. |
 
 ### What each AIR concept needs
 

@@ -20,11 +20,11 @@
 
 // REJECT:      FAIL @f: the dependency graphs order the events differently
 // REJECT-NEXT: the second allows finishing order [1, 2, 0], which the first forbids
-// REJECT-NEXT: running that order: fault: event 2: 'arith.addi' read a result of 'air.execute' before it was available
+// REJECT-NEXT: running that order: fault: event 2: 'arith.addi' read a result of event 0 before it was available
 // REJECT-NOT:  the first allows
 
 // RACE: warning: event 2 reads a result of event 0 without waiting for it
 
 // BAD:      6 finishing order(s) allowed, 2 distinct outcome(s)
 // BAD-DAG:  event 0 = [1 : i32], event 1 = [10 : i32], event 2 = [2 : i32]
-// BAD-DAG:  fault: event 2: 'arith.addi' read a result of 'air.execute' before it was available
+// BAD-DAG:  fault: event 2: 'arith.addi' read a result of event 0 before it was available

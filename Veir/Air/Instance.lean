@@ -48,6 +48,26 @@ structure EventCtx where
   path : List Int := []
 deriving Inhabited
 
+/-- An `air.channel` declaration. -/
+structure ChanDecl where
+  name : String
+  size : List Nat
+  broadcast : Option (List Nat)
+  type : String
+deriving Inhabited
+
+/-- One channel endpoint: which subchannel, what it moves, and (for a put) the destination a
+packet flow selects. -/
+structure ChanInfo where
+  chan : String
+  isPut : Bool
+  indices : List Int
+  side : DmaSide
+  padBefore : Array Int
+  padAfter : Array Int
+  dest : Option Int
+deriving Inhabited
+
 structure IProgram where
   prog : Program
   ctxs : Array EventCtx
@@ -61,6 +81,8 @@ structure IProgram where
   argBufs : Array Nat
   /-- How many loops were instantiated. -/
   loops : Nat
+  chanDecls : Std.HashMap String ChanDecl := {}
+  chans : Std.HashMap Nat ChanInfo := {}
 deriving Inhabited
 
 structure IState where
@@ -72,6 +94,8 @@ structure IState where
   resultBufs : Std.HashMap (Nat × Nat) Nat := {}
   viewResults : Std.HashSet (Nat × Nat) := {}
   loops : Nat := 0
+  chanDecls : Std.HashMap String ChanDecl := {}
+  chans : Std.HashMap Nat ChanInfo := {}
 
 abbrev IM := StateT IState (Except String)
 
@@ -159,7 +183,8 @@ def pushEvent (e : Event) (c : EventCtx) : IM Nat := do
   if st.events.size ≥ maxEvents then
     throw s!"more than {maxEvents} event instances; the program is too large to instantiate"
   let id := st.events.size
-  let blocking := e.kind == .waitAllBlocking || e.kind == .dmaBlocking
+  let blocking := e.kind == .waitAllBlocking || e.kind == .dmaBlocking ||
+    e.kind == .putBlocking || e.kind == .getBlocking
   set { st with events := st.events.push { e with implicitDeps := st.blocking },
                 ctxs := st.ctxs.push c,
                 blocking := if blocking then st.blocking ++ [id] else st.blocking }
@@ -187,6 +212,8 @@ partial def walkOps (ctx : IRContext OpCode) (ops : Array OperationPtr)
     | .func .return => pure ()
     | .builtin .unregistered =>
       if name == "air.dma_memcpy_nd" then env ← dmaInstance ctx op env path
+      else if name == "air.channel.put" then env ← channelInstance ctx op env path true
+      else if name == "air.channel.get" then env ← channelInstance ctx op env path false
       else if name == "memref.alloc" then
         let b ← newBufferI s!"host alloc{pathStr path}" ((ValuePtr.opResult ⟨op, 0⟩).getType! ctx)
         env := env.insert (.opResult ⟨op, 0⟩) (.val (.buf b))
@@ -310,6 +337,71 @@ partial def dmaInstance (ctx : IRContext OpCode) (op : OperationPtr)
   if !blocking then return env.insert (.opResult ⟨op, 0⟩) (.tok id)
   return env
 
+/-- An `air.channel.put` or `air.channel.get` instance (layer 4). -/
+partial def channelInstance (ctx : IRContext OpCode) (op : OperationPtr)
+    (env : Std.HashMap ValuePtr HVal) (path : List Int) (isPut : Bool) : IM (Std.HashMap ValuePtr HVal) := do
+  let what := s!"{opName ctx op}{pathStr path}"
+  let props := unregProps ctx op
+  let some seg := denseInts (findProp props "operandSegmentSizes")
+    | throw s!"{what}: missing operandSegmentSizes"
+  if seg.size != (if isPut then 7 else 6) then throw s!"{what}: unexpected operand segments"
+  let operands := op.getOperands! ctx
+  let mut groups : Array (Array ValuePtr) := #[]
+  let mut start := 0
+  for n in seg do
+    groups := groups.push (operands.extract start (start + n.toNat))
+    start := start + n.toNat
+  let some (.flatSymbolRefAttr chanRef) := findProp props "chan_name"
+    | throw s!"{what}: missing chan_name"
+  -- The symbol is stored as written, with its `@`.
+  let chan := if chanRef.value.startsWith "@" then (chanRef.value.drop 1).toString else chanRef.value
+  if !(← get).chanDecls.contains chan then
+    throw s!"{what}: no air.channel @{chan} is declared in the module"
+  let deps ← groups[0]!.toList.mapM fun v => liftE (tokOf env ctx what v)
+  let indices ← groups[1]!.toList.mapM fun v => liftE (knownInt env ctx s!"{what} (channel index)" v)
+  let some memref := groups[2]!.toList.head? | throw s!"{what}: no memref"
+  let pre := if isPut then "src" else "dst"
+  let arr (name : String) : IM (Array Int) :=
+    match denseInts (findProp props name) with
+    | some a => pure a
+    | none => throw s!"{what}: missing {name}"
+  let offs ← liftE (decodeList (← arr s!"static_{pre}_offsets") groups[3]!)
+  let szs ← liftE (decodeList (← arr s!"static_{pre}_sizes") groups[4]!)
+  let strs ← liftE (decodeList (← arr s!"static_{pre}_strides") groups[5]!)
+  let side : DmaSide := { memref := memref, offsets := offs, sizes := szs, strides := strs }
+  let dest ← if isPut && seg[6]! > 0 then
+      some <$> liftE (knownInt env ctx s!"{what} (dest)" groups[6]![0]!)
+    else pure none
+  let padBefore := (denseInts (findProp props "pad_before")).getD #[]
+  let padAfter := (denseInts (findProp props "pad_after")).getD #[]
+  if padBefore.size != padAfter.size then throw s!"{what}: pad_before and pad_after differ in rank"
+  let mut captured : Std.HashMap ValuePtr HVal := {}
+  let mut dataDeps : List Nat := []
+  for v in #[memref] ++ groups[3]! ++ groups[4]! ++ groups[5]! do
+    let h ← liftE (lookupH env ctx v what)
+    if let .tok _ := h then throw s!"{what}: a token used as an operand"
+    if let .result e _ := h then
+      if !dataDeps.contains e then dataDeps := dataDeps ++ [e]
+    captured := captured.insert v h
+  let st ← get
+  if let .result e i := captured[memref]! then
+    if st.viewResults.contains (e, i) then
+      throw s!"{what}: a channel endpoint on a view is not supported; fold the view into the pattern first"
+  if (staticBuf st captured[memref]!).isNone then
+    throw s!"{what}: the memref does not name a buffer the model knows"
+  let blocking := op.getNumResults! ctx = 0
+  let kind : EventKind :=
+    if isPut then (if blocking then .putBlocking else .put)
+    else (if blocking then .getBlocking else .get)
+  let ev : Event := { op := op, kind := kind, operandEvents := deps.toArray, implicitDeps := [],
+                      dataDeps := dataDeps, body := #[], yields := #[] }
+  let id ← pushEvent ev { env := captured, path := path }
+  let info : ChanInfo := { chan := chan, isPut := isPut, indices := indices, side := side,
+                           padBefore := padBefore, padAfter := padAfter, dest := dest }
+  modify fun st => { st with chans := st.chans.insert id info }
+  if !blocking then return env.insert (.opResult ⟨op, 0⟩) (.tok id)
+  return env
+
 /-- `scf.for`: iterations in order; only the tokens `iter_args` carry order them (D26). -/
 partial def forLoop (ctx : IRContext OpCode) (op : OperationPtr)
     (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
@@ -408,7 +500,29 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
     | throw s!"expected a func.func, but got '{opName ctx func}'"
   let block ← singleBlock ctx func "func.func"
   let ops := blockOps ctx block
+  -- The module's `air.channel` declarations.
+  let mut decls : Std.HashMap String ChanDecl := {}
+  if let some m := func.getParentOp! ctx then
+    if let some mb := (m.getRegion! ctx 0).getFirstBlock! ctx then
+      for d in blockOps ctx mb do
+        if opName ctx d == "air.channel" then
+          let props := unregProps ctx d
+          let some (.stringAttr nm) := findProp props "sym_name" | continue
+          let ints (a : Option Attribute) : Option (List Nat) := match a with
+            | some (.arrayAttr arr) => arr.value.toList.mapM fun
+                | .integerAttr i => some i.value.toNat
+                | _ => none
+            | _ => none
+          let size := (ints (findProp props "size")).getD []
+          let attrs := (d.getAttributes! ctx).entries
+          let broadcast := ints ((attrs.find? (·.1 == "broadcast_shape".toUTF8)).map (·.2))
+          let type := match findProp props "channel_type" with
+            | some (.stringAttr t) => String.fromUTF8! t.value
+            | _ => "npu_dma_stream"
+          let name := String.fromUTF8! nm.value
+          decls := decls.insert name { name, size, broadcast, type }
   let go : IM (Std.HashMap ValuePtr HVal × Array Nat) := do
+    modify fun st => { st with chanDecls := decls }
     let mut env : Std.HashMap ValuePtr HVal := {}
     let mut argBufs := #[]
     let mut scalars := scalarArgs
@@ -430,7 +544,8 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
   let ((_, argBufs), st) ← go.run {}
   let prog : Program := { func, events := st.events, hostOps := #[] }
   return { prog, ctxs := st.ctxs, buffers := st.buffers, dmas := st.dmas,
-           resultBufs := st.resultBufs, viewResults := st.viewResults, argBufs, loops := st.loops }
+           resultBufs := st.resultBufs, viewResults := st.viewResults, argBufs, loops := st.loops,
+           chanDecls := st.chanDecls, chans := st.chans }
 
 /-! ### Running -/
 

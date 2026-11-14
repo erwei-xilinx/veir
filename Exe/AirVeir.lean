@@ -2,6 +2,7 @@ import Veir.Input
 import Veir.Printer
 import Veir.Air.Rewrite
 import Veir.Air.Instance
+import Veir.Air.Channels
 
 /-! # `air-veir`: AIR async programs in VeIR
 
@@ -107,6 +108,10 @@ def kindName : EventKind → String
   | .waitAllBlocking => "air.wait_all (blocking)"
   | .dma => "air.dma_memcpy_nd"
   | .dmaBlocking => "air.dma_memcpy_nd (blocking)"
+  | .put => "air.channel.put"
+  | .putBlocking => "air.channel.put (sync)"
+  | .get => "air.channel.get"
+  | .getBlocking => "air.channel.get (sync)"
 
 /-- Instantiate a function's events (Veir.Air.Instance), with the scalar arguments given. -/
 def extractOrThrow (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List Int := []) :
@@ -175,37 +180,99 @@ def cmdRun (args : Args) (file : String) : IO Unit := do
   let (ctx, top) ← load args file
   for func in topLevelFuncs ctx.raw top do
     let ip ← extractOrThrow ctx.raw func (runScalars args)
-    let run (o : List Nat) := outcome ip (ip.run ctx.raw o)
-    let g := ip.prog.graph
-    IO.println s!"@{funcName ctx.raw func}: program order: {run (List.range ip.prog.events.size)}"
-    let orders := g.orders args.maxOrders
-    let outcomes := orders.map fun o => (o, run o)
-    let distinct := outcomes.foldl (init := ([] : List String)) fun acc (_, r) =>
-      if acc.contains r then acc else acc ++ [r]
-    let capped := if orders.length ≥ args.maxOrders then " (enumeration capped)" else ""
-    IO.println s!"  {orders.length} finishing order(s) allowed{capped}, {distinct.length} distinct outcome(s)"
-    if distinct.length > 1 then
-      for r in distinct do
-        let some (o, _) := outcomes.find? (·.2 == r) | continue
-        IO.println s!"  order {o}: {r}"
+    let name := funcName ctx.raw func
+    if ip.chans.isEmpty then
+      let run (o : List Nat) := outcome ip (ip.run ctx.raw o)
+      let g := ip.prog.graph
+      IO.println s!"@{name}: program order: {run (List.range ip.prog.events.size)}"
+      let orders := g.orders args.maxOrders
+      let outcomes := orders.map fun o => (o, run o)
+      let distinct := outcomes.foldl (init := ([] : List String)) fun acc (_, r) =>
+        if acc.contains r then acc else acc ++ [r]
+      let capped := if orders.length ≥ args.maxOrders then " (enumeration capped)" else ""
+      IO.println s!"  {orders.length} finishing order(s) allowed{capped}, {distinct.length} distinct outcome(s)"
+      if distinct.length > 1 then
+        for r in distinct do
+          let some (o, _) := outcomes.find? (·.2 == r) | continue
+          IO.println s!"  order {o}: {r}"
+    else
+      -- With channels an event is two steps, its start and its finish (Veir.Air.Channels).
+      let ca ← match ip.analyzeChannels with
+        | .ok ca => pure ca
+        | .error e => throw (IO.userError s!"@{name}: {e}")
+      match ca.progress with
+      | .deadlocks _ => IO.println s!"@{name}: deadlocks (see `races`)"
+      | .unchecked => IO.println s!"@{name}: internal error: unchecked schedule"
+      | .completes sched =>
+        let run (o : List Nat) := outcome ip (ip.runNodes ctx.raw ca o)
+        IO.println s!"@{name}: a schedule: {run sched}"
+        let g' : DepGraph := ⟨ca.andGraph.preds.pop⟩
+        let orders := g'.orders args.maxOrders
+        let outcomes := orders.map fun o => (o, run o)
+        let distinct := outcomes.foldl (init := ([] : List String)) fun acc (_, r) =>
+          if acc.contains r then acc else acc ++ [r]
+        let capped := if orders.length ≥ args.maxOrders then " (enumeration capped)" else ""
+        IO.println s!"  {orders.length} start/finish order(s) allowed{capped}, {distinct.length} distinct outcome(s)"
+        if distinct.length > 1 then
+          for r in distinct do
+            let some (o, _) := outcomes.find? (·.2 == r) | continue
+            IO.println s!"  order {o}: {r}"
 
 def cmdRaces (args : Args) (file : String) : IO Bool := do
   let (ctx, top) ← load args file
   let mut clean := true
   for func in topLevelFuncs ctx.raw top do
     let ip ← extractOrThrow ctx.raw func (args.scalarArgs.getD [])
-    let (fps, issues) := ip.footprints ctx.raw
-    let reports := ip.raceReports fps
+    let name := funcName ctx.raw func
+    let (fps0, issues) := ip.footprints ctx.raw
     let p := ip.prog
-    IO.println s!"@{funcName ctx.raw func}: {p.events.size} event(s), {ip.buffers.size} buffer(s), \
-      {reports.length} race(s), {issues.size} problem(s) inside single events"
     let eventAt (v : Nat) := s!"event {v}{pathStr ip.ctxs[v]!.path} ({kindName p.events[v]!.kind})"
+    -- Without channels: the event graph as it is. With them: the channel orderings added, and
+    -- renumbered to be forward (Veir.Air.Channels).
+    let mut reports : List RaceReport := []
+    let mut chanLines : List String := []
+    if ip.chans.isEmpty then
+      reports := ip.raceReports fps0
+    else
+      let ca ← match ip.analyzeChannels with
+        | .ok ca => pure ca
+        | .error e => throw (IO.userError s!"@{name}: {e}")
+      chanLines := chanLines ++ ca.errors.map (s!"  error: " ++ ·) ++ ca.warnings.map (s!"  warning: " ++ ·)
+      match ca.progress with
+      | .completes _ => chanLines := chanLines ++ ["  no deadlock: a schedule exists (checked by scheduleB)"]
+      | .unchecked => chanLines := chanLines ++ ["  internal error: Kahn's answer failed its check"]
+      | .deadlocks stuck =>
+        let evs := (stuck.filter (· < 2 * p.events.size)).map fun node =>
+          s!"{if node % 2 == 0 then "start" else "finish"} of {eventAt (node / 2)}"
+        chanLines := chanLines ++ [s!"  DEADLOCK: no schedule exists; stuck (checked by stuckB): {", ".intercalate evs}"]
+      let fps := (List.range p.events.size).toArray.map fun v => fps0[v]! ++ ca.footprint v
+      match ip.raceGraph ca with
+      | none => chanLines := chanLines ++ ["  races not checked: the orderings form a cycle"]
+      | some (g3, pos) =>
+        let mut inv : Array Nat := Array.replicate p.events.size 0
+        for v in [0:p.events.size] do inv := inv.set! pos[v]! v
+        let fp : Footprint := fun i => fps[inv[i]!]?.getD []
+        reports := (races g3 fp).filterMap fun (i, j) => do
+          for a in fp i do
+            for b in fp j do
+              if a.conflictsB b then
+                let bs : Std.HashSet Int := Std.HashSet.ofList b.elems
+                if let some x := a.elems.find? bs.contains then
+                  let kind := match a.kind, b.kind with
+                    | .write, .read => "RAW" | .read, .write => "WAR" | _, _ => "WAW"
+                  let (u, v) := if inv[i]! < inv[j]! then (inv[i]!, inv[j]!) else (inv[j]!, inv[i]!)
+                  return { first := u, second := v, kind, buffer := ip.buffers[a.buf]!.name, element := x }
+          none
+    IO.println s!"@{name}: {p.events.size} event(s), {ip.buffers.size} buffer(s), \
+      {reports.length} race(s), {issues.size} problem(s) inside single events"
+    for l in chanLines do IO.println l
     for r in reports do
       IO.println s!"  race: {r.kind} on {r.buffer} element {r.element} between {eventAt r.first} and \
         {eventAt r.second}, with no token path between them"
     for i in issues do
       IO.println s!"  event {i.event}{pathStr ip.ctxs[i.event]!.path}: {i.msg}"
-    if !reports.isEmpty || !issues.isEmpty then clean := false
+    let chanBad := chanLines.any fun l => l.startsWith "  error" || l.startsWith "  DEADLOCK" || l.startsWith "  internal" || l.startsWith "  races not"
+    if !reports.isEmpty || !issues.isEmpty || chanBad then clean := false
   return clean
 
 def cmdReduce (args : Args) (file : String) : IO Unit := do

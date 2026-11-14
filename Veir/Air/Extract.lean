@@ -54,6 +54,11 @@ inductive EventKind where
   | dma
   /-- `air.dma_memcpy_nd` without `async`: synchronous, so the host waits for it (D24). -/
   | dmaBlocking
+  /-- `air.channel.put` / `air.channel.get` (layer 4); the blocking forms are sync (D35). -/
+  | put
+  | putBlocking
+  | get
+  | getBlocking
 deriving DecidableEq, Repr, Inhabited
 
 structure Event where

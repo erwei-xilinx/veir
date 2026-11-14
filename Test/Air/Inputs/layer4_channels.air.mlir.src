@@ -1,0 +1,86 @@
+// Layer-4 cases (channels), in AIR's custom syntax.
+module {
+  air.channel @C []
+  air.channel @B [1, 1] {broadcast_shape = [1, 2]}
+
+  // D30: both ends async, no dependency between them: a rendezvous that completes.
+  func.func @rendezvous(%a : memref<4xi32>, %x : memref<4xi32>) {
+    %p = air.channel.put async @C[] (%a[] [] []) : (memref<4xi32>)
+    %g = air.channel.get async @C[] (%x[] [] []) : (memref<4xi32>)
+    return
+  }
+
+  // D30: the get waits for the put's token, but the put cannot finish before the get starts.
+  func.func @rendezvous_deadlock(%a : memref<4xi32>, %x : memref<4xi32>) {
+    %p = air.channel.put async @C[] (%a[] [] []) : (memref<4xi32>)
+    %g = air.channel.get async [%p] @C[] (%x[] [] []) : (memref<4xi32>)
+    return
+  }
+
+  // D30, D35: sync ends are buffered: a put, then a get in program order, completes.
+  func.func @sync_put_then_get(%a : memref<4xi32>, %x : memref<4xi32>) {
+    air.channel.put @C[] (%a[] [] []) : (memref<4xi32>)
+    air.channel.get @C[] (%x[] [] []) : (memref<4xi32>)
+    return
+  }
+
+  // D35: a sync get blocks the host before the put is ever issued.
+  func.func @sync_get_then_put(%a : memref<4xi32>, %x : memref<4xi32>) {
+    air.channel.get @C[] (%x[] [] []) : (memref<4xi32>)
+    air.channel.put @C[] (%a[] [] []) : (memref<4xi32>)
+    return
+  }
+
+  // D34: one put of 8 elements feeds two gets of 4.
+  func.func @stream_split(%a : memref<8xi32>, %x : memref<4xi32>, %y : memref<4xi32>) {
+    %p = air.channel.put async @C[] (%a[] [] []) : (memref<8xi32>)
+    %g0 = air.channel.get async @C[] (%x[] [] []) : (memref<4xi32>)
+    %g1 = air.channel.get async [%g0] @C[] (%y[] [] []) : (memref<4xi32>)
+    return
+  }
+
+  // D33: two puts on one subchannel, not ordered.
+  func.func @order_race(%a : memref<4xi32>, %b : memref<4xi32>, %x : memref<4xi32>, %y : memref<4xi32>) {
+    %p0 = air.channel.put async @C[] (%a[] [] []) : (memref<4xi32>)
+    %p1 = air.channel.put async @C[] (%b[] [] []) : (memref<4xi32>)
+    %g0 = air.channel.get async @C[] (%x[] [] []) : (memref<4xi32>)
+    %g1 = air.channel.get async [%g0] @C[] (%y[] [] []) : (memref<4xi32>)
+    return
+  }
+
+  // D29: a static broadcast to 2 destinations.
+  func.func @broadcast(%a : memref<4xi32>, %x : memref<4xi32>, %y : memref<4xi32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %p = air.channel.put async @B[%c0, %c0] (%a[] [] []) : (memref<4xi32>)
+    %g0 = air.channel.get async @B[%c0, %c0] (%x[] [] []) : (memref<4xi32>)
+    %g1 = air.channel.get async @B[%c0, %c1] (%y[] [] []) : (memref<4xi32>)
+    return
+  }
+
+  // D29, D34: a broadcast with one of its two consumers missing back-pressures the put forever.
+  func.func @broadcast_missing(%a : memref<4xi32>, %x : memref<4xi32>) {
+    %c0 = arith.constant 0 : index
+    %p = air.channel.put async @B[%c0, %c0] (%a[] [] []) : (memref<4xi32>)
+    %g0 = air.channel.get async @B[%c0, %c0] (%x[] [] []) : (memref<4xi32>)
+    return
+  }
+
+  // D34: a get waiting for elements nobody puts.
+  func.func @starved_get(%a : memref<4xi32>, %x : memref<8xi32>) {
+    %p = air.channel.put async @C[] (%a[] [] []) : (memref<4xi32>)
+    %g = air.channel.get async @C[] (%x[] [] []) : (memref<8xi32>)
+    return
+  }
+
+  // D31: padding on both ends: the put sends [0, a0, a1], the get writes [0, s0, s1, s2, 0].
+  func.func @padding(%a : memref<2xi32>, %x : memref<5xi32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c3 = arith.constant 3 : index
+    %p = air.channel.put async @C[] (%a[%c0] [%c2] [%c1]) {pad_before = array<i32: 1>, pad_after = array<i32: 0>} : (memref<2xi32>)
+    %g = air.channel.get async @C[] (%x[%c0] [%c3] [%c1]) {pad_before = array<i32: 1>, pad_after = array<i32: 1>} : (memref<5xi32>)
+    return
+  }
+}

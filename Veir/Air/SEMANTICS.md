@@ -43,6 +43,7 @@ is wrong; the replacement is pending or recorded).
 | D33 | Two endpoints on the same subchannel, in the same direction, with no token path between them, are an error (a channel FIFO-order race) | ✅ 2026-11-14 | layer 4 | — |
 | D34 | A subchannel is a stream of elements: puts and gets need not pair one to one; the i-th element put is the i-th element got. Elements no get takes leave an async put stuck (backpressure) | ✅ 2026-11-14 | layer 4 | — |
 | D35 | A sync `channel.put`/`channel.get` is a blocking event (as D24) | ✅ 2026-11-14 | layer 4 | — |
+| D36 | What a transfer orders, for memory: (a) a put's read of element m and its get's write of element m; (b) whether a get's completion orders later ops after the feeding put's reads | ❓ pending (implemented: (a) not at all; (b) no, only the put's own token does) | `Veir.Air.Channels.raceEdges` | — |
 
 ## D1. Blocking `air.wait_all` ✅
 

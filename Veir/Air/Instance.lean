@@ -386,6 +386,8 @@ partial def walkOps (ctx : IRContext OpCode) (ops : Array OperationPtr)
       else if name == "scf.for" then env ← forLoop ctx op env path
       else if name == "scf.parallel" then env ← parallelLoop ctx op env path
       else if hierarchyOps.contains name then env ← hierarchyInstance ctx op env path
+      else if name == "air.translate" || name == "air.custom" then
+        throw s!"{what}: '{name}' is not supported yet (its semantics is pending, D49)"
       else if name == "affine.apply" then env ← affineApply ctx op env path
       else if name == "veir.opaque_constant" then
         -- A non-integer constant (VEIR-004): an opaque value (D22).
@@ -451,6 +453,9 @@ partial def executeInstance (ctx : IRContext OpCode) (op : OperationPtr)
 partial def dmaInstance (ctx : IRContext OpCode) (op : OperationPtr)
     (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
   let what := s!"air.dma_memcpy_nd{pathStr path}"
+  let props := unregProps ctx op
+  if (findProp props "src_rank").isSome || (findProp props "dst_rank").isSome then
+    throw s!"{what}: a cross-rank DMA (src_rank/dst_rank) is not supported yet (its semantics is pending, D49)"
   let info ← liftE (decodeDma ctx op)
   let nDeps := ((denseInts (findProp (unregProps ctx op) "operandSegmentSizes")).getD #[0])[0]!.toNat
   let operands := op.getOperands! ctx

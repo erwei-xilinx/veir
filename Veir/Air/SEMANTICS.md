@@ -53,7 +53,7 @@ is wrong; the replacement is pending or recorded).
 | D43 | `air.rank` follows the same rules as `segment`/`herd` (D37-D42): its instances (ranks, e.g. GPUs) run concurrently | ✅ 2026-11-14 ("和herd/segment的hierarchy的规矩应该一样的") | layer 5 | — |
 | D44 | `affinity`/`concurrency` token lists are refused: not implemented in AIR (D9) | ✅ 2026-11-14 | layer 5 | — |
 | D45 | An op without `async` that is not otherwise an event (`memref.dealloc`, `linalg.*`, `func.call`, `memref.copy`, ... at host level or in a hierarchy body) is a blocking event, in program order, as D24/D35 ("可以，当作阻塞事件") | ✅ 2026-11-14 | layer 5 | — |
-| D46 | What an L1 alloc outside a herd, used by one herd, means: one shared buffer (D40; `air-verify-hierarchy-locality` assumes this) or one copy per PE (`AIRToAIE` clones every such alloc into each core, `air.shrinkage` or not). `air-shrink-memref-sizes-by-access` relies on the cloning and leaves the shrunk alloc outside the herd | ❓ pending (investigated 2026-11-14; AIR-015 found on the way) | layer 5 | AIR-015 |
+| D46 | An L1 alloc outside a herd, used by one herd, is **one shared buffer** (reading A; D40 unchanged): `AIRToAIE`'s per-core clone is an implementation, equivalent only when tiles' accesses are disjoint. `air.shrinkage` has no meaning of its own | ✅ 2026-11-14 ("A") | layer 5 | AIR-015 |
 
 ## D1. Blocking `air.wait_all` ✅
 

@@ -347,10 +347,65 @@ def Program.reducedOperands (p : Program) : Array (Array Bool) :=
 
 /-- The graph `reducedOperands` leaves: the kept operands, and every implicit edge. -/
 def Program.reducedGraph (p : Program) : DepGraph :=
-  let keep := p.reducedOperands
   ⟨p.events.mapIdx fun v e =>
-    ((e.operandEvents.zip keep[v]!).filterMap fun (u, k) => if k then some u else none).toList
-      ++ e.implicitDeps⟩
+    (e.operandEvents.toList.filter fun u => p.graph.keepEdge u v) ++ e.implicitDeps⟩
+
+theorem Program.predsOf_graph (p : Program) (v : Nat) :
+    p.graph.predsOf v =
+      match p.events[v]? with
+      | some e => e.operandEvents.toList ++ e.implicitDeps
+      | none => [] := by
+  simp only [DepGraph.predsOf, Program.graph, Array.getElem?_map]
+  cases p.events[v]? <;> rfl
+
+theorem Program.predsOf_reducedGraph (p : Program) (v : Nat) :
+    p.reducedGraph.predsOf v =
+      match p.events[v]? with
+      | some e => (e.operandEvents.toList.filter fun u => p.graph.keepEdge u v) ++ e.implicitDeps
+      | none => [] := by
+  simp only [DepGraph.predsOf, Program.reducedGraph, Array.getElem?_mapIdx]
+  cases p.events[v]? <;> rfl
+
+/-- The rewrite keeps everything the reduction keeps, and only edges the program had: an operand
+the reduction drops is dropped, and an implicit edge, which the rewrite cannot drop, stays. -/
+theorem Program.reducedGraph_between (p : Program) :
+    (∀ u v, u ∈ p.graph.reduce.predsOf v → u ∈ p.reducedGraph.predsOf v) ∧
+    (∀ u v, u ∈ p.reducedGraph.predsOf v → u ∈ p.graph.predsOf v) := by
+  constructor
+  · intro u v h
+    rw [DepGraph.predsOf_reduce, List.mem_filter, Program.predsOf_graph] at h
+    rw [Program.predsOf_reducedGraph]
+    obtain ⟨hm, hk⟩ := h
+    cases he : p.events[v]? with
+    | none => simp [he] at hm
+    | some e =>
+      simp only [he, List.mem_append] at hm ⊢
+      rcases hm with hm | hm
+      · exact Or.inl (List.mem_filter.mpr ⟨hm, hk⟩)
+      · exact Or.inr hm
+  · intro u v h
+    rw [Program.predsOf_reducedGraph] at h
+    rw [Program.predsOf_graph]
+    cases he : p.events[v]? with
+    | none => simp [he] at h
+    | some e =>
+      simp only [he, List.mem_append] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (List.mem_filter.mp h).1
+      · exact Or.inr h
+
+theorem Program.size_reducedGraph (p : Program) : p.reducedGraph.size = p.graph.size := by
+  simp [DepGraph.size, Program.reducedGraph, Program.graph]
+
+/-- **The AIR rewrite preserves behaviour.** The graph `air-veir reduce` leaves admits exactly the
+executions of the original, under the program's semantics. What is not proven is that
+`applyReduction` produces IR whose extracted graph is `reducedGraph`; `air-veir reduce` checks
+that per run with `sameReach`. -/
+theorem Program.steps_reducedGraph_iff (ctx : IRContext OpCode) (p : Program)
+    (hf : p.graph.Forward) {t : List Label} {c : Config RunState} :
+    Steps p.reducedGraph (p.sem ctx) (Config.init (p.initState ctx)) t c ↔
+      Steps p.graph (p.sem ctx) (Config.init (p.initState ctx)) t c :=
+  steps_between_iff hf p.size_reducedGraph p.reducedGraph_between.1 p.reducedGraph_between.2
 
 end
 

@@ -195,6 +195,8 @@ None uses `Lean.ofReduceBool` or an axiom of this development.
 | `steps_between_iff` | the same for any graph between `g.reduce` and `g` (the form the rewrite with blocking waits needs) | `g.Forward` |
 | `steps_of_sameReach` | a checker `true` gives the same traces | — |
 | `Program.steps_reduce_iff` | the AIR instance: same values and faults for an extracted program | `p.graph.Forward` |
+| `Program.reducedGraph_between`, `Program.steps_reducedGraph_iff` | the graph `air-veir reduce` produces lies between `g.reduce` and `g`, so it admits the same executions | `p.graph.Forward` |
+| `progress` | every forward graph can run to completion, under any semantics whose steps can always be taken (checklist C2) | `g.Forward`, total `Sem` |
 | `cyclic_simultaneous_drop_unsound` (UnitTest) | on a cycle, deciding edges independently and dropping them together loses reachability | — |
 
 "Same traces" is the strongest notion here. It implies the same finishing orders (linear
@@ -212,8 +214,9 @@ resources or memory are involved. Those are outside the model.
 - `Program.finishEvent` (an executable `arith` evaluator, run through `Arith.interpretOp'`);
 - the Lean compiler, which runs `air-veir`.
 
-**Checked per run instead of trusted:** `applyReduction` rewrites operand arrays on a raw
-`IRContext` without maintaining use-lists. Proving that well-formed would need new VeIR invariants
+**Checked per run instead of trusted:** the graph that `air-veir reduce` intends to produce
+(`reducedGraph`) is proven correct. That `applyReduction` turns it into IR is not.
+`applyReduction` rewrites operand arrays on a raw `IRContext` without maintaining use-lists. Proving that well-formed would need new VeIR invariants
 for operand removal, which are not in VeIR yet. Its output is only printed, and is then
 - re-parsed and re-verified by VeIR (`veir-opt`) and by `air-opt`;
 - compared by `sameReach`, whose soundness is proven;
@@ -331,7 +334,7 @@ Status of the async-dependency layer:
 | # | Status |
 | --- | --- |
 | C1 | **Counterexample found:** AIR accepts a mismatched `air.execute` terminator (D8, confirmed bug). No theorem yet: `extract` is not proven. |
-| C2 | True for forward graphs. Not yet a theorem. Bounded check: `Test/Air/bounded/`. |
+| C2 | **Proven** (`progress`): dependencies alone never deadlock. Also checked by the bounded run. Becomes a real question with channels, whose `get` can block. |
 | C3 | Planned theorem: race-free (D4) implies the same outcome. Bounded check: race warning ⇔ some schedule differs. |
 | C4 | Trivial while only dependency lists exist (a DAG is always satisfiable). Becomes real with `concurrency` tokens (D9), which can contradict a dependency path. |
 | C5 | **Proven** for the model's reduction (`steps_reduce_iff`). `air-dependency-canonicalize`, checked exhaustively (`Test/Air/bounded/check.py`): **passes** on all 78,183 graphs of 1–5 events whose `air.execute` bodies have 0 or 1 ops. **Fails** when a body has 2 or more ops: 1,314 of the 2,448 programs of up to 4 events with 2-op bodies. The pass drops every outgoing edge of such an execute, which can make a race-free program racy (974 of 5,330 race-free programs in `--data` mode). Root cause located; see Findings. Reproducer: `Test/Air/bounded/repro_canonicalize_drops_edge.mlir.in`. |
@@ -350,8 +353,9 @@ What each AIR concept needs before it can be given a meaning:
 | Resources | to model `air.segment` co-residency and progress, which matter once channels can block |
 
 Concrete next tasks:
-1. Prove that `Program.reducedGraph` lies between `g.reduce` and `g`, so `air-veir reduce` needs no
-   run-time `sameReach`.
+1. ~~Prove that `Program.reducedGraph` lies between `g.reduce` and `g`.~~ Done
+   (`Program.steps_reducedGraph_iff`). `air-veir reduce` keeps its run-time `sameReach` only as a
+   check that `applyReduction` wrote what `reducedGraph` says.
 2. Prove `extract` produces forward graphs. Or keep the run-time `forwardB`, which `sameReach_sound`
    already covers.
 3. Model `scf.for` with loop-carried tokens by unrolling bounded loops, a common

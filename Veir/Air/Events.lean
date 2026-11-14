@@ -191,6 +191,53 @@ theorem steps_of_sameReach {g h : DepGraph} {sem : Sem σ} {s : σ} {c : Config 
   have ⟨size, hfg, hfh, reach⟩ := DepGraph.sameReach_sound hc
   steps_iff_of_reach hfg hfh size reach (closed_init _ s)
 
+/-! ### Progress
+
+Every forward graph can run to completion, under any semantics whose steps can always be taken.
+This is checklist item C2 for the async layer: dependencies alone never deadlock. It stops being
+true once events can block on each other for other reasons -- a channel `get` waiting for its
+`put` -- which is why it is stated here, before those exist. -/
+
+theorem Steps.append {g : DepGraph} {sem : Sem σ} {c c' c'' : Config σ} {t t' : List Label}
+    (h₁ : Steps g sem c t c') (h₂ : Steps g sem c' t' c'') : Steps g sem c (t ++ t') c'' := by
+  induction h₁ with
+  | nil => exact h₂
+  | cons s _ ih => exact .cons s (ih h₂)
+
+/-- **Progress.** On a forward graph, if starting and finishing an event can always take a step,
+some execution from the start finishes every event. -/
+theorem progress {g : DepGraph} {sem : Sem σ} (hf : g.Forward)
+    (hstart : ∀ v s, ∃ s', sem.onStart v s s') (hfinish : ∀ v s, ∃ s', sem.onFinish v s s')
+    (s₀ : σ) :
+    ∃ t c, Steps g sem (Config.init s₀) t c ∧ ∀ v, v < g.size → c.phase v = .done := by
+  -- Run events 0, 1, 2, ... one at a time: before event k, exactly the events below k are done.
+  have run : ∀ k, k ≤ g.size → ∃ t c, Steps g sem (Config.init s₀) t c ∧
+      (∀ v, v < k → c.phase v = .done) ∧ (∀ v, k ≤ v → c.phase v = .pending) := by
+    intro k
+    induction k with
+    | zero => exact fun _ => ⟨[], _, .nil _, fun _ h => absurd h (Nat.not_lt_zero _),
+        fun _ _ => rfl⟩
+    | succ k ih =>
+      intro hk
+      obtain ⟨t, c, hsteps, hdone, hpend⟩ := ih (Nat.le_of_succ_le hk)
+      have ready : Ready g c k :=
+        ⟨hk, hpend k (Nat.le_refl _), fun u hu => hdone u (hf k u hu)⟩
+      obtain ⟨s₁, hs₁⟩ := hstart k c.state
+      obtain ⟨s₂, hs₂⟩ := hfinish k s₁
+      let c₁ : Config σ := ⟨setPhase c.phase k .running, s₁⟩
+      let c₂ : Config σ := ⟨setPhase c₁.phase k .done, s₂⟩
+      have st₁ : Step g sem c (.start k) c₁ := .start ready hs₁
+      have st₂ : Step g sem c₁ (.finish k) c₂ := .finish (by simp [c₁, setPhase]) hs₂
+      refine ⟨t ++ [.start k, .finish k], c₂,
+        hsteps.append (.cons st₁ (.cons st₂ (.nil _))), fun v hv => ?_, fun v hv => ?_⟩
+      · by_cases hvk : v = k
+        · simp [c₂, c₁, setPhase, hvk]
+        · simp [c₂, c₁, setPhase, hvk, hdone v (Nat.lt_of_le_of_ne (Nat.le_of_lt_succ hv) hvk)]
+      · have hvk : v ≠ k := by omega
+        simp [c₂, c₁, setPhase, hvk, hpend v (by omega)]
+  obtain ⟨t, c, hsteps, hdone, _⟩ := run g.size (Nat.le_refl _)
+  exact ⟨t, c, hsteps, hdone⟩
+
 end
 
 end Veir.Air

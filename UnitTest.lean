@@ -37,3 +37,4 @@ import UnitTest.DataLayout
 import UnitTest.RegisterAllocation
 import UnitTest.Air
 import UnitTest.AirChan
+import UnitTest.AirAie

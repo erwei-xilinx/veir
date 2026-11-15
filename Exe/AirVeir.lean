@@ -4,7 +4,7 @@ import Veir.Air.Rewrite
 import Veir.Air.Instance
 import Veir.Air.Channels
 import Veir.Air.ChanGlue
-import Veir.Air.Aie
+import Veir.Air.AieCert
 
 /-! # `air-veir`: AIR async programs in VeIR
 
@@ -52,7 +52,7 @@ Options:
                                  air.launch, air.herd, memref.alloc, ...)
   --max-orders=<n>               stop enumerating finishing orders after n (default 100000)
   --max-states=<n>               aie: stop exploring after n states (default 200000)
-  --no-por                       aie: explore without partial-order reduction
+  --no-por                       aie: never fall back to partial-order reduction
   --all-outcomes                 aie: print every distinct outcome (default: the first 4)
   --args=<i,j,...>               values of the function's scalar (index, integer) arguments,
                                  in order. `run` uses 0 for missing ones; `races` treats
@@ -467,24 +467,54 @@ def cmdAie (args : Args) (file : String) : IO Bool := do
       IO.println s!"@{name}: refused: {e}"
       ok := false
     | .ok m =>
-      let r := m.explore args.maxStates args.por
+      -- The exploration proposes a certificate; Veir.Air.AieCert checks it.
+      -- First without partial-order reduction, which can prove completeness; if that hits the
+      -- bound, with it, which can still find reachable verdicts.
+      let (c, hitLimit, usedPor) :=
+        let (c, h) := m.exploreCert args.maxStates false
+        if h && args.por then
+          let (c', h') := m.exploreCert args.maxStates true
+          (c', h', true)
+        else (c, h, false)
+      let parentsOk := c.parentsB m
+      let closed := !hitLimit && c.closedB m
       IO.println s!"@{name}: {m.chans.size} DMA channel(s), {m.cores.size} core(s), {m.locks.size} lock(s), \
-        {m.tasks.size} task(s); {r.states} state(s){if r.complete then "" else " (bound reached)"}"
-      match r.deadlock with
-      | some tr =>
+        {m.tasks.size} task(s); {c.states.size} state(s){if hitLimit then " (bound reached)" else ""}"
+      if !parentsOk then
+        IO.println "  internal error: the exploration's certificate failed its check"
         ok := false
+        continue
+      IO.println (if closed then
+          "  proven (AieCert.Cert.exact): these are exactly the reachable states, so the verdicts below are complete"
+        else if usedPor then
+          "  every verdict below is reachable (AieCert.Cert.parents_sound); completeness rests on partial-order reduction, which is not proven"
+        else
+          "  every verdict below is reachable (AieCert.Cert.parents_sound); the bound was reached, so there may be more")
+      let finals := (List.range c.states.size).filter fun i => (m.post c.states[i]!).isEmpty
+      let deadlocks := finals.filter fun i => c.states[i]!.fault.isNone && c.states[i]!.rtPc < m.runtime.size
+      let faults := finals.filter fun i => c.states[i]!.fault.isSome
+      let mut outcomes : Array (Array (Array Val)) := #[]
+      for i in finals do
+        let st := c.states[i]!
+        if st.fault.isNone && st.rtPc ≥ m.runtime.size then
+          let host := m.hostArgs.map (st.mem[·]!)
+          if !outcomes.contains host then outcomes := outcomes.push host
+      match deadlocks.head? with
+      | some i =>
+        ok := false
+        let tr := c.traceTo m i
         IO.println s!"  DEADLOCK: the runtime sequence cannot finish; a run reaching it ({tr.size} step(s)):"
         for l in tr.toList.drop (tr.size - min tr.size 12) do IO.println s!"    {l}"
       | none => IO.println "  no deadlock"
-      if let some (f, tr) := r.fault then
+      if let some i := faults.head? then
         ok := false
-        IO.println s!"  FAULT: {f} (after {tr.size} step(s))"
-      IO.println s!"  {r.outcomes.size} distinct outcome(s) of host memory"
-      for o in (if args.allOutcomes then r.outcomes.toList else r.outcomes.toList.take 4) do
+        IO.println s!"  FAULT: {c.states[i]!.fault.getD ""} (after {(c.traceTo m i).size} step(s))"
+      IO.println s!"  {outcomes.size} distinct outcome(s) of host memory"
+      for o in (if args.allOutcomes then outcomes.toList else outcomes.toList.take 4) do
         let parts := (m.hostArgs.toList.zip o.toList).map fun (b, vs) =>
           s!"{m.buffers[b]!.1} = [{runs vs.toList}]"
         IO.println s!"    {", ".intercalate parts}"
-      if r.outcomes.size > 1 then ok := false
+      if outcomes.size > 1 then ok := false
   return ok
 
 def main (argv : List String) : IO UInt32 := do

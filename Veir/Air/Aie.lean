@@ -675,12 +675,12 @@ structure ChanSt where
   queue : List Nat := []
   /-- A receiver of packets: the sender whose packet it is taking (T8: packets do not interleave). -/
   pktFrom : Option Nat := none
-deriving Inhabited, BEq, Hashable
+deriving Inhabited, DecidableEq, Hashable
 
 structure CoreSt where
   pc : Nat := 0
   counters : Array Nat := #[]
-deriving Inhabited, BEq, Hashable
+deriving Inhabited, DecidableEq, Hashable
 
 structure St where
   locks : Array Int
@@ -691,7 +691,7 @@ structure St where
   tasksDone : Array Bool
   /-- A core computation went wrong (out of bounds, an arith failure): reported, not explored. -/
   fault : Option String := none
-deriving Inhabited
+deriving Inhabited, DecidableEq
 
 def St.key (s : St) : UInt64 :=
   let memH := s.mem.foldl (fun h a => a.foldl (fun h v => mixHash h (hash (showVal v))) h) 7

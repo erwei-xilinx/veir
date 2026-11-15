@@ -1,11 +1,14 @@
 // C6 target model (Veir/Air/AIE_SEMANTICS.md): an aie.device after air-to-aie and airrt-to-npu,
 // explored over every interleaving of locks, DMA transfers, cores and the runtime sequence.
+// Verdicts come with a certificate checked by Veir.Air.AieCert: every listed state is reachable,
+// and, when the list is closed under the model's steps, it is every reachable state.
 
 // RUN: air-veir aie --allow-unregistered-dialect %S/Inputs/aie_passthrough.mlir 2>/dev/null | filecheck %s --check-prefix=PASS
 // RUN: not air-veir aie --allow-unregistered-dialect %S/Inputs/aie_passthrough_deadlock.mlir 2>/dev/null | filecheck %s --check-prefix=DEAD
 // RUN: not air-veir aie --allow-unregistered-dialect %S/Inputs/aie_passthrough_race.mlir 2>/dev/null | filecheck %s --check-prefix=RACE
 
 // PASS: @seg: 4 DMA channel(s), 1 core(s), 4 lock(s), 2 task(s)
+// PASS-NEXT: proven (AieCert.Cert.exact): these are exactly the reachable states
 // PASS-NEXT: no deadlock
 // PASS-NEXT: 1 distinct outcome(s) of host memory
 // PASS-NEXT: %arg0 = [0..63], %arg1 = [0..63]
@@ -25,12 +28,14 @@
 
 // AIR-022: an in-place relay in a loop. The AIR input is deterministic; the lowered design is not.
 // RUN: not air-veir aie --allow-unregistered-dialect %S/Inputs/aie_inplace_relay.mlir 2>/dev/null | filecheck %s --check-prefix=RELAY
+// The explored states are closed under the model's steps, so these are all its outcomes.
+// RELAY: proven (AieCert.Cert.exact)
 // RELAY: no deadlock
 // RELAY-NEXT: 4 distinct outcome(s) of host memory
 // RELAY-DAG: %arg1 = [0..63]
 // RELAY-DAG: %arg1 = [32..63, 32..63]
 
-// Partial-order reduction (stubborn sets) must not change a verdict: the same checks without it.
+// Without the fallback to partial-order reduction: the same verdicts.
 // RUN: air-veir aie --no-por --allow-unregistered-dialect %S/Inputs/aie_l2.mlir 2>/dev/null | filecheck %s --check-prefix=L2
 // RUN: not air-veir aie --no-por --allow-unregistered-dialect %S/Inputs/aie_inplace_relay.mlir 2>/dev/null | filecheck %s --check-prefix=RELAY
 // RUN: not air-veir aie --no-por --allow-unregistered-dialect %S/Inputs/aie_passthrough_deadlock.mlir 2>/dev/null | filecheck %s --check-prefix=DEAD

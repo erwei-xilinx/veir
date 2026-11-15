@@ -98,7 +98,7 @@ inductive Val where
   | opaque (op : Nat) (h : UInt64)
   /-- A memref value: the buffer it names. -/
   | buf (id : Nat)
-deriving BEq, Inhabited
+deriving DecidableEq, Inhabited
 
 def Val.toInt? : Val → Option Int
   | .rv (.int _ (.val b)) => some b.toInt

@@ -70,6 +70,9 @@ structure Endpoint where
   shiftBy : Option Nat := none
   /-- D56: the `air.launch` instance it belongs to; each has its own streams. -/
   inst : Option (Nat × List Int) := none
+  /-- D23: offsets computed by events, read when the transfer runs: each value times its stride
+  is added to every position. -/
+  dynShift : List (HVal × Int) := []
 deriving Inhabited
 
 def Endpoint.count (e : Endpoint) : Nat :=
@@ -100,6 +103,24 @@ def IProgram.endpoint (ip : IProgram) (v : Nat) (issue : Option Nat := none) :
     match xs.mapM fun | .inl n => some n | .inr vp => (c.env[vp]? >>= fun | .val x => x.toInt? | _ => none) with
     | some a => pure a
     | none => throw s!"{what}: a channel transfer's pattern must be known before running"
+  -- D23: an offset an event computes is read when the transfer runs; it is 0 here, and shifts every
+  -- position by its value times its dimension's stride. Sizes and strides must be known.
+  let strides0 ← entries info.side.strides
+  let mut dynShift : List (HVal × Int) := []
+  let mut offs : Array Int := #[]
+  for o in info.side.offsets, d in [0:info.side.offsets.size] do
+    match o with
+    | .inl n => offs := offs.push n
+    | .inr vp =>
+      match c.env[vp]? with
+      | some (.val x) =>
+        match x.toInt? with
+        | some n => offs := offs.push n
+        | none => throw s!"{what}: a channel transfer's pattern must be known before running"
+      | some h@(.result _ _) =>
+        offs := offs.push 0
+        dynShift := dynShift ++ [(h, strides0[d]!)]
+      | _ => throw s!"{what}: a channel transfer's pattern must be known before running"
   -- D54: the issue gives the outermost length, or an offset in elements added to every position:
   -- known before running (host values), or read when the issue runs.
   let mut sizes ← entries info.side.sizes
@@ -123,14 +144,14 @@ def IProgram.endpoint (ip : IProgram) (v : Nat) (issue : Option Nat := none) :
         | none => throw s!"{what}: the offset air.channel.issue gives is not known (pass --args)"
       | some (.result _ _) => shiftBy := some i
       | _ => throw s!"{what}: the offset air.channel.issue gives is not a value"
-  let dims ← sidePositions t (← entries info.side.offsets) sizes (← entries info.side.strides)
+  let dims ← sidePositions t offs sizes strides0
   let sync := e.kind == .putBlocking || e.kind == .getBlocking
   if info.isPut then
     let stream := (← srcStream dims info.padBefore info.padAfter).map (·.map (· + shift))
-    if shiftBy.isNone then checkBounds t ip.buffers[buf]!.name (stream.filterMap id)
+    if shiftBy.isNone && dynShift.isEmpty then checkBounds t ip.buffers[buf]!.name (stream.filterMap id)
     return some { event := v, isPut := true, sync, chan := info.chan, slot := info.indices,
                   feeds := ← feedSlots decl info.indices info.dest, stream, buf, shiftBy,
-                  inst := c.launchInst }
+                  inst := c.launchInst, dynShift }
   else
     let dst0 :=
       if info.padBefore.isEmpty then (positions dims).map (·, false)
@@ -138,9 +159,9 @@ def IProgram.endpoint (ip : IProgram) (v : Nat) (issue : Option Nat := none) :
     let dst := dst0.map fun (q, pad) => (q + shift, pad)
     if !info.padBefore.isEmpty && info.padBefore.size != dims.length then
       throw s!"{what}: padding rank differs from the pattern's"
-    if shiftBy.isNone then checkBounds t ip.buffers[buf]!.name (dst.map (·.1))
+    if shiftBy.isNone && dynShift.isEmpty then checkBounds t ip.buffers[buf]!.name (dst.map (·.1))
     return some { event := v, isPut := false, sync, chan := info.chan, slot := info.indices,
-                  feeds := [info.indices], dst, buf, shiftBy, inst := c.launchInst }
+                  feeds := [info.indices], dst, buf, shiftBy, inst := c.launchInst, dynShift }
 
 def IProgram.analyzeChannels (ip : IProgram) : Except String ChanAnalysis := do
   let p := ip.prog

@@ -56,6 +56,10 @@ structure ChanModel where
   destination. -/
   srcShift : Array (Option Nat) := #[]
   dstShift : Array (List (Option Nat)) := #[]
+  /-- D23: per element, offsets computed by events that shift its source; per slot, its
+  destination. -/
+  srcDyn : Array (List (HVal × Int)) := #[]
+  dstDyn : Array (List (List (HVal × Int))) := #[]
 
 /-- The streams of a program: the slots a put feeds together (one, or a broadcast's), and slots
 only gets read. -/
@@ -130,6 +134,8 @@ def IProgram.chanModel (ip : IProgram) (ca : ChanAnalysis)
   let mut dstLoc : Array (List (Option (Nat × Int))) := #[]
   let mut srcShift : Array (Option Nat) := #[]
   let mut dstShift : Array (List (Option Nat)) := #[]
+  let mut srcDyn : Array (List (HVal × Int)) := #[]
+  let mut dstDyn : Array (List (List (HVal × Int))) := #[]
   for (chan, slots, inst) in streams do
     let puts0 := list.filter fun ep => ep.isPut && ep.chan == chan && ep.feeds == slots && ep.inst == inst
     let name := if slots.length == 1 then s!"@{chan}{slots.head!}" else s!"@{chan} broadcast to {slots}"
@@ -181,6 +187,8 @@ def IProgram.chanModel (ip : IProgram) (ca : ChanAnalysis)
         ((ep.dst.filter (!·.2)).map (·.1))[m - s]?.map (ep.buf, ·))
       srcShift := srcShift.push (src.bind (·.1.shiftBy))
       dstShift := dstShift.push (dsts.map fun d => d.bind fun ((ep : Endpoint), _) => ep.shiftBy)
+      srcDyn := srcDyn.push ((src.map (·.1.dynShift)).getD [])
+      dstDyn := dstDyn.push (dsts.map fun d => (d.map fun ((ep : Endpoint), _) => ep.dynShift).getD [])
   -- DMAs with known patterns: a stream from the event to itself, unbuffered (D20, D21).
   let mut dmaEvents : Std.HashSet Nat := {}
   for v in [0:n] do
@@ -198,13 +206,15 @@ def IProgram.chanModel (ip : IProgram) (ca : ChanAnalysis)
       dstLoc := dstLoc.push [some (db, q)]
       srcShift := srcShift.push none
       dstShift := dstShift.push [none]
+      srcDyn := srcDyn.push []
+      dstDyn := dstDyn.push [[]]
   -- D54: a transfer an issue starts begins after the issue has run.
   let g' : DepGraph := ⟨g.preds.mapIdx fun v ps =>
     match ca.issueOf[v]? with
     | some i => ps ++ [i]
     | none => ps⟩
   return { prog := ⟨g', elems⟩, srcOf, dstOf, slotName, pos, srcLoc, srcBuf, dstLoc, dmaEvents,
-           srcShift, dstShift }
+           srcShift, dstShift, srcDyn, dstDyn }
 
 /-- A fresh buffer number for the values in flight. -/
 def IProgram.slotBuf (ip : IProgram) : Nat := ip.buffers.size
@@ -237,11 +247,21 @@ def ChanModel.dstShiftAt (cm : ChanModel) (k i : Nat) : Option Nat :=
 /-- Element `k`'s write at slot `i`: one location; or, when an issue shifts it at run time (D54),
 any location of the buffer (D23) and the offset the issue wrote. -/
 def ChanModel.dstAccess (cm : ChanModel) (ip : IProgram) (k i : Nat) : List Access :=
+  let dyn := (cm.dstDyn[k]? >>= (·[i]?)).getD []
+  let dynReads : List Access := dyn.filterMap fun (h, _) => match h with
+    | .result e _ => some ⟨ip.resultBuf, .read, [Int.ofNat e]⟩
+    | _ => none
+  let whole (b : Nat) : Access := ⟨b, .write, (List.range ip.buffers[b]!.type.numel).map Int.ofNat⟩
   match cm.dstAt k i, cm.dstShiftAt k i with
-  | some (b, _), some iss =>
-    [⟨b, .write, (List.range ip.buffers[b]!.type.numel).map Int.ofNat⟩, ⟨ip.resultBuf, .read, [Int.ofNat iss]⟩]
-  | some (b, q), none => [⟨b, .write, [q]⟩]
+  | some (b, _), some iss => [whole b, ⟨ip.resultBuf, .read, [Int.ofNat iss]⟩] ++ dynReads
+  | some (b, q), none => if dyn.isEmpty then [⟨b, .write, [q]⟩] else whole b :: dynReads
   | none, _ => []
+
+/-- D23: the shift an element's run-time offsets give, from the values computed so far. -/
+def dynValue (m : MState) (dyn : List (HVal × Int)) : Option Int :=
+  dyn.foldlM (fun acc (h, st) => do
+    let v ← m.resolve h >>= Val.toInt?
+    pure (acc + v * st)) 0
 
 /-- What each label reads and writes (`Chan.MemSpec.fp` on this program). -/
 def IProgram.labelFp (ip : IProgram) (ca : ChanAnalysis) (cm : ChanModel)
@@ -259,10 +279,15 @@ def IProgram.labelFp (ip : IProgram) (ca : ChanAnalysis) (cm : ChanModel)
   | .read k =>
     let slotW : Access := ⟨ip.slotBuf, .write, [k]⟩
     let whole (b : Nat) : List Int := (List.range ip.buffers[b]!.type.numel).map Int.ofNat
+    let dyn := (cm.srcDyn[k]?).getD []
+    let dynReads : List Access := dyn.filterMap fun (h, _) => match h with
+      | .result e _ => some ⟨ip.resultBuf, .read, [Int.ofNat e]⟩
+      | _ => none
     match (cm.srcLoc[k]?).join, (cm.srcShift[k]?).join with
-    -- Shifted at run time (D54): any element of the buffer (D23), and the offset the issue wrote.
-    | some (b, _), some i => [slotW, ⟨b, .read, whole b⟩, ⟨ip.resultBuf, .read, [Int.ofNat i]⟩]
-    | some (b, q), none => [slotW, ⟨b, .read, [q]⟩]
+    -- Shifted at run time (D54, D23): any element of the buffer, and the offsets read.
+    | some (b, _), some i => [slotW, ⟨b, .read, whole b⟩, ⟨ip.resultBuf, .read, [Int.ofNat i]⟩] ++ dynReads
+    | some (b, q), none =>
+      if dyn.isEmpty then [slotW, ⟨b, .read, [q]⟩] else [slotW, ⟨b, .read, whole b⟩] ++ dynReads
     | none, _ => [slotW]
   | .push _ => []
   | .pull k i =>
@@ -308,7 +333,9 @@ def IProgram.fireLabel (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalys
   | .read k =>
     let b := cm.srcBuf[k]!
     if s.m.freed.contains b then return freed s!"the read of element {k}"
-    let shift := match (cm.srcShift[k]?).join with
+    let some dshift := dynValue s.m ((cm.srcDyn[k]?).getD [])
+      | return { s with m := { s.m with fault := some s!"the read of element {k}: an offset computed by an event is not known yet" } }
+    let shift := dshift + match (cm.srcShift[k]?).join with
       | some i => s.shifts.getD i 0
       | none => 0
     match (cm.srcLoc[k]?).join with
@@ -319,7 +346,9 @@ def IProgram.fireLabel (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalys
     | none => return { s with slots := s.slots.insert k (zeroOf ip.buffers[b]!.type) }
   | .pull k i =>
     let some (b, q₀) := cm.dstAt k i | return s
-    let q := q₀ + ((cm.dstShiftAt k i).map (s.shifts.getD · 0)).getD 0
+    let some dshift := dynValue s.m ((cm.dstDyn[k]? >>= (·[i]?)).getD [])
+      | return { s with m := { s.m with fault := some s!"element {k}'s write: an offset computed by an event is not known yet" } }
+    let q := q₀ + dshift + ((cm.dstShiftAt k i).map (s.shifts.getD · 0)).getD 0
     if s.m.freed.contains b then return freed s!"element {k}'s write"
     if q < 0 || q ≥ ip.buffers[b]!.type.numel then
       return { s with m := { s.m with fault := some s!"element {k}'s write: position {q} is outside {ip.buffers[b]!.name}" } }
@@ -329,7 +358,9 @@ def IProgram.fireLabel (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalys
     let mut mem := s.m.mem
     for i in [0:n] do
       let some (b, q₀) := cm.dstAt k i | continue
-      let q := q₀ + ((cm.dstShiftAt k i).map (s.shifts.getD · 0)).getD 0
+      let some dshift := dynValue s.m ((cm.dstDyn[k]? >>= (·[i]?)).getD [])
+        | return { s with m := { s.m with fault := some s!"element {k}'s write: an offset computed by an event is not known yet" } }
+      let q := q₀ + dshift + ((cm.dstShiftAt k i).map (s.shifts.getD · 0)).getD 0
       if s.m.freed.contains b then return freed s!"element {k}'s write"
       if q < 0 || q ≥ ip.buffers[b]!.type.numel then
         return { s with m := { s.m with fault := some s!"element {k}'s write: position {q} is outside {ip.buffers[b]!.name}" } }

@@ -506,7 +506,14 @@ partial def walkOps (ctx : IRContext OpCode) (ops : Array OperationPtr)
       else if hierarchyOps.contains name then env ← hierarchyInstance ctx op env path
       else if name == "air.translate" then env ← translateInstance ctx op env path
       else if name == "air.custom" then env ← customInstance ctx op env path
-      else if name == "affine.apply" then env ← affineApply ctx op env path
+      else if name == "affine.apply" then
+        -- On a value an event computes, a blocking event (D45); otherwise evaluated now.
+        let onResult ← (op.getOperands! ctx).toList.anyM fun v => do
+          match env[v]? with
+          | some (.result _ _) => pure true
+          | _ => pure false
+        if onResult then env ← syncOpInstance ctx op env path
+        else env ← affineApply ctx op env path
       else if name == "veir.opaque_constant" then
         -- A non-integer constant (VEIR-004): an opaque value (D22).
         env := env.insert (.opResult ⟨op, 0⟩) (.val (opaqueOf op [] 0))
@@ -1156,6 +1163,18 @@ def IProgram.finishExecute (ctx : IRContext OpCode) (ip : IProgram) (v : Nat) (s
       | none =>
         let r : Val := if ins.any (· == .undef) then .undef else opaqueOf inner ins.toList 0
         for i in [0:inner.getNumResults! ctx] do vals := vals.insert (.opResult ⟨inner, i⟩) r
+    else if iname == "affine.apply" then
+      -- On values events computed (D45): the map, evaluated when the event runs.
+      let some map := affineText ctx inner "map" | return fail "affine.apply: missing map"
+      let nDims := Affine.numDims "affine_map" map
+      let res := ValuePtr.opResult ⟨inner, 0⟩
+      match ins.toList.mapM Val.toInt? with
+      | some ns =>
+        match Affine.evalMap map (ns.take nDims) (ns.drop nDims) with
+        | .ok [r] => vals := vals.insert res (intVal ctx res r)
+        | .ok _ => return fail "affine.apply: the map does not have one result"
+        | .error m => return fail s!"affine.apply: {m}"
+      | none => vals := vals.insert res .undef
     else if iname == "memref.copy" && ins.size == 2 && (ins[0]! matches .buf _) && (ins[1]! matches .buf _) &&
         (operands.toList.all fun o =>
           let t := typeString (o.getType! ctx)

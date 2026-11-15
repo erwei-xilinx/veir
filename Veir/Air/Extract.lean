@@ -271,7 +271,25 @@ def evalArith (ctx : IRContext OpCode) (op : OperationPtr) (operands : Array Run
     | .ok (results, _) => .ok results
     | .ub _ => .error s!"'{opName ctx op}' has undefined behaviour"
     | .fail _ => .error s!"'{opName ctx op}' could not be interpreted"
-  | _ => .error s!"'{opName ctx op}' is not an arith operation"
+  | _ =>
+    -- Integer casts VeIR does not register, as upstream MLIR defines them: `extsi` and
+    -- `index_cast` sign-extend, `extui` and `index_castui` zero-extend, `trunci` truncates.
+    let name := opName ctx op
+    let signed := name == "arith.extsi" || name == "arith.index_cast" || name == "arith.trunci"
+    let unsigned := name == "arith.extui" || name == "arith.index_castui"
+    if !(signed || unsigned) then .error s!"'{name}' is not an arith operation" else
+    let width : Option Nat := match (op.getResultTypes! ctx)[0]? with
+      | some t =>
+        let ts := Attribute.toString t.val
+        if ts == "index" then some 64
+        else if ts.startsWith "i" then (ts.drop 1).toString.toNat? else none
+      | none => none
+    match (operands[0]? : Option RuntimeValue), width with
+    | some (.int _ (.val b)), some w =>
+      let v : Int := if unsigned then b.toNat else b.toInt
+      .ok #[.int w (.val (BitVec.ofInt w v))]
+    | some (.int _ _), some w => .ok #[.int w .poison]
+    | _, _ => .error s!"'{name}': unsupported operand or result type"
 
 /-- The host's constants, before any event starts. -/
 def Program.initState (ctx : IRContext OpCode) (p : Program) : RunState := Id.run do

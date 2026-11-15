@@ -291,8 +291,7 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
         | .ok ca => pure ca
         | .error e => throw (IO.userError s!"@{name}: {e}")
       -- D33 and D37 come from the extraction; the rest from the proven channel model.
-      let ruleErrors := ca.errors.filter fun e => e.startsWith "channel order race" || (e.splitOn "(D37)").length > 1
-      chanLines := chanLines ++ ruleErrors.map (s!"  error: " ++ ·) ++ ca.warnings.map (s!"  warning: " ++ ·)
+      chanLines := chanLines ++ ca.errors.map (s!"  error: " ++ ·)
       match ip.chanModel ca with
       | .error e => chanLines := chanLines ++ [s!"  error: not covered: {e}"]
       | .ok cm =>

@@ -37,3 +37,9 @@
 // INTERP-LABEL: @token_arg:
 // INTERP-NEXT:  1 distinct outcome(s)
 // INTERP-LABEL: @rank_talk: a schedule: %arg0 = [1001 : i32, 1000 : i32, 2 : i32, 3 : i32]
+
+// Decision D47 -- an L1 buffer outside the herd, used whole by every tile, is one buffer (D46 = A):
+// the tiles race. AIR privatises it per core (AIR-023), a hack.
+// RUN: not air-veir races --allow-unregistered-dialect %S/Inputs/d47_herd_scratch.mlir 2>/dev/null | filecheck %s --check-prefix=SCRATCH
+// SCRATCH: @herd_scratch: 4 event(s), 2 buffer(s), 1 race(s)
+// SCRATCH-NEXT: race: {{.*}} between event 1 (iteration [0, 0]) (a synchronous op) and event 2 (iteration [1, 0]) (a synchronous op)

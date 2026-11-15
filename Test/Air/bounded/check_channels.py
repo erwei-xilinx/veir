@@ -107,6 +107,8 @@ def main():
     progs = [p for k in range(2, args.endpoints + 1) for p in itertools.product(KINDS, repeat=k) if sync_ok(p)]
     stats = {key: [0, 0, 0, 0] for key in ("input", "air-dependency", "canonicalize", "D33 only")}
     examples, failures = [], []
+    verdicts = {}  # (key, function) -> (races, deadlock, D33, other)
+    outcomes = {}  # (key, function) -> host memory at the end (unique when race-free)
     with tempfile.TemporaryDirectory() as tmp:
         for c in range(0, len(progs), args.chunk):
             chunk = progs[c:c + args.chunk]
@@ -132,7 +134,15 @@ def main():
                 errs = [l for l in v.stderr.splitlines() if not l.startswith("warning:")]
                 if errs:
                     failures.append(f"air-veir ({key}) chunk {c}: {errs[0][:200]}")
+                if key in ("input", "D33 only"):
+                    oc = subprocess.run([AIR_VEIR, "outcome", "--allow-unregistered-dialect", f],
+                                        capture_output=True, text=True).stdout
+                    for line in oc.splitlines():
+                        m = re.match(r"^@(\w+): (.*)$", line)
+                        if m:
+                            outcomes[(key, m.group(1))] = m.group(2)
                 for fn, (races, dead, d33, other) in summarize(v.stdout).items():
+                    verdicts[(key, fn)] = (races, dead, d33, other)
                     s = stats[key]
                     s[0] += races > 0
                     s[1] += dead
@@ -144,6 +154,15 @@ def main():
     print(f"  {'':16} {'racy':>6} {'deadlock':>9} {'D33':>6} {'other':>6}")
     for key, (r, d, o, e) in stats.items():
         print(f"  {key:16} {r:6} {d:9} {o:6} {e:6}")
+    # AIR-011's classes: of the programs air-dependency deadlocks, those whose minimal async form
+    # (D33 only) is correct need no edge at all; the others have no correct all-async form.
+    dead = [fn for (k, fn), v in verdicts.items() if k == "air-dependency" and v[1]]
+    clean = [fn for fn in dead if not any(verdicts.get(("D33 only", fn), (1, True, 1, 1)))]
+    same = [fn for fn in clean if outcomes.get(("D33 only", fn)) == outcomes.get(("input", fn))]
+    print(f"  of {len(dead)} deadlocked by air-dependency: {len(clean)} have a D33-only async form without races or deadlock;"
+          f" {len(same)} of those compute what the synchronous input computes")
+    for fn in [f for f in dead if f not in same][:args.show]:
+        print(f"    the D33-only form is racy, deadlocks or computes something else: {fn}: {describe(progs[int(fn[1:])])}")
     for e in examples:
         print(e)
     for f in failures[:5]:

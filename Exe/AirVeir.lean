@@ -303,6 +303,15 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
         chanLines := chanLines ++ [s!"  DEADLOCK (proven, Chan.checkH_false): no execution completes; these events never finish: {", ".intercalate (unfinished.map eventAt)}"]
         if let some k := waiting.head? then
           chanLines := chanLines ++ [s!"  the first element that never moves: element {cm.pos[k]!} of {cm.slotName[k]!}"]
+        -- Why, when the streams are unbalanced (a fragment of a program, D34).
+        let noPut := (List.range cp.elems.size).filter fun k => (cp.elems[k]?.map (·.src.isNone)).getD false
+        let noGet := (List.range cp.elems.size).filter fun k => match cp.elems[k]? with
+          | some e => e.src.isSome && !e.buffered && e.dsts.any (·.isNone)
+          | none => false
+        if !noPut.isEmpty then
+          chanLines := chanLines ++ [s!"  note: {noPut.length} element(s) that gets wait for no put provides"]
+        if !noGet.isEmpty then
+          chanLines := chanLines ++ [s!"  note: {noGet.length} element(s) of async puts no get takes (D34)"]
       | some true =>
         chanLines := chanLines ++ ["  no deadlock (proven, Chan.checkH_true): an execution completes, and every execution can (Chan.completes_from_anywhere)"]
         let arr := cv.trace.toArray

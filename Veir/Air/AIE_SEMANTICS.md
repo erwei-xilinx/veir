@@ -103,3 +103,9 @@ tested by `Test/Air/aie.mlir`.
 
   The memtile relay is lowered correctly; the L1 relay with a core between its S2MM and MM2S
   is not.
+- Phase 2, extended: 60 programs (in-place or copy relays; direct, L2, or broadcast to two
+  tiles). Results:
+  - 50 correct, including all 30 copy relays;
+  - 8 are AIR-022: every in-place K = 4 case that completes;
+  - 2 exceed 2M states;
+  - 0 mismatches with and without partial-order reduction.

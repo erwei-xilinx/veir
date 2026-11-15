@@ -97,6 +97,21 @@ def IProgram.endpoint (ip : IProgram) (v : Nat) (issue : Option Nat := none) :
     | .val (.buf b) => some b
     | .result e i => ip.resultBufs[(e, i)]?
     | _ => none
+  -- A whole view: its elements, where they lie in the buffer (`IProgram.viewPos`).
+  let viewP : Option (Nat × Array Int) := match c.env[info.side.memref]? with
+    | some (.result e i) => ip.viewPos[(e, i)]?
+    | _ => none
+  if let some (vb, P) := viewP then
+    if issue.isSome then throw s!"{what}: an air.channel.issue on a view is not supported"
+    let sync := e.kind == .putBlocking || e.kind == .getBlocking
+    if info.isPut then
+      return some { event := v, isPut := true, sync, chan := info.chan, slot := info.indices,
+                    feeds := ← feedSlots decl info.indices info.dest, stream := P.toList.map some,
+                    buf := vb, inst := c.launchInst }
+    else
+      return some { event := v, isPut := false, sync, chan := info.chan, slot := info.indices,
+                    feeds := [info.indices], dst := P.toList.map (·, false), buf := vb,
+                    inst := c.launchInst }
   let some buf := c.env[info.side.memref]? >>= bufOfH | throw s!"{what}: unknown buffer"
   let t := ip.buffers[buf]!.type
   let entries (xs : Array (Int ⊕ ValuePtr)) : Except String (Array Int) :=

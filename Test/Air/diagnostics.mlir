@@ -21,8 +21,10 @@
 // A DMA without async is synchronous (D24): it runs, and orders what comes after it.
 // RUN: air-veir graph --allow-unregistered-dialect %S/Inputs/blocking_dma.mlir | filecheck %s --check-prefix=SYNCDMA
 // SYNCDMA: event 0: air.dma_memcpy_nd (blocking) waits for [], keeps []
-// RUN: not air-veir graph --allow-unregistered-dialect %S/Inputs/refuse_dma_on_view.mlir 2>&1 | filecheck %s --check-prefix=VIEW
-// VIEW: a DMA on a view is not supported; fold the view into the pattern first
+// A DMA from a whole subview: the view's elements, where they lie in the buffer (subview offset 4).
+// A pattern on a view is still refused (D14, AIR-009).
+// RUN: air-veir outcome --allow-unregistered-dialect %S/Inputs/refuse_dma_on_view.mlir 2>&1 | filecheck %s --check-prefix=VIEW
+// VIEW: @dma_on_view: %arg0 = [0..7], %arg1 = [4..7]
 // A host memref.dealloc is a blocking event since D45 (sync_ops.mlir).
 
 // Memory inside an air.execute is modelled since layer 2.

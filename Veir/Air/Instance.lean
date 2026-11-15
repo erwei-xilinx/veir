@@ -91,6 +91,7 @@ structure IProgram where
   resultBufs : Std.HashMap (Nat × Nat) Nat
   /-- Memref results that are views (subviews, reshapes) of their buffer. -/
   viewResults : Std.HashSet (Nat × Nat)
+  viewPos : Std.HashMap (Nat × Nat) (Nat × Array Int) := {}
   /-- The buffers of the memref arguments, with their names, in order. -/
   argBufs : Array Nat
   /-- How many loops were instantiated. -/
@@ -110,6 +111,8 @@ structure IState where
   dmas : Std.HashMap Nat DmaInfo := {}
   resultBufs : Std.HashMap (Nat × Nat) Nat := {}
   viewResults : Std.HashSet (Nat × Nat) := {}
+  /-- Where each view result's elements lie in its buffer (`viewPositions`). -/
+  viewPos : Std.HashMap (Nat × Nat) (Nat × Array Int) := {}
   loops : Nat := 0
   chanDecls : Std.HashMap String ChanDecl := {}
   chans : Std.HashMap Nat ChanInfo := {}
@@ -291,6 +294,51 @@ def pushEvent (e : Event) (c : EventCtx) : IM Nat := do
                 blocking := if blocking then [id] else st.blocking }
   return id
 
+/-- Where each element of a view lies in its buffer, in the view's row-major order, from where the
+source's elements lie (`src`) and the source's shape. `memref.subview` as upstream defines it (the
+same as `Pattern.subviewFrom`); reshapes and casts keep the order; `memref.reinterpret_cast`
+addresses the buffer itself. `none` for other views, or unknown operands. -/
+def viewPositions (ctx : IRContext OpCode) (op : OperationPtr) (src : Nat × Array Int)
+    (srcShape : List Nat) (intOf : ValuePtr → Option Int) : Option (Nat × Array Int) := do
+  let name := opName ctx op
+  if ["memref.collapse_shape", "memref.expand_shape", "memref.reshape", "memref.cast"].contains name then
+    return src
+  if name != "memref.subview" && name != "memref.reinterpret_cast" then none
+  let props := unregProps ctx op
+  let seg ← denseInts (findProp props "operandSegmentSizes")
+  let operands := op.getOperands! ctx
+  let dyn (k : Nat) : Array ValuePtr :=
+    let start := (seg.toList.take k).foldl (fun a (n : Int) => a + n.toNat) 0
+    operands.extract start (start + (seg[k]?.getD 0).toNat)
+  let resolve (stat : Array Int) (d : Array ValuePtr) : Option (List Int) := do
+    let xs ← (decodeList stat d).toOption
+    let ys : Array Int ← xs.mapM fun (x : Int ⊕ ValuePtr) => match x with | .inl n => some n | .inr v => intOf v
+    pure ys.toList
+  let offs ← resolve (← denseInts (findProp props "static_offsets")) (dyn 1)
+  let sizes ← resolve (← denseInts (findProp props "static_sizes")) (dyn 2)
+  let strides ← resolve (← denseInts (findProp props "static_strides")) (dyn 3)
+  -- Every multi-index of `sizes`, row-major.
+  let idxs : List (List Int) := sizes.foldr (init := [[]]) fun n acc =>
+    (List.range n.toNat).flatMap fun (i : Nat) => acc.map ((i : Int) :: ·)
+  let (b, P) := src
+  let dot (xs ys : List Int) : Int := (xs.zip ys).foldl (fun a (x, y) => a + x * y) 0
+  if name == "memref.reinterpret_cast" then
+    -- Addresses the buffer: only over a whole buffer in its own order.
+    if P != (List.range P.size).toArray.map Int.ofNat then none
+    let off ← offs.head?
+    let ps : List Int := idxs.map fun i => off + dot i strides
+    if ps.any (fun q => q < 0 || q ≥ (P.size : Int)) then none
+    return (b, ps.toArray)
+  -- subview: source index off + i * stride, row-major in the source's shape.
+  let shape : List Int := srcShape.map Int.ofNat
+  let rs : List Int := (List.range shape.length).map fun d => ((shape.drop (d + 1)).foldl (· * ·) 1)
+  let ps ← idxs.mapM fun i => do
+    let srcIdx : List Int := (i.zip (offs.zip strides)).map fun (x, (o, st)) => o + x * st
+    let lin := dot srcIdx rs
+    if lin < 0 then none
+    P[lin.toNat]?
+  return (b, ps.toArray)
+
 /-- What a body (an `air.execute`'s, or the single op of a synchronous op, D45) captures:
 the values from outside it, the events whose results it reads, the buffers its allocations
 create, and which of its values name buffers or views. -/
@@ -300,6 +348,8 @@ structure Captured where
   allocBufs : Std.HashMap OperationPtr Nat
   localBuf : Std.HashMap ValuePtr Nat
   localView : Std.HashSet ValuePtr
+  /-- Views whose element positions are known (`viewPositions`). -/
+  localViewPos : Std.HashMap ValuePtr (Nat × Array Int) := {}
 
 def captureBody (ctx : IRContext OpCode) (what : String) (ops : Array OperationPtr)
     (env : Std.HashMap ValuePtr HVal) (id : Nat) (path : List Int) : IM Captured := do
@@ -309,6 +359,7 @@ def captureBody (ctx : IRContext OpCode) (what : String) (ops : Array OperationP
   let mut allocBufs : Std.HashMap OperationPtr Nat := {}
   let mut localBuf : Std.HashMap ValuePtr Nat := {}
   let mut localView : Std.HashSet ValuePtr := {}
+  let mut localViewPos : Std.HashMap ValuePtr (Nat × Array Int) := {}
   for inner in ops do
     let iname := opName ctx inner
     if iname == "air.execute" then
@@ -350,11 +401,31 @@ def captureBody (ctx : IRContext OpCode) (what : String) (ops : Array OperationP
       let sb := localBuf[src]? <|> (captured[src]? >>= staticBuf (← get))
       if let some sb := sb then localBuf := localBuf.insert (.opResult ⟨inner, 0⟩) sb
       localView := localView.insert (.opResult ⟨inner, 0⟩)
+      -- Where its elements lie, when that is known before running.
+      let st ← get
+      let srcPos : Option (Nat × Array Int) :=
+        localViewPos[src]? <|>
+        (match captured[src]? with
+         | some (.result e i) => st.viewPos[(e, i)]?
+         | _ => none) <|>
+        (if localView.contains src || (match captured[src]? with
+              | some (.result e i) => st.viewResults.contains (e, i) | _ => false) then none
+         else sb.map fun b => (b, (List.range st.buffers[b]!.type.numel).toArray.map Int.ofNat))
+      let srcShape := match parseMemRefType (typeString (src.getType! ctx)) with
+        | .ok t => t.shape
+        | .error _ => []
+      let intOf (v : ValuePtr) : Option Int :=
+        match captured[v]? <|> env[v]? with
+        | some (.val x) => x.toInt?
+        | _ => none
+      if let some sp := srcPos then
+        if let some vp := viewPositions ctx inner sp srcShape intOf then
+          localViewPos := localViewPos.insert (.opResult ⟨inner, 0⟩) vp
     else if iname == "memref.load" || iname == "memref.store" then
       let m := (inner.getOperands! ctx)[if iname == "memref.load" then 0 else 1]!
       if localView.contains m then throw s!"{what}: '{iname}' through a view is not supported"
     inBody := inBody.insert inner
-  return { captured, dataDeps, allocBufs, localBuf, localView }
+  return { captured, dataDeps, allocBufs, localBuf, localView, localViewPos }
 
 /-- An op without `async` that is not otherwise an event (`memref.dealloc`, `linalg.*`,
 `func.call`, ...): a blocking event whose body is the op itself, so the host issues nothing after
@@ -375,6 +446,8 @@ def syncOpInstance (ctx : IRContext OpCode) (op : OperationPtr)
       modify fun st => { st with resultBufs := st.resultBufs.insert (id, i + 1) b }
     if cap.localView.contains y then
       modify fun st => { st with viewResults := st.viewResults.insert (id, i + 1) }
+    if let some vp := cap.localViewPos[y]? then
+      modify fun st => { st with viewPos := st.viewPos.insert (id, i + 1) vp }
   return out
 
 /-- The integer a host value is, if it is known. -/
@@ -624,6 +697,8 @@ partial def executeInstance (ctx : IRContext OpCode) (op : OperationPtr)
       modify fun st => { st with resultBufs := st.resultBufs.insert (id, i + 1) yb }
     if localView.contains y then
       modify fun st => { st with viewResults := st.viewResults.insert (id, i + 1) }
+    if let some vp := cap.localViewPos[y]? then
+      modify fun st => { st with viewPos := st.viewPos.insert (id, i + 1) vp }
   return out
 
 /-- An `air.dma_memcpy_nd` instance. -/
@@ -657,11 +732,13 @@ partial def dmaInstance (ctx : IRContext OpCode) (op : OperationPtr)
       let some b := staticBuf (← get) captured[m]! | throw s!"{what}: the DMA's memref does not name a buffer the model knows"
       let pb ← peerBuffer what b r
       captured := captured.insert m (.val (.buf pb))
-  for m in [info.dst.memref, info.src.memref] do
+  for (m, side) in [(info.dst.memref, info.dst), (info.src.memref, info.src)] do
     let st ← get
     if let .result e i := captured[m]! then
       if st.viewResults.contains (e, i) then
-        throw s!"{what}: a DMA on a view is not supported; fold the view into the pattern first"
+        -- A whole view whose element positions are known; a pattern on a view is not (D14).
+        if !(st.viewPos.contains (e, i) && side.offsets.isEmpty && side.sizes.isEmpty && side.strides.isEmpty) then
+          throw s!"{what}: a DMA on a view with a pattern is not supported (D14, AIR-009); fold the view into the pattern first"
     if (staticBuf st captured[m]!).isNone then
       throw s!"{what}: the DMA's memref does not name a buffer the model knows"
   let blocking := op.getNumResults! ctx = 0
@@ -727,7 +804,9 @@ partial def channelInstance (ctx : IRContext OpCode) (op : OperationPtr)
   let st ← get
   if let .result e i := captured[memref]! then
     if st.viewResults.contains (e, i) then
-      throw s!"{what}: a channel endpoint on a view is not supported; fold the view into the pattern first"
+      -- A whole view whose element positions are known; a pattern on a view is not (D14).
+      if !(st.viewPos.contains (e, i) && offs.isEmpty && szs.isEmpty && strs.isEmpty && padBefore.isEmpty) then
+        throw s!"{what}: a channel endpoint on a view with a pattern is not supported (D14, AIR-009); fold the view into the pattern first"
   if (staticBuf st captured[memref]!).isNone then
     throw s!"{what}: the memref does not name a buffer the model knows"
   let blocking := op.getNumResults! ctx = 0
@@ -1057,7 +1136,8 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
   let ((_, argBufs), st) ← go.run {}
   let prog : Program := { func, events := st.events, hostOps := #[] }
   return { prog, ctxs := st.ctxs, buffers := st.buffers, dmas := st.dmas,
-           resultBufs := st.resultBufs, viewResults := st.viewResults, argBufs, loops := st.loops,
+           resultBufs := st.resultBufs, viewResults := st.viewResults, viewPos := st.viewPos,
+           argBufs, loops := st.loops,
            chanDecls := st.chanDecls, chans := st.chans, issues := st.issues, inits := st.inits }
 
 /-! ### Running -/
@@ -1275,6 +1355,59 @@ def IProgram.finish (ctx : IRContext OpCode) (ip : IProgram) (v : Nat) (s : MSta
 def IProgram.run (ctx : IRContext OpCode) (ip : IProgram) (order : List Nat) : MState :=
   order.foldl (fun s v => ip.finish ctx v s) ip.initState
 
+/-- A DMA whose buffers and patterns are known before running: its source buffer and stream
+(`none` for padding), its destination buffer and positions. `none` if anything is unknown or the
+DMA is invalid (D20); such a DMA stays one atomic event. -/
+def IProgram.staticDma (ip : IProgram) (v : Nat) :
+    Option (Nat × List (Option Int) × Nat × List Int) := do
+  let e ← ip.prog.events[v]?
+  if e.kind != .dma && e.kind != .dmaBlocking then none
+  let info ← ip.dmas[v]?
+  let c ← ip.ctxs[v]?
+  let staticOf (h : HVal) : Option Val := match h with | .val v => some v | _ => none
+  let bufOfH (h : HVal) : Option Nat := match h with
+    | .val (.buf b) => some b
+    | .result e i => ip.resultBufs[(e, i)]?
+    | _ => none
+  -- A whole view: its elements, where they lie in the buffer (`viewPos`).
+  let viewOf (vp : ValuePtr) (side : DmaSide) : Option (Nat × Array Int) :=
+    match c.env[vp]? with
+    | some (.result e i) =>
+      if side.offsets.isEmpty && side.sizes.isEmpty && side.strides.isEmpty then ip.viewPos[(e, i)]? else none
+    | _ => none
+  if (viewOf info.src.memref info.src).isSome || (viewOf info.dst.memref info.dst).isSome then
+    if !info.padBefore.isEmpty then none
+    let (sb, sp) ← (viewOf info.src.memref info.src) <|>
+      ((c.env[info.src.memref]? >>= bufOfH).bind fun b =>
+        if info.src.offsets.isEmpty && info.src.sizes.isEmpty && info.src.strides.isEmpty then
+          some (b, (List.range ip.buffers[b]!.type.numel).toArray.map Int.ofNat) else none)
+    let (db, dp) ← (viewOf info.dst.memref info.dst) <|>
+      ((c.env[info.dst.memref]? >>= bufOfH).bind fun b =>
+        if info.dst.offsets.isEmpty && info.dst.sizes.isEmpty && info.dst.strides.isEmpty then
+          some (b, (List.range ip.buffers[b]!.type.numel).toArray.map Int.ofNat) else none)
+    if sp.size != dp.size then none
+    return (sb, sp.toList.map some, db, dp.toList)
+  let sb ← c.env[info.src.memref]? >>= bufOfH
+  let db ← c.env[info.dst.memref]? >>= bufOfH
+  let entries (xs : Array (Int ⊕ ValuePtr)) : Option (Array Int) :=
+    xs.mapM fun | .inl n => some n | .inr vp => c.env[vp]? >>= staticOf >>= Val.toInt?
+  let st := ip.buffers[sb]!.type
+  let dt := ip.buffers[db]!.type
+  let r : Except String _ := do
+    let sdims ← sidePositions st (← (entries info.src.offsets).elim (throw "") pure)
+      (← (entries info.src.sizes).elim (throw "") pure) (← (entries info.src.strides).elim (throw "") pure)
+    let ddims ← sidePositions dt (← (entries info.dst.offsets).elim (throw "") pure)
+      (← (entries info.dst.sizes).elim (throw "") pure) (← (entries info.dst.strides).elim (throw "") pure)
+    let stream ← srcStream sdims info.padBefore info.padAfter
+    let dpos := positions ddims
+    if stream.length != dpos.length then throw ""
+    checkBounds st "" (stream.filterMap id)
+    checkBounds dt "" dpos
+    pure (sb, stream, db, dpos)
+  match r with
+  | .ok x => some x
+  | .error _ => none
+
 /-! ### Footprints -/
 
 /-- What each event reads and writes, from what is known before running: constants, host
@@ -1295,6 +1428,10 @@ def IProgram.footprints (ctx : IRContext OpCode) (ip : IProgram) :
     let mut acc : List Access := []
     match e.kind with
     | .dma | .dmaBlocking =>
+      -- Known patterns (whole views included): the streams themselves.
+      if let some (sb, stream, db, dpos) := ip.staticDma v then
+        fps := fps.push [⟨sb, .read, stream.filterMap id⟩, ⟨db, .write, dpos⟩]
+        continue
       let info := ip.dmas[v]!
       let some sb := c.env[info.src.memref]? >>= bufOfH | fps := fps.push acc; continue
       let some db := c.env[info.dst.memref]? >>= bufOfH | fps := fps.push acc; continue
@@ -1372,41 +1509,6 @@ def IProgram.footprints (ctx : IRContext OpCode) (ip : IProgram) :
     | _ => pure ()
     fps := fps.push acc
   return (fps, issues)
-
-/-- A DMA whose buffers and patterns are known before running: its source buffer and stream
-(`none` for padding), its destination buffer and positions. `none` if anything is unknown or the
-DMA is invalid (D20); such a DMA stays one atomic event. -/
-def IProgram.staticDma (ip : IProgram) (v : Nat) :
-    Option (Nat × List (Option Int) × Nat × List Int) := do
-  let e ← ip.prog.events[v]?
-  if e.kind != .dma && e.kind != .dmaBlocking then none
-  let info ← ip.dmas[v]?
-  let c ← ip.ctxs[v]?
-  let staticOf (h : HVal) : Option Val := match h with | .val v => some v | _ => none
-  let bufOfH (h : HVal) : Option Nat := match h with
-    | .val (.buf b) => some b
-    | .result e i => ip.resultBufs[(e, i)]?
-    | _ => none
-  let sb ← c.env[info.src.memref]? >>= bufOfH
-  let db ← c.env[info.dst.memref]? >>= bufOfH
-  let entries (xs : Array (Int ⊕ ValuePtr)) : Option (Array Int) :=
-    xs.mapM fun | .inl n => some n | .inr vp => c.env[vp]? >>= staticOf >>= Val.toInt?
-  let st := ip.buffers[sb]!.type
-  let dt := ip.buffers[db]!.type
-  let r : Except String _ := do
-    let sdims ← sidePositions st (← (entries info.src.offsets).elim (throw "") pure)
-      (← (entries info.src.sizes).elim (throw "") pure) (← (entries info.src.strides).elim (throw "") pure)
-    let ddims ← sidePositions dt (← (entries info.dst.offsets).elim (throw "") pure)
-      (← (entries info.dst.sizes).elim (throw "") pure) (← (entries info.dst.strides).elim (throw "") pure)
-    let stream ← srcStream sdims info.padBefore info.padAfter
-    let dpos := positions ddims
-    if stream.length != dpos.length then throw ""
-    checkBounds st "" (stream.filterMap id)
-    checkBounds dt "" dpos
-    pure (sb, stream, db, dpos)
-  match r with
-  | .ok x => some x
-  | .error _ => none
 
 /-- The races, with a witness each: exactly `races` (proven exact by `raceFreeB_iff`). -/
 def IProgram.raceReports (ip : IProgram) (fps : Array (List Access)) : List RaceReport :=

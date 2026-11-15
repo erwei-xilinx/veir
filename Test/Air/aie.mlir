@@ -44,3 +44,17 @@
 // The AIR program has the same outcome (memref.copy is interpreted element by element).
 // RUN: air-veir outcome --allow-unregistered-dialect %S/Inputs/copy_relay_input.mlir 2>/dev/null | filecheck %s --check-prefix=COPYAIR
 // COPYAIR: @f: %arg0 = [0..31], %arg1 = [0..31]
+
+// Packet flows (T6-T10): two tiles return their halves through packet flows.
+// RUN: air-veir aie --allow-unregistered-dialect %S/Inputs/aie_packet.mlir 2>/dev/null | filecheck %s --check-prefix=PKT
+// PKT: no deadlock
+// PKT-NEXT: 1 distinct outcome(s) of host memory
+// PKT-NEXT: %arg0 = [0..31], %arg1 = [0..31]
+
+// Both packet flows into one S2MM: the packets arrive whole (T8), in either order; never mixed.
+// RUN: not air-veir aie --all-outcomes --allow-unregistered-dialect %S/Inputs/aie_packet_fanin.mlir 2>/dev/null | filecheck %s --check-prefix=FANIN
+// RUN: not air-veir aie --no-por --all-outcomes --allow-unregistered-dialect %S/Inputs/aie_packet_fanin.mlir 2>/dev/null | filecheck %s --check-prefix=FANIN
+// FANIN: no deadlock
+// FANIN-NEXT: 2 distinct outcome(s) of host memory
+// FANIN-DAG: %arg1 = [0..31]
+// FANIN-DAG: %arg1 = [16..31, 0..15]

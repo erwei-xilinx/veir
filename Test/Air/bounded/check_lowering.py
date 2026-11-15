@@ -50,7 +50,9 @@ def program(path, k, hoist, tiles, body="inplace"):
         L.append(f"  air.channel @Out [{tiles}, 1]")
     else:
         for ch in ["In", "Out"] + (["ToL1", "FromL1"] if path == "l2" else []):
-            L.append(f"  air.channel @{ch} [{tiles}, 1]")
+            # `pkt`: results return through a packet channel (T6-T10).
+            ty = ' {channel_type = "npu_dma_packet"}' if (path == "pkt" and ch == "Out") else ""
+            L.append(f"  air.channel @{ch} [{tiles}, 1]{ty}")
     L.append(f"  func.func @f(%in: memref<{N}xi32>, %out: memref<{NO}xi32>) {{")
     L.append("    %c1 = arith.constant 1 : index")
     L.append(f"    air.launch (%lx) in (%ls=%c1) args(%ain=%in, %aout=%out) : memref<{N}xi32>, memref<{NO}xi32> {{")
@@ -137,6 +139,7 @@ def run(cmd, timeout=900):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--only")
+    ap.add_argument("--paths", default="direct,l2,bcast,pkt")
     ap.add_argument("--keep", help="directory to keep every program and design in")
     ap.add_argument("--max-states", type=int, default=200000)
     ap.add_argument("--compare-por", action="store_true",
@@ -148,8 +151,8 @@ def main():
     os.makedirs(tmp, exist_ok=True)
     stats = {}
     cases = [(p, k, h, t, b) for p, k, h, t, b in
-             itertools.product(["direct", "l2", "bcast"], [1, 2, 4], [False, True], [1, 2], ["inplace", "copy"])
-             if not (p == "bcast" and t == 1)]
+             itertools.product(["direct", "l2", "bcast", "pkt"], [1, 2, 4], [False, True], [1, 2], ["inplace", "copy"])
+             if not (p == "bcast" and t == 1) and p in args.paths.split(",")]
     for path, k, hoist, tiles, body in cases:
         name = f"{path}_k{k}_{'hoist' if hoist else 'inner'}_t{tiles}_{body}"
         if args.only and args.only != name:

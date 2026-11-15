@@ -1,0 +1,30 @@
+module {
+  air.channel @In [2, 1]
+  air.channel @Out [2, 1] {channel_type = "npu_dma_packet"}
+  func.func @f(%in: memref<32xi32>, %out: memref<32xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%lx) in (%ls=%c1) args(%ain=%in, %aout=%out) : memref<32xi32>, memref<32xi32> {
+      %c0 = arith.constant 0 : index
+      %c16 = arith.constant 16 : index
+      %u1 = arith.constant 1 : index
+      air.channel.put @In[%c0, %c0] (%ain[%c0] [%c16] [%u1]) : (memref<32xi32>)
+      air.channel.put @In[%u1, %c0] (%ain[%c16] [%c16] [%u1]) : (memref<32xi32>)
+      air.segment @seg {
+        %s1 = arith.constant 1 : index
+        %s2 = arith.constant 2 : index
+        air.herd @h tile (%x, %y) in (%sx=%s2, %sy=%s1) {
+          %a = memref.alloc() : memref<16xi32, 2>
+          %b = memref.alloc() : memref<16xi32, 2>
+          air.channel.get @In[%x, %y] (%a[] [] []) : (memref<16xi32, 2>)
+          memref.copy %a, %b : memref<16xi32, 2> to memref<16xi32, 2>
+          air.channel.put @Out[%x, %y] (%b[] [] []) : (memref<16xi32, 2>)
+          memref.dealloc %a : memref<16xi32, 2>
+          memref.dealloc %b : memref<16xi32, 2>
+        }
+      }
+      air.channel.get @Out[%c0, %c0] (%aout[%c0] [%c16] [%u1]) : (memref<32xi32>)
+      air.channel.get @Out[%u1, %c0] (%aout[%c16] [%c16] [%u1]) : (memref<32xi32>)
+    }
+    return
+  }
+}

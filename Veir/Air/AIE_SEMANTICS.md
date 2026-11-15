@@ -12,6 +12,11 @@ and who confirmed it. As in `SEMANTICS.md`, nothing is encoded before it is conf
 | T3 | Streams have **no buffering**: a word moves only when its sender and its receiver both take part (a rendezvous), as AIR's async transfers do (D30). FIFO depths are a hardware detail the compiler cannot control | ✅ 2026-11-14 ("assume没有buffer深度") |
 | T4 | A core runs its body in program order: locks as T1, other computation as opaque reads and writes. Cores are persistent: a core stops at `aie.end` and is not restarted. A core may loop forever with a `cf.br` back to the start of a block ("while true"), which must be modelled | ✅ 2026-11-14 |
 | T5 | `repeat_count = N` (on `aie.dma_start`, a task, or a queue push) runs the whole task — the BD chain from its first BD to `aie.end` — N + 1 times. Each run performs every BD's acquire and release again. An endless chain never completes, so its repeat count is meaningless | ❓ researched in mlir-aie `35fa6b1`, to be confirmed (see below) |
+| T6 | A sending BD with `packet = <pkt_type, pkt_id>` emits one packet per run: a header and the BD's data. The packet ends with the BD (TLAST) | ✅ 2026-11-14 (section-2g: "stamps a packet header on every transfer this BD emits") |
+| T7 | A DMA destination (or a shim's South port) drops the header; with `keep_pkt_header`, the header is one extra word (not modelled yet: refused) | ✅ 2026-11-14 (routing.md) |
+| T8 | Packets do not interleave: a receiver taking a packet takes all of it before another. Packets from different senders arrive in any order. A packet flow with several destinations delivers each packet to all of them at once | ✅ 2026-11-14 (routing.md: "An arbiter holds its grant until the packet it is passing ends") |
+| T9 | A (not out-of-order) S2MM BD ends when it has received its length; packet boundaries do not end it, and a packet ending mid-BD lets the BD continue with the next packet. Out-of-order S2MM is refused | ✅ 2026-11-14 |
+| T10 | The model works at `aie.packet_flow` level, before switchbox routing: each flow is its own path, competing only at shared destination ports. Arbiter sharing is the router's concern (routing.md: it avoids the deadlocks it could cause). `pkt_type` plays no part in routing | ✅ 2026-11-14 |
 
 ## T5, the evidence
 
@@ -42,6 +47,7 @@ separate hardware mode.
   `repeat_count` (T5);
 - DMA-to-DMA `aie.flow`s, a sender reaching several receivers as a broadcast (T3: all take each
   word);
+- `aie.packet_flow`s between DMAs, with BD and shim-task packet ids (T6-T10);
 - cores as code: `aie.use_lock`, `cf.br`, `scf.for` with constant bounds, `aie.end`. Each run of
   lock-free ops between them is one atomic `exec`, interpreted: `arith`, `memref.load`/`store`
   (indices may be constants, inner induction variables, or those of enclosing counter loops),
@@ -75,7 +81,7 @@ where the sequence has not ended and nothing can move; it is reported with the s
 More than one outcome means the design is nondeterministic.
 
 **Refused for now, with the op named:**
-- packet flows; core or cascade stream ends;
+- `keep_pkt_header`, out-of-order S2MM; core or cascade stream ends;
 - BD padding and `iteration`;
 - runtime offsets and lengths;
 - `cf.cond_br` / `scf.if` in cores;

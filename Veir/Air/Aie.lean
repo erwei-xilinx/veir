@@ -45,6 +45,8 @@ structure BD where
   positions : Array Int
   post : Array LockUse
   next : Option Nat
+  /-- The packet id a sending BD stamps (T6): each run of the BD is one packet. -/
+  packet : Option Nat := none
 deriving Inhabited, Repr
 
 /-- A DMA channel. `mm2s` sends from memory to the stream, otherwise it receives. A tile channel
@@ -119,6 +121,8 @@ structure Model where
   chans : Array Chan
   /-- For each sending channel, the channels its flows reach (T3: all of them take each word). -/
   routes : Array (Array Nat)
+  /-- Packet routes (T6-T10): (sender, packet id) to the receivers of that packet flow. -/
+  pktRoutes : Std.HashMap (Nat × Nat) (Array Nat) := {}
   cores : Array Core
   tasks : Array Task
   runtime : Array RtOp
@@ -166,6 +170,8 @@ structure EState where
   runtime : Array RtOp := #[]
   hostArgs : Array Nat := #[]
   flows : Array ((Int × Int × Nat × Nat) × (Int × Int × Nat × Nat)) := #[]
+  /-- Packet flows: source (column, row, bundle, channel), packet id, destinations. -/
+  pktFlows : Array ((Int × Int × Nat × Nat) × Nat × Array (Int × Int × Nat × Nat)) := #[]
   /-- Induction variables of the counter loops enclosing the code being compiled. -/
   outerIvs : Std.HashMap ValuePtr (Nat × Int × Int × Int × Nat) := {}
 
@@ -209,7 +215,7 @@ def lockUse (ctx : IRContext OpCode) (op : OperationPtr) : EM LockUse := do
 listed outermost first (`AIEOps.td`, `dma_bd`); without them, `len` contiguous elements. -/
 def bdPositions (ctx : IRContext OpCode) (op : OperationPtr) (numel : Nat) : Except String (Array Int) := do
   let props := unregProps ctx op
-  for unsupported in ["pad_before", "pad_after", "iteration", "dimensions", "packet"] do
+  for unsupported in ["pad_before", "pad_after", "iteration", "dimensions", "out_of_order_id"] do
     if (findProp props unsupported).isSome then
       throw s!"aie.dma_bd: '{unsupported}' is not supported yet"
   let operands := op.getOperands! ctx
@@ -225,6 +231,15 @@ def bdPositions (ctx : IRContext OpCode) (op : OperationPtr) (numel : Nat) : Exc
     return ps.toArray
   | none, none => return (List.range len).toArray.map fun (k : Nat) => offset + k
   | _, _ => throw "aie.dma_bd: sizes without strides"
+
+/-- The `pkt_id` of an op's `packet = #aie.packet_info<pkt_type = t, pkt_id = i>`. -/
+def packetId (ctx : IRContext OpCode) (op : OperationPtr) : Option Nat :=
+  match findProp (unregProps ctx op) "packet" with
+  | some a =>
+    match ((Attribute.toString a).splitOn "pkt_id = ")[1]? with
+    | some rest => (String.ofList (rest.toList.takeWhile Char.isDigit)).toNat?
+    | none => none
+  | none => none
 
 /-- A BD chain from a block: each block holds acquires, one `aie.dma_bd`, releases, and ends in
 `aie.next_bd` or `aie.end`. Returns the BDs and the index of `start`. -/
@@ -252,6 +267,7 @@ partial def bdChain (ctx : IRContext OpCode) (start : BlockPtr) (bufOfArg : Valu
     let mut pre := #[]
     let mut post := #[]
     let mut bd : Option (Nat × Array Int) := none
+    let mut pkt : Option Nat := none
     for op in ops.pop do
       match opName ctx op with
       | "aie.use_lock" =>
@@ -266,6 +282,7 @@ partial def bdChain (ctx : IRContext OpCode) (start : BlockPtr) (bufOfArg : Valu
           | .ok ps => pure ps
           | .error e => throw e
         bd := some (buf, ps)
+        pkt := packetId ctx op
       | "arith.constant" => pure ()
       | n => throw s!"BD chain: '{n}' is not supported in a BD block"
     let some (buf, ps) := bd | throw "BD chain: a block without aie.dma_bd"
@@ -273,7 +290,7 @@ partial def bdChain (ctx : IRContext OpCode) (start : BlockPtr) (bufOfArg : Valu
     let next := if opName ctx term == "aie.next_bd" then
         (term.getSuccessors! ctx)[0]? >>= index.get?
       else none
-    bds := bds.push { pre, buf, positions := ps, post, next }
+    bds := bds.push { pre, buf, positions := ps, post, next, packet := pkt }
   return (bds, index[start]!)
 
 /-- The channels an `aie.mem` / `aie.memtile_dma` / `aie.shim_dma` region starts. -/
@@ -529,6 +546,10 @@ partial def runtimeSeq (ctx : IRContext OpCode) (op : OperationPtr) : EM Unit :=
           let n := acc.size
           pure (acc.mapIdx fun i bd => { bd with next := if i + 1 < n then some (i + 1) else none }, 0)
       let rep := ((propInt ctx o "repeat_count").getD 0).toNat
+      -- A shim task on a packet flow stamps its header on every BD (T6).
+      let bds := match packetId ctx o with
+        | some p => bds.map fun bd => { bd with packet := some p }
+        | none => bds
       let id := (← get).tasks.size
       modify fun st => { st with
         tasks := st.tasks.push { chan, bds, repeatCount := rep },
@@ -584,6 +605,26 @@ partial def extract (ctx : IRContext OpCode) (device : OperationPtr) : Except St
         -- WireBundle 1 is DMA (AIEAttrs.td); cores and cascades on streams are not modelled yet.
         if sb != 1 || db != 1 then throw s!"aie.flow: only DMA-to-DMA flows are supported (bundles {sb} -> {db})"
         modify fun st => { st with flows := st.flows.push ((sc, sr, sb, sch), (dc, dr, db, dch)) }
+      | "aie.packet_flow" =>
+        let some id := propInt ctx o "ID" | throw "aie.packet_flow: no ID"
+        if (match findProp (unregProps ctx o) "keep_pkt_header" with
+            | some (.integerAttr i) => i.value != 0
+            | some a => (Attribute.toString a).startsWith "true"
+            | none => false) || hasAttrNamed ctx o "keep_pkt_header" then
+          throw "aie.packet_flow: keep_pkt_header is not supported yet"
+        let some body := (o.getRegion! ctx 0).getFirstBlock! ctx | throw "aie.packet_flow: empty"
+        let mut src : Option (Int × Int × Nat × Nat) := none
+        let mut dsts : Array (Int × Int × Nat × Nat) := #[]
+        for e in blockOps ctx body do
+          let en := opName ctx e
+          if en != "aie.packet_source" && en != "aie.packet_dest" then continue
+          let some (c, r) := (← get).tiles[(e.getOperands! ctx)[0]!]? | throw s!"{en}: unknown tile"
+          let b := ((propInt ctx e "bundle").getD 0).toNat
+          let ch := ((propInt ctx e "channel").getD 0).toNat
+          if b != 1 then throw s!"{en}: only DMA endpoints are supported (bundle {b})"
+          if en == "aie.packet_source" then src := some (c, r, b, ch) else dsts := dsts.push (c, r, b, ch)
+        let some sk := src | throw "aie.packet_flow: no source"
+        modify fun st => { st with pktFlows := st.pktFlows.push (sk, id.toNat, dsts) }
       | _ => pure ()
     for o in ops do
       match opName ctx o with
@@ -596,7 +637,7 @@ partial def extract (ctx : IRContext OpCode) (device : OperationPtr) : Except St
         modify fun st => { st with cores := st.cores.push { name := s!"core ({c}, {r})", code, counters } }
       | "aie.runtime_sequence" => runtimeSeq ctx o
       | "aie.tile" | "aie.lock" | "aie.buffer" | "aie.external_buffer" | "aie.shim_dma_allocation"
-      | "aie.flow" | "aie.end" | "air.channel" | "aie.logical_tile" => pure ()
+      | "aie.flow" | "aie.packet_flow" | "aie.end" | "air.channel" | "aie.logical_tile" => pure ()
       | n => throw s!"aie.device: '{n}' is not supported yet"
   let ((), st) ← go.run {}
   -- Routes: each sending channel to every channel its flows reach.
@@ -607,8 +648,18 @@ partial def extract (ctx : IRContext OpCode) (device : OperationPtr) : Except St
     let some d := st.chanAt[(dc, dr, false, dch)]?
       | throw s!"aie.flow: no S2MM channel {dch} on tile ({dc}, {dr})"
     routes := routes.modify s (·.push d)
+  let mut pktRoutes : Std.HashMap (Nat × Nat) (Array Nat) := {}
+  for ((sc, sr, _, sch), id, dsts) in st.pktFlows do
+    let some s := st.chanAt[(sc, sr, true, sch)]?
+      | throw s!"aie.packet_flow: no MM2S channel {sch} on tile ({sc}, {sr})"
+    let mut ds := #[]
+    for (dc, dr, _, dch) in dsts do
+      let some d := st.chanAt[(dc, dr, false, dch)]?
+        | throw s!"aie.packet_flow: no S2MM channel {dch} on tile ({dc}, {dr})"
+      ds := ds.push d
+    pktRoutes := pktRoutes.insert (s, id) ds
   return { buffers := st.buffers, hostArgs := st.hostArgs, locks := st.locks, chans := st.chans,
-           routes, cores := st.cores, tasks := st.tasks, runtime := st.runtime }
+           routes, pktRoutes, cores := st.cores, tasks := st.tasks, runtime := st.runtime }
 
 /-! ## Semantics -/
 
@@ -622,6 +673,8 @@ structure ChanSt where
   /-- Shim channels: the task running and those queued. -/
   task : Option Nat := none
   queue : List Nat := []
+  /-- A receiver of packets: the sender whose packet it is taking (T8: packets do not interleave). -/
+  pktFrom : Option Nat := none
 deriving Inhabited, BEq, Hashable
 
 structure CoreSt where
@@ -804,9 +857,13 @@ def Model.steps (m : Model) (s : St) : Array (Label × St) := Id.run do
     let cs := s.chans[c]!
     let some b := cs.bd | continue
     if cs.phase != 1 then continue
-    let dsts := m.routes[c]!
-    if dsts.isEmpty then continue
     let sbd := (m.bdsOf c cs)[b]!
+    -- A packet goes to its flow's receivers, each taking it whole (T6, T8); circuit data to
+    -- the circuit flow's (T3).
+    let dsts := match sbd.packet with
+      | some p => (m.pktRoutes[(c, p)]?).getD #[]
+      | none => m.routes[c]!
+    if dsts.isEmpty then continue
     let mut n := sbd.positions.size - cs.idx
     let mut ok := true
     for d in dsts do
@@ -814,6 +871,7 @@ def Model.steps (m : Model) (s : St) : Array (Label × St) := Id.run do
       match ds.bd with
       | some db =>
         if ds.phase != 1 then ok := false
+        else if sbd.packet.isSome && !(ds.pktFrom == none || ds.pktFrom == some c) then ok := false
         else n := min n ((m.bdsOf d ds)[db]!.positions.size - ds.idx)
       | none => ok := false
     if !ok || n == 0 then continue
@@ -826,7 +884,10 @@ def Model.steps (m : Model) (s : St) : Array (Label × St) := Id.run do
       for w in words, k in [0:n] do
         let q := (dbd.positions[ds.idx + k]!).toNat
         mem := mem.modify dbd.buf (·.set! q w)
-      chans := chans.set! d { ds with idx := ds.idx + n }
+      -- A packet holds its receivers from its first word until the sender's BD ends (T6, T9).
+      let grant := if sbd.packet.isNone then ds.pktFrom
+        else if cs.idx + n ≥ sbd.positions.size then none else some c
+      chans := chans.set! d { ds with idx := ds.idx + n, pktFrom := grant }
     chans := chans.set! c { cs with idx := cs.idx + n }
     out := out.push (.transfer c dsts n, { s with mem, chans })
   -- Cores.
@@ -981,8 +1042,10 @@ structure Act where
   /-- Agents that must take part (a transfer's parties) or could enable it. -/
   others : List Nat := []
 
+/-- Every channel that may send to `c`, through a circuit or a packet flow. -/
 def Model.senders (m : Model) (c : Nat) : List Nat :=
-  (List.range m.chans.size).filter fun s => m.routes[s]!.contains c
+  (List.range m.chans.size).filter fun s =>
+    m.routes[s]!.contains c || m.pktRoutes.toList.any fun ((s', _), ds) => s' == s && ds.contains c
 
 def Model.nextAct (m : Model) (feet : Array Foot) (s : St) (enabled : Std.HashSet Nat) (a : Nat) : Option Act :=
   let releasers (l : Nat) := (List.range feet.size).filter fun b => b != a && feet[b]!.rel.contains l
@@ -1003,7 +1066,12 @@ def Model.nextAct (m : Model) (feet : Array Foot) (s : St) (enabled : Std.HashSe
       if cs.phase == 0 then (bd.pre[cs.idx]?).map lockAct
       else if cs.phase == 2 then (bd.post[cs.idx]?).map lockAct
       else
-        let parties := if m.chans[c]!.mm2s then m.routes[c]!.toList else m.senders c
+        -- A sender's receivers (for a packet: its flow's), and every other sender that may compete
+        -- for them (T8); a receiver's possible senders.
+        let rcv := match bd.packet with
+          | some p => ((m.pktRoutes[(c, p)]?).getD #[]).toList
+          | none => m.routes[c]!.toList
+        let parties := if m.chans[c]!.mm2s then rcv ++ rcv.flatMap m.senders else m.senders c
         if m.chans[c]!.mm2s then some { enabled := on, rd := [bd.buf], host := feet[c]!.host, others := parties }
         else some { enabled := on, wr := [bd.buf], host := feet[c]!.host, others := parties }
   else if a < m.runtimeAgent then

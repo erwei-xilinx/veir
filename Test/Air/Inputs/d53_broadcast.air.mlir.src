@@ -1,0 +1,89 @@
+module {
+  air.channel @B [1, 1] {broadcast_shape = [2 : index, 1 : index]}
+  air.channel @Sig [1, 1]
+  // D53: an async put broadcast to a sync get (tile 0) and an async get (tile 1) that waits for
+  // tile 0's signal. A rendezvous with both gets at once (D53 = (ii)): no execution completes.
+  func.func @mixed_signalled(%src: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    air.launch (%lx) in (%ls=%c1) args(%s=%src) : memref<4xi32> {
+      air.segment @seg args(%ss=%s) : memref<4xi32> {
+        %k1 = arith.constant 1 : index
+        %k2 = arith.constant 2 : index
+        %z = arith.constant 0 : index
+        %p = air.channel.put async @B[%z, %z] (%ss[] [] []) : (memref<4xi32>)
+        air.herd @h tile (%x, %y) in (%sx=%k2, %sy=%k1) {
+          %k0 = arith.constant 0 : index
+          %a = memref.alloc() : memref<4xi32, 2>
+          %f = memref.alloc() : memref<1xi32, 2>
+          %is0 = arith.cmpi eq, %x, %k0 : index
+          scf.if %is0 {
+            air.channel.get @B[%x, %y] (%a[] [] []) : (memref<4xi32, 2>)
+            air.channel.put @Sig[] (%f[] [] []) : (memref<1xi32, 2>)
+          } else {
+            air.channel.get @Sig[] (%f[] [] []) : (memref<1xi32, 2>)
+            %g = air.channel.get async @B[%x, %y] (%a[] [] []) : (memref<4xi32, 2>)
+            air.wait_all [%g]
+          }
+          memref.dealloc %a : memref<4xi32, 2>
+          memref.dealloc %f : memref<1xi32, 2>
+        }
+      }
+    }
+    return
+  }
+  // The same without the signal: both gets start, so the broadcast moves and completes.
+  func.func @mixed_free(%src: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%lx) in (%ls=%c1) args(%s=%src) : memref<4xi32> {
+      air.segment @seg args(%ss=%s) : memref<4xi32> {
+        %k1 = arith.constant 1 : index
+        %k2 = arith.constant 2 : index
+        %z = arith.constant 0 : index
+        %p = air.channel.put async @B[%z, %z] (%ss[] [] []) : (memref<4xi32>)
+        air.herd @h tile (%x, %y) in (%sx=%k2, %sy=%k1) {
+          %k0 = arith.constant 0 : index
+          %a = memref.alloc() : memref<4xi32, 2>
+          %is0 = arith.cmpi eq, %x, %k0 : index
+          scf.if %is0 {
+            air.channel.get @B[%x, %y] (%a[] [] []) : (memref<4xi32, 2>)
+          } else {
+            %g = air.channel.get async @B[%x, %y] (%a[] [] []) : (memref<4xi32, 2>)
+            air.wait_all [%g]
+          }
+          memref.dealloc %a : memref<4xi32, 2>
+        }
+      }
+    }
+    return
+  }
+  // A sync put buffers the broadcast (D53, D30): the signalled form completes.
+  func.func @sync_put_signalled(%src: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%lx) in (%ls=%c1) args(%s=%src) : memref<4xi32> {
+      air.segment @seg args(%ss=%s) : memref<4xi32> {
+        %k1 = arith.constant 1 : index
+        %k2 = arith.constant 2 : index
+        %z = arith.constant 0 : index
+        air.channel.put @B[%z, %z] (%ss[] [] []) : (memref<4xi32>)
+        air.herd @h tile (%x, %y) in (%sx=%k2, %sy=%k1) {
+          %k0 = arith.constant 0 : index
+          %a = memref.alloc() : memref<4xi32, 2>
+          %f = memref.alloc() : memref<1xi32, 2>
+          %is0 = arith.cmpi eq, %x, %k0 : index
+          scf.if %is0 {
+            air.channel.get @B[%x, %y] (%a[] [] []) : (memref<4xi32, 2>)
+            air.channel.put @Sig[] (%f[] [] []) : (memref<1xi32, 2>)
+          } else {
+            air.channel.get @Sig[] (%f[] [] []) : (memref<1xi32, 2>)
+            %g = air.channel.get async @B[%x, %y] (%a[] [] []) : (memref<4xi32, 2>)
+            air.wait_all [%g]
+          }
+          memref.dealloc %a : memref<4xi32, 2>
+          memref.dealloc %f : memref<1xi32, 2>
+        }
+      }
+    }
+    return
+  }
+}

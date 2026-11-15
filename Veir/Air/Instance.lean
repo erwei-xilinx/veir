@@ -853,11 +853,16 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
           let ints (a : Option Attribute) : Option (List Nat) := match a with
             | some (.arrayAttr arr) => arr.value.toList.mapM fun
                 | .integerAttr i => some i.value.toNat
+                | .indexAttr i => some i.value.toNat
                 | _ => none
             | _ => none
           let size := (ints (findProp props "size")).getD []
           let attrs := (d.getAttributes! ctx).entries
-          let broadcast := ints ((attrs.find? (·.1 == "broadcast_shape".toUTF8)).map (·.2))
+          let bAttr := (attrs.find? (·.1 == "broadcast_shape".toUTF8)).map (·.2)
+          let broadcast := ints bAttr
+          -- A broadcast shape that cannot be read must not be taken for no broadcast.
+          if bAttr.isSome && broadcast.isNone then
+            throw s!"air.channel @{String.fromUTF8! nm.value}: its broadcast_shape is not a list of integers"
           let type := match findProp props "channel_type" with
             | some (.stringAttr t) => String.fromUTF8! t.value
             | _ => "npu_dma_stream"

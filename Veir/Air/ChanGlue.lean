@@ -26,10 +26,11 @@ are only known when running stays one event (D7, D23).
 - that the concrete effects (`IProgram.finish`, the copies below) are framed by the footprints
   (`Chan.LFramed`).
 
-Not covered yet, and refused:
-- puts on one subchannel that tokens do not order, as packet fan-in has;
-- a slot fed both by a broadcast put and by other puts;
-- an element from an async put to sync and async gets at once (D51 decides one get only).
+Puts from different subchannels feeding one stream with no token order (packet fan-in) arrive
+whole in any order (D52): `putOrders` lists the orders, and each gives its own model; the
+program's executions are those of all of them.
+
+Not covered yet, and refused: a slot fed both by a broadcast put and by other puts.
 -/
 
 structure ChanModel where
@@ -52,13 +53,9 @@ structure ChanModel where
   /-- DMAs whose transfer is modelled element by element (`IProgram.staticDma`). -/
   dmaEvents : Std.HashSet Nat := {}
 
-def IProgram.chanModel (ip : IProgram) (ca : ChanAnalysis) : Except String ChanModel := do
-  let p := ip.prog
-  let g := p.graph
-  let rows := g.reachRows
-  let n := p.events.size
-  let list := (List.range n).filterMap fun v => ca.endpoints[v]?
-  -- Streams: the slots a put feeds together (one, or a broadcast's), and slots only gets read.
+/-- The streams of a program: the slots a put feeds together (one, or a broadcast's), and slots
+only gets read. -/
+def streamsOf (list : List Endpoint) : List (String × List (List Int)) := Id.run do
   let mut streams : List (String × List (List Int)) := []
   for ep in list do
     if ep.isPut then
@@ -66,6 +63,52 @@ def IProgram.chanModel (ip : IProgram) (ca : ChanAnalysis) : Except String ChanM
   for ep in list do
     if !ep.isPut && !(streams.any fun (c, fs) => c == ep.chan && fs.contains ep.slot) then
       streams := streams ++ [(ep.chan, [ep.slot])]
+  return streams
+
+/-- The orders of `xs` in which every `a` with `before a b` comes before `b`, at most `limit`. -/
+partial def linearOrders (xs : List Nat) (before : Nat → Nat → Bool) (limit : Nat) : List (List Nat) :=
+  match xs with
+  | [] => [[]]
+  | _ => Id.run do
+    let mut out : List (List Nat) := []
+    for x in xs do
+      if xs.any fun y => y != x && before y x then continue
+      for rest in linearOrders (xs.erase x) before limit do
+        if out.length ≥ limit then return out
+        out := out ++ [x :: rest]
+    return out
+
+/-- D52: puts from different subchannels feeding one stream with no token order between them
+arrive whole, in any order. Every order the tokens allow, per stream (events of its puts). -/
+def IProgram.putOrders (ip : IProgram) (ca : ChanAnalysis) (limit : Nat := 64) :
+    Except String (List (List ((String × List (List Int)) × List Nat))) := do
+  let g := ip.prog.graph
+  let rows := g.reachRows
+  let list := (List.range ip.prog.events.size).filterMap fun v => ca.endpoints[v]?
+  let mut choices : List (List ((String × List (List Int)) × List Nat)) := [[]]
+  for (chan, slots) in streamsOf list do
+    let puts := list.filter fun ep => ep.isPut && ep.chan == chan && ep.feeds == slots
+    -- Puts on one subchannel must be ordered by tokens (D33); only different subchannels may race.
+    for a in puts do
+      for b in puts do
+        if a.event < b.event && a.slot == b.slot && !g.reachFast rows a.event b.event then
+          throw s!"@{chan}{a.slot}: puts of events {a.event} and {b.event} on one subchannel with no token path between them (D33)"
+    let orders := linearOrders (puts.map (·.event)) (fun a b => g.reachFast rows a b) (limit + 1)
+    if orders.length > limit then
+      throw s!"@{chan} {slots}: more than {limit} orders of the puts feeding it (D52); too many to check one by one"
+    choices := choices.flatMap fun c => orders.map fun o => c ++ [((chan, slots), o)]
+    if choices.length > limit then
+      throw s!"more than {limit} orders of puts across the program's streams (D52); too many to check one by one"
+  return choices
+
+def IProgram.chanModel (ip : IProgram) (ca : ChanAnalysis)
+    (putOrder : List ((String × List (List Int)) × List Nat) := []) : Except String ChanModel := do
+  let p := ip.prog
+  let g := p.graph
+  let rows := g.reachRows
+  let n := p.events.size
+  let list := (List.range n).filterMap fun v => ca.endpoints[v]?
+  let streams := streamsOf list
   -- A slot belongs to one stream: no put feeds it together with other slots and another alone.
   for (c, fs) in streams do
     for (c', fs') in streams do
@@ -80,12 +123,16 @@ def IProgram.chanModel (ip : IProgram) (ca : ChanAnalysis) : Except String ChanM
   let mut srcBuf : Array Nat := #[]
   let mut dstLoc : Array (List (Option (Nat × Int))) := #[]
   for (chan, slots) in streams do
-    let puts := list.filter fun ep => ep.isPut && ep.chan == chan && ep.feeds == slots
+    let puts0 := list.filter fun ep => ep.isPut && ep.chan == chan && ep.feeds == slots
     let name := if slots.length == 1 then s!"@{chan}{slots.head!}" else s!"@{chan} broadcast to {slots}"
-    -- The stream's order is the token order (D33, D34); it must be total.
+    -- The stream's order: the token order (D33, D34), or the order chosen for puts the tokens
+    -- leave unordered (D52, `putOrders`).
+    let puts := match putOrder.lookup (chan, slots) with
+      | some evs => evs.filterMap fun v => puts0.find? fun (ep : Endpoint) => ep.event == v
+      | none => puts0
     for (a, b) in puts.zip puts.tail do
-      if !g.reachFast rows a.event b.event then
-        throw s!"{name}: puts of events {a.event} and {b.event} feed it with no token path between them; their order in the stream is not defined (D33; packet fan-in is not in the proven channel model yet)"
+      if !g.reachFast rows a.event b.event && (putOrder.lookup (chan, slots)).isNone then
+        throw s!"{name}: puts of events {a.event} and {b.event} feed it with no token path between them; choose an order (D52, putOrders)"
     let mut pr : List (Endpoint × Nat) := []
     let mut ps := 0
     for ep in puts do
@@ -109,15 +156,11 @@ def IProgram.chanModel (ip : IProgram) (ca : ChanAnalysis) : Except String ChanM
       let src := pr.find? fun (ep, s) => s ≤ m && m < s + ep.count
       let dsts : List (Option (Endpoint × Nat)) :=
         grs.map fun (gr, _) => gr.find? fun ((ep : Endpoint), s) => s ≤ m && m < s + ep.count
-      -- D51: buffered iff an end is sync. With several gets, a sync put decides; with an async
-      -- put, the gets must agree.
+      -- D51: point to point, buffered iff an end is sync. D53: a broadcast is buffered iff its
+      -- put is sync; from an async put it meets every get at once, as the hardware does.
       let srcSync := (src.map (·.1.sync)).getD false
-      let present := dsts.filterMap fun d => d.map fun ((ep : Endpoint), _) => ep.sync
-      let buffered ←
-        if srcSync then pure true
-        else if present.all id && !present.isEmpty then pure true
-        else if present.all (!·) then pure false
-        else throw s!"{name}: element {m} goes from an async put to sync and async gets at once; whether it is buffered is not decided (D51 covers one get)"
+      let dstSync := dsts.any fun d => (d.map fun ((ep : Endpoint), _) => ep.sync).getD false
+      let buffered := if slots.length > 1 then srcSync else srcSync || dstSync
       let prev := if m == 0 then none else some (first + m - 1)
       elems := elems.push ⟨src.map (·.1.event), dsts.map fun d => d.map fun ((ep : Endpoint), _) => ep.event, prev, buffered⟩
       srcOf := srcOf.push (src.map fun (ep, s) => (ep.event, m - s))

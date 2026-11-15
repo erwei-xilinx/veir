@@ -232,6 +232,11 @@ def cmdGraph (args : Args) (file : String) : IO Unit := do
     for (u, v) in p.unorderedReads do
       IO.println s!"  warning: event {v} reads a result of event {u} without waiting for it"
 
+/-- The orders chosen for puts no token orders (D52), for messages. -/
+def orderDesc (o : List ((String × List (List Int)) × List Nat)) : String :=
+  "; ".intercalate (o.filterMap fun ((c, _), evs) =>
+    if evs.length > 1 then some s!"@{c}: events {evs}" else none)
+
 def cmdRun (args : Args) (file : String) : IO Unit := do
   let (ctx, top) ← load args file
   for func in topLevelFuncs ctx.raw top do
@@ -241,30 +246,112 @@ def cmdRun (args : Args) (file : String) : IO Unit := do
     let ca ← match ip.analyzeChannels with
       | .ok ca => pure ca
       | .error e => throw (IO.userError s!"@{name}: {e}")
-    let cm ← match ip.chanModel ca with
-      | .ok cm => pure cm
+    let orders ← match ip.putOrders ca with
+      | .ok os => pure os
       | .error e => do IO.println s!"@{name}: not covered: {e}"; continue
     let (fps0, _) := ip.footprints ctx.raw
-    let cv := cm.verdict (ip.labelFp ca cm fps0)
-    match cv.completes with
-    | some false => IO.println s!"@{name}: deadlocks (see `races`)"
-    | none => IO.println s!"@{name}: internal error: the proposed execution failed its check"
-    | some true =>
-      let first := outcome ip (ip.runLabels ctx.raw ca cm cv.trace)
-      IO.println s!"@{name}: {first}"
-      if cv.raceFree then
-        IO.println s!"  race-free: every execution ends with this memory (Chan.outcome_uniqueH)"
-      else
-        match cv.alt with
-        | none => IO.println s!"  races (see `races`): other executions may end differently"
-        | some (x, y, t2) =>
-          let second := outcome ip (ip.runLabels ctx.raw ca cm t2)
-          let eventAt (v : Nat) := s!"event {v}{pathStr ip.ctxs[v]!.path} ({kindName ip.prog.events[v]!.kind})"
-          let names := cm.labelName eventAt
-          if second == first then
-            IO.println s!"  races (see `races`); an execution with {names y} before {names x} ends the same"
-          else
-            IO.println s!"  races (see `races`); an execution with {names y} before {names x} ends differently: {second}"
+    let eventAt (v : Nat) := s!"event {v}{pathStr ip.ctxs[v]!.path} ({kindName ip.prog.events[v]!.kind})"
+    -- D52: one model per order of the puts no token orders; the program's executions are all of
+    -- theirs.
+    let mut lines : List String := []
+    let mut outcomes : List (String × String) := []
+    let mut header : Option String := none
+    for o in orders do
+      let tag := if orders.length > 1 then s!" [puts in order {orderDesc o}]" else ""
+      let cm ← match ip.chanModel ca o with
+        | .ok cm => pure cm
+        | .error e => do header := header <|> some s!"not covered: {e}"; continue
+      let cv := cm.verdict (ip.labelFp ca cm fps0)
+      match cv.completes with
+      | some false => header := header <|> some s!"deadlocks{tag} (see `races`)"
+      | none => header := header <|> some s!"internal error: the proposed execution failed its check{tag}"
+      | some true =>
+        let first := outcome ip (ip.runLabels ctx.raw ca cm cv.trace)
+        if !outcomes.any (·.1 == first) then outcomes := outcomes ++ [(first, tag)]
+        if cv.raceFree then
+          lines := lines ++ [s!"  race-free: every execution ends with this memory (Chan.outcome_uniqueH){tag}"]
+        else
+          match cv.alt with
+          | none => lines := lines ++ [s!"  races (see `races`): other executions may end differently{tag}"]
+          | some (x, y, t2) =>
+            let second := outcome ip (ip.runLabels ctx.raw ca cm t2)
+            let names := cm.labelName eventAt
+            if second == first then
+              lines := lines ++ [s!"  races (see `races`); an execution with {names y} before {names x} ends the same{tag}"]
+            else
+              lines := lines ++ [s!"  races (see `races`); an execution with {names y} before {names x} ends differently: {second}{tag}"]
+    match header with
+    | some h => IO.println s!"@{name}: {h}"
+    | none =>
+      IO.println s!"@{name}: {(outcomes.head?.map (·.1)).getD "no outcome"}"
+      for l in lines.eraseDups do IO.println l
+      for (o, tag) in outcomes.drop 1 do
+        IO.println s!"  another order of puts ends differently (D52): {o}{tag}"
+
+/-- What `races` reports for one model (one order of the puts, D52): its proven verdicts. -/
+def raceLines (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalysis) (cm : ChanModel)
+    (fps0 : Array (List Access)) (eventAt : Nat → String) : List String := Id.run do
+  let p := ip.prog
+  let _ := ctx
+  let mut out : List String := []
+  let cp := cm.prog
+  let labelAt := cm.labelName eventAt
+  let fp := ip.labelFp ca cm fps0
+  let cv := cm.verdict fp
+  let fired : Std.HashSet Chan.Label := Std.HashSet.ofList cv.trace
+  match cv.completes with
+  | none => out := out ++ ["  internal error: the proposed execution failed its check"]
+  | some false =>
+    let unfinished := (List.range p.events.size).filter fun v => !fired.contains (.finish v)
+    let waiting := (List.range cp.elems.size).filter fun k =>
+      match cp.elems[k]? with
+      | some e => (List.range e.dsts.length).any (fun i => e.dsts[i]?.join.isSome && !Chan.gotH fired k i) ||
+          e.src.isSome && !Chan.sentH fired k
+      | none => false
+    out := out ++ [s!"  DEADLOCK (proven, Chan.checkH_false): no execution completes; these events never finish: {", ".intercalate (unfinished.map eventAt)}"]
+    if let some k := waiting.head? then
+      out := out ++ [s!"  the first element that never moves: element {cm.pos[k]!} of {cm.slotName[k]!}"]
+    -- Why, when the streams are unbalanced (a fragment of a program, D34).
+    let noPut := (List.range cp.elems.size).filter fun k => (cp.elems[k]?.map (·.src.isNone)).getD false
+    let noGet := (List.range cp.elems.size).filter fun k => match cp.elems[k]? with
+      | some e => e.src.isSome && !e.buffered && e.dsts.any (·.isNone)
+      | none => false
+    if !noPut.isEmpty then
+      out := out ++ [s!"  note: {noPut.length} element(s) that gets wait for no put provides"]
+    if !noGet.isEmpty then
+      out := out ++ [s!"  note: {noGet.length} element(s) of async puts no get takes (D34)"]
+  | some true =>
+    out := out ++ ["  no deadlock (proven, Chan.checkH_true): an execution completes, and every execution can (Chan.completes_from_anywhere)"]
+    -- Elements of sync puts that nothing gets stay in the buffer (D30): a fragment of a program.
+    let orphans := (List.range cp.elems.size).filter fun k => match cp.elems[k]? with
+      | some e => e.src.isSome && e.buffered && e.dsts.any (·.isNone)
+      | none => false
+    if !orphans.isEmpty then
+      out := out ++ [s!"  note: {orphans.length} element(s) of sync puts are never got (buffered, D30)"]
+    let arr := cv.trace.toArray
+    let mut seen : Std.HashSet (Nat × Nat × String) := {}
+    if !cv.raceFree && cv.witnesses.isEmpty then
+      out := out ++ ["  race: the race check failed, and the reporter found no witness"]
+    for (i, j) in cv.witnesses do
+      -- Name the pair in event (program) order, not in the order this execution fired it.
+      let (x, y) := if cm.owner arr[j]! < cm.owner arr[i]! then (arr[j]!, arr[i]!) else (arr[i]!, arr[j]!)
+      let witness := (fp x).findSome? fun a => (fp y).findSome? fun b =>
+        if a.conflictsB b then
+          let bs : Std.HashSet Int := Std.HashSet.ofList b.elems
+          (a.elems.find? bs.contains).map fun e =>
+            let kind := match a.kind, b.kind with
+              | .write, .read => "RAW" | .read, .write => "WAR" | _, _ => "WAW"
+            (kind, if a.buf == ip.slotBuf then "an element in flight"
+              else if a.buf == ip.resultBuf then "the results of an event"
+              else ip.buffers[a.buf]!.name, e)
+        else none
+      if let some (kind, buffer, e) := witness then
+        -- One message per pair of events and buffer.
+        let key := (cm.owner x, cm.owner y, buffer)
+        if !seen.contains key then
+          seen := seen.insert key
+          out := out ++ [s!"  race: {kind} on {buffer} element {e} between {labelAt x} and {labelAt y}, which no execution order fixes"]
+  return out
 
 def cmdRaces (args : Args) (file : String) : IO Bool := do
   let (ctx, top) ← load args file
@@ -283,66 +370,19 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
       | .error e => throw (IO.userError s!"@{name}: {e}")
     -- D33 and D37 come from the extraction; the rest from the proven channel model.
     chanLines := chanLines ++ ca.errors.map (s!"  error: " ++ ·)
-    match ip.chanModel ca with
+    match ip.putOrders ca with
     | .error e => chanLines := chanLines ++ [s!"  error: not covered: {e}"]
-    | .ok cm =>
-      let cp := cm.prog
-      let labelAt := cm.labelName eventAt
-      let fp := ip.labelFp ca cm fps0
-      let cv := cm.verdict fp
-      let fired : Std.HashSet Chan.Label := Std.HashSet.ofList cv.trace
-      match cv.completes with
-      | none => chanLines := chanLines ++ ["  internal error: the proposed execution failed its check"]
-      | some false =>
-        let unfinished := (List.range p.events.size).filter fun v => !fired.contains (.finish v)
-        let waiting := (List.range cp.elems.size).filter fun k =>
-          match cp.elems[k]? with
-          | some e => (List.range e.dsts.length).any (fun i => e.dsts[i]?.join.isSome && !Chan.gotH fired k i) ||
-              e.src.isSome && !Chan.sentH fired k
-          | none => false
-        chanLines := chanLines ++ [s!"  DEADLOCK (proven, Chan.checkH_false): no execution completes; these events never finish: {", ".intercalate (unfinished.map eventAt)}"]
-        if let some k := waiting.head? then
-          chanLines := chanLines ++ [s!"  the first element that never moves: element {cm.pos[k]!} of {cm.slotName[k]!}"]
-        -- Why, when the streams are unbalanced (a fragment of a program, D34).
-        let noPut := (List.range cp.elems.size).filter fun k => (cp.elems[k]?.map (·.src.isNone)).getD false
-        let noGet := (List.range cp.elems.size).filter fun k => match cp.elems[k]? with
-          | some e => e.src.isSome && !e.buffered && e.dsts.any (·.isNone)
-          | none => false
-        if !noPut.isEmpty then
-          chanLines := chanLines ++ [s!"  note: {noPut.length} element(s) that gets wait for no put provides"]
-        if !noGet.isEmpty then
-          chanLines := chanLines ++ [s!"  note: {noGet.length} element(s) of async puts no get takes (D34)"]
-      | some true =>
-        chanLines := chanLines ++ ["  no deadlock (proven, Chan.checkH_true): an execution completes, and every execution can (Chan.completes_from_anywhere)"]
-        -- Elements of sync puts that nothing gets stay in the buffer (D30): a fragment of a program.
-        let orphans := (List.range cp.elems.size).filter fun k => match cp.elems[k]? with
-          | some e => e.src.isSome && e.buffered && e.dsts.any (·.isNone)
-          | none => false
-        if !orphans.isEmpty then
-          chanLines := chanLines ++ [s!"  note: {orphans.length} element(s) of sync puts are never got (buffered, D30)"]
-        let arr := cv.trace.toArray
-        let mut seen : Std.HashSet (Nat × Nat × String) := {}
-        if !cv.raceFree && cv.witnesses.isEmpty then
-          chanLines := chanLines ++ ["  race: the race check failed, and the reporter found no witness"]
-        for (i, j) in cv.witnesses do
-          -- Name the pair in event (program) order, not in the order this execution fired it.
-          let (x, y) := if cm.owner arr[j]! < cm.owner arr[i]! then (arr[j]!, arr[i]!) else (arr[i]!, arr[j]!)
-          let witness := (fp x).findSome? fun a => (fp y).findSome? fun b =>
-            if a.conflictsB b then
-              let bs : Std.HashSet Int := Std.HashSet.ofList b.elems
-              (a.elems.find? bs.contains).map fun e =>
-                let kind := match a.kind, b.kind with
-                  | .write, .read => "RAW" | .read, .write => "WAR" | _, _ => "WAW"
-                (kind, if a.buf == ip.slotBuf then "an element in flight"
-                  else if a.buf == ip.resultBuf then "the results of an event"
-                  else ip.buffers[a.buf]!.name, e)
-            else none
-          if let some (kind, buffer, e) := witness then
-            -- One message per pair of events and buffer.
-            let key := (cm.owner x, cm.owner y, buffer)
-            if !seen.contains key then
-              seen := seen.insert key
-              chanLines := chanLines ++ [s!"  race: {kind} on {buffer} element {e} between {labelAt x} and {labelAt y}, which no execution order fixes"]
+    | .ok orders =>
+      -- D52: one model per order of the puts no token orders; the program is all of them.
+      let many := orders.length > 1
+      if many then
+        chanLines := chanLines ++ [s!"  {orders.length} orders of puts that no token orders (D52); each is checked"]
+      for o in orders do
+        match ip.chanModel ca o with
+        | .error e => chanLines := chanLines ++ [s!"  error: not covered: {e}"]
+        | .ok cm =>
+          let ls := raceLines ctx.raw ip ca cm fps0 eventAt
+          chanLines := chanLines ++ (if many then ls.map (· ++ s!" [puts in order {orderDesc o}]") else ls)
     let raceCount := reports.length + (chanLines.filter (·.startsWith "  race")).length
     IO.println s!"@{name}: {p.events.size} event(s), {ip.buffers.size} buffer(s), \
       {raceCount} race(s), {issues.size} problem(s) inside single events"
@@ -459,14 +499,26 @@ def cmdOutcome (args : Args) (file : String) : IO Unit := do
     let ca ← match ip.analyzeChannels with
       | .ok ca => pure ca
       | .error e => throw (IO.userError s!"@{name}: {e}")
-    let cm ← match ip.chanModel ca with
-      | .ok cm => pure cm
+    let orders ← match ip.putOrders ca with
+      | .ok os => pure os
       | .error e => do IO.println s!"@{name}: not covered: {e}"; continue
-    let cv := cm.verdict (fun _ => []) (checkRaces := false)
-    match cv.completes with
-    | some true => IO.println s!"@{name}: {hostOutcome ip (ip.runLabels ctx.raw ca cm cv.trace)}"
-    | some false => IO.println s!"@{name}: deadlocks"
-    | none => IO.println s!"@{name}: internal error: the proposed execution failed its check"
+    -- D52: every order of the puts no token orders.
+    let mut outs : List String := []
+    let mut bad : Option String := none
+    for o in orders do
+      let cm ← match ip.chanModel ca o with
+        | .ok cm => pure cm
+        | .error e => do bad := bad <|> some s!"not covered: {e}"; continue
+      let cv := cm.verdict (fun _ => []) (checkRaces := false)
+      match cv.completes with
+      | some true =>
+        let r := hostOutcome ip (ip.runLabels ctx.raw ca cm cv.trace)
+        if !outs.contains r then outs := outs ++ [r]
+      | some false => bad := bad <|> some "deadlocks"
+      | none => bad := bad <|> some "internal error: the proposed execution failed its check"
+    match bad with
+    | some b => IO.println s!"@{name}: {b}"
+    | none => IO.println s!"@{name}: {" | ".intercalate outs}"
 
 /-- C6: explore every `aie.device` (AIE_SEMANTICS.md, `Veir.Air.Aie`). -/
 def cmdAie (args : Args) (file : String) : IO Bool := do

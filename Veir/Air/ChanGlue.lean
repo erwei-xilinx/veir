@@ -257,7 +257,8 @@ def ChanModel.verdict (cm : ChanModel) (fp : Chan.LFp) (checkRaces := true) : Ch
   let cp := cm.prog
   let idx := Chan.buildIndex cp
   let t := Chan.genTrace cp idx
-  let c := Chan.checkH cp idx t
+  -- `outcome_uniqueH` needs `Chan.wfB`; a model that fails it is an internal error.
+  let c := if Chan.wfB cp then Chan.checkH cp idx t else none
   if c == some true && checkRaces then
     let g := Chan.posGraphH cp idx t (Chan.positions t)
     let ok := Chan.racesOk g fp t

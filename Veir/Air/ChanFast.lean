@@ -590,18 +590,38 @@ def raceWitnesses (g : DepGraph) (fp : LFp) (t : List Label) : List (Nat × Nat)
   let reach := g.reachFast g.reachRows
   ((groups (emitted fp t)).toList.flatMap fun (_, arr) => scanReport reach arr.toList).eraseDups
 
+/-! ### Checking well-formedness -/
+
+def wfB (p : Prog) : Bool :=
+  (List.range p.elems.size).all fun k =>
+    match p.elems[k]? with
+    | none => true
+    | some e =>
+      (match e.src with | none => true | some s => decide (s < p.graph.size)) &&
+        e.dsts.all fun o => match o with | none => true | some d => decide (d < p.graph.size)
+
+theorem wf_of_wfB (h : wfB p = true) : WF p := by
+  intro k e hk
+  simp only [wfB, List.all_eq_true, List.mem_range] at h
+  have := h k (elem_lt hk)
+  rw [hk] at this
+  simp only [Bool.and_eq_true, List.all_eq_true] at this
+  refine ⟨fun s hs => ?_, fun i d hd => ?_⟩
+  · have := this.1; rw [hs] at this; simpa using this
+  · have := this.2 _ (List.mem_of_getElem? hd); simpa using this
+
 /-! ### What the fast check buys -/
 
 /-- **The fast check, end to end.** If `checkH` accepts a proposed execution `t` as complete and
 `racesOk` finds no race on it, every complete execution of the program ends with the memory `t`
 ends with. -/
 theorem outcome_uniqueH {V : Type} {fp : LFp} {eff : Label → Mem V → Mem V} {idx : Array (List Nat)}
-    {ix : Std.HashMap Label Nat} {t : List Label} (hw : WF p) (hfr : LFramed fp eff)
+    {ix : Std.HashMap Label Nat} {t : List Label} (hw : wfB p = true) (hfr : LFramed fp eff)
     (hc : checkH p idx t = some true) (hr : racesOk (posGraphH p idx t ix) fp t = true)
     {t' G : List Label} (h : Run p [] t' G) (d : Done p G) (m : Mem V) :
     runL eff t' m = runL eff t m := by
   obtain ⟨G₀, r, d₀⟩ := checkH_true hc
-  exact (deterministic hw hfr r d₀ h d (raceFree_of_racesOk hbEdges_posGraphH hr) m).symm
+  exact (deterministic (wf_of_wfB hw) hfr r d₀ h d (raceFree_of_racesOk hbEdges_posGraphH hr) m).symm
 
 /-! ### Proposing an execution (not proven; checked by `checkH`) -/
 

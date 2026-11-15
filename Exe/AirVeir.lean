@@ -43,6 +43,8 @@ Commands:
                        of locks, DMA transfers, cores and the runtime sequence.
                        Prints a deadlock with a run reaching it, and the distinct
                        outcomes of host memory; exit 1 if either is wrong
+  outcome <file>       C6: one complete run's host memory per function, printed as
+                       `aie` prints it (for a race-free program, its only outcome)
 
 Options:
   --allow-unregistered-dialect   accept operations VeIR does not register (needed for
@@ -415,6 +417,33 @@ def runs (vs : List Val) : String :=
   decreasing_by all_goals simp_wf; all_goals (try simp [List.length_drop]); all_goals omega
   go [] vs
 
+/-- The host arguments' final contents, as `runs`; the same format as `aie` prints. -/
+def hostOutcome (ip : IProgram) (s : MState) : String :=
+  match s.fault with
+  | some f => s!"fault: {f}"
+  | none =>
+    let parts := (ip.argBufs.toList.zip (List.range ip.argBufs.size)).map fun (b, j) =>
+      let n := ip.buffers[b]!.type.numel
+      s!"%arg{j} = [{runs ((List.range n).map fun (q : Nat) => s.mem[(b, (Int.ofNat q))]?.getD .undef)}]"
+    ", ".intercalate parts
+
+/-- C6 phase 2: one complete run's host memory. For a program `races` finds race-free and
+deadlock-free, it is the only outcome (`deterministic`, C3). -/
+def cmdOutcome (args : Args) (file : String) : IO Unit := do
+  let (ctx, top) ← load args file
+  for func in topLevelFuncs ctx.raw top do
+    let ip ← extractOrThrow ctx.raw func (runScalars args)
+    let name := funcName ctx.raw func
+    if ip.chans.isEmpty then
+      IO.println s!"@{name}: {hostOutcome ip (ip.run ctx.raw (List.range ip.prog.events.size))}"
+    else
+      let ca ← match ip.analyzeChannels with
+        | .ok ca => pure ca
+        | .error e => throw (IO.userError s!"@{name}: {e}")
+      match ca.progress with
+      | .completes sched => IO.println s!"@{name}: {hostOutcome ip (ip.runNodes ctx.raw ca sched)}"
+      | _ => IO.println s!"@{name}: deadlocks"
+
 /-- C6: explore every `aie.device` (AIE_SEMANTICS.md, `Veir.Air.Aie`). -/
 def cmdAie (args : Args) (file : String) : IO Bool := do
   let (ctx, top) ← load args file
@@ -464,6 +493,7 @@ def main (argv : List String) : IO UInt32 := do
       | "races", [f] => return if ← cmdRaces args f then 0 else 1
       | "check", [a, b] => return if ← cmdCheck args a b then 0 else 1
       | "aie", [f] => return if ← cmdAie args f then 0 else 1
+      | "outcome", [f] => cmdOutcome args f; return 0
       | _, _ =>
         IO.eprintln s!"error: bad command line\n\n{usage}"
         return 2

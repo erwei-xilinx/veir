@@ -611,7 +611,10 @@ partial def channelInstance (ctx : IRContext OpCode) (op : OperationPtr)
   if !(← get).chanDecls.contains chan then
     throw s!"{what}: no air.channel @{chan} is declared in the module"
   let deps ← groups[0]!.toList.mapM fun v => liftE (tokOf env ctx what v)
-  let indices ← groups[1]!.toList.mapM fun v => liftE (knownInt env ctx s!"{what} (channel index)" v)
+  let indices₀ ← groups[1]!.toList.mapM fun v => liftE (knownInt env ctx s!"{what} (channel index)" v)
+  -- D50: on a channel whose every dimension has size 1, no indices name subchannel [0, ..., 0].
+  let size := (← get).chanDecls[chan]!.size
+  let indices := if indices₀.isEmpty && size.all (· == 1) then size.map fun _ => (0 : Int) else indices₀
   let some memref := groups[2]!.toList.head? | throw s!"{what}: no memref"
   let pre := if isPut then "src" else "dst"
   let arr (name : String) : IM (Array Int) :=

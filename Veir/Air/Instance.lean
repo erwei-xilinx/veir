@@ -82,6 +82,18 @@ structure IssueInfo where
   length : Option ValuePtr
 deriving Inhabited
 
+/-- A control-flow decision (D59): its event, the event results it reads, and the values the
+instantiation used (`none`: not known yet, so what the decision controls was not instantiated). -/
+structure Decision where
+  event : Nat
+  reads : List (Nat × Nat)
+  values : Option (List Int)
+deriving Inhabited
+
+/-- How a decision names a result across instantiations: the op of the event computing it, the
+event's path, and the result's index. -/
+abbrev ResultKey := OperationPtr × List Int × Nat
+
 structure IProgram where
   prog : Program
   ctxs : Array EventCtx
@@ -101,7 +113,17 @@ structure IProgram where
   issues : Std.HashMap Nat IssueInfo := {}
   /-- Initial contents of buffers that have them (`memref.global`). -/
   inits : Std.HashMap Nat (Array Val) := {}
+  /-- D59: the control-flow decisions on values events compute. -/
+  decides : Array Decision := #[]
+  /-- The key of each event result decisions read. -/
+  resultKeys : Std.HashMap (Nat × Nat) ResultKey := {}
+  /-- The contents the user gave for memref arguments, by argument position among the memrefs
+  (D59: verdicts hold for that input). -/
+  argData : Std.HashMap Nat (Array Int) := {}
 deriving Inhabited
+
+/-- Whether every decision's value was known, so the whole program was instantiated. -/
+def IProgram.complete (ip : IProgram) : Bool := ip.decides.all (·.values.isSome)
 
 structure IState where
   events : Array Event := #[]
@@ -132,6 +154,13 @@ structure IState where
   families : Std.HashMap (Nat × OperationPtr × List Int) (Array Nat) := {}
   /-- The family and rank of each symmetric buffer. -/
   symOf : Std.HashMap Nat ((Nat × OperationPtr × List Int) × Nat) := {}
+  /-- D59: the values of the event results decisions read, as far as they are known. -/
+  decisions : Std.HashMap ResultKey Int := {}
+  decides : Array Decision := #[]
+  resultKeys : Std.HashMap (Nat × Nat) ResultKey := {}
+  /-- Set when a decision's value is not known: the rest of the hierarchy instance (or function)
+  is not walked. All of it would wait for the decision, which blocks (D60). -/
+  cut : Bool := false
 
 abbrev IM := StateT IState (Except String)
 
@@ -286,7 +315,7 @@ def pushEvent (e : Event) (c : EventCtx) : IM Nat := do
   let id := st.events.size
   let blocking := e.kind == .waitAllBlocking || e.kind == .dmaBlocking ||
     e.kind == .putBlocking || e.kind == .getBlocking || e.kind == .scopeEndBlocking ||
-    e.kind == .syncOp || e.kind == .issueBlocking
+    e.kind == .syncOp || e.kind == .issueBlocking || e.kind == .decide
   -- A blocking event waits for the blocking events before it, so later events need only wait for
   -- the last one: the same order, with a linear number of edges.
   set { st with events := st.events.push { e with implicitDeps := st.blocking },
@@ -479,6 +508,36 @@ def affineApply (ctx : IRContext OpCode) (op : OperationPtr)
     | .ok _ => throw s!"{what}: expected a map with one result"
     | .error e => throw s!"{what}: {e}"
 
+/-- D59, D60: a control op some of whose `operands` are results of events. It becomes a decision
+event, blocking, that reads those results. When every value is decided, returns `env` with those
+operands known; otherwise `none`, and the rest of the instance is cut. -/
+def controlEnv (ctx : IRContext OpCode) (op : OperationPtr) (operands : List ValuePtr)
+    (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Option (Std.HashMap ValuePtr HVal)) := do
+  let mut reads : List (Nat × Nat) := []
+  for v in operands do
+    if let some (.result e i) := env[v]? then
+      if !reads.contains (e, i) then reads := reads ++ [(e, i)]
+  if reads.isEmpty then return some env
+  let st ← get
+  let keys : List ResultKey := reads.map fun (e, i) => (st.events[e]!.op, st.ctxs[e]!.path, i)
+  let ev : Event := { op := op, kind := .decide, operandEvents := #[], implicitDeps := [],
+                      dataDeps := (reads.map (·.1)).eraseDups, body := #[], yields := #[] }
+  let id ← pushEvent ev { path := path }
+  for r in reads, k in keys do
+    modify fun st => { st with resultKeys := st.resultKeys.insert r k }
+  match keys.mapM (st.decisions[·]?) with
+  | some ns =>
+    modify fun st => { st with decides := st.decides.push { event := id, reads, values := some ns } }
+    let mut out := env
+    for v in operands do
+      if let some (.result e i) := env[v]? then
+        out := out.insert v (.val (intVal ctx v (ns[reads.idxOf (e, i)]!)))
+    return some out
+  | none =>
+    modify fun st => { st with decides := st.decides.push { event := id, reads, values := none },
+                                cut := true }
+    return none
+
 /-- Which region of `scf.if`, `affine.if` or `scf.index_switch` runs (`none`: no region, as in
 an `scf.if` without `else` whose condition is false). The choice must be known before running:
 a branch on a runtime value is refused. -/
@@ -504,6 +563,10 @@ def chosenRegion (ctx : IRContext OpCode) (op : OperationPtr)
     match cases.toList.findIdx? (· == a) with
     | some i => return some (i + 1)
     | none => return some 0
+
+/-- The integer casts `evalArith` computes although VeIR does not register them. -/
+def castOps : List String :=
+  ["arith.index_cast", "arith.index_castui", "arith.extsi", "arith.extui", "arith.trunci"]
 
 /-- Ops that are control flow or address arithmetic, not effects: never a synchronous op. -/
 def notSyncOp (name : String) : Bool :=
@@ -562,6 +625,7 @@ partial def walkOps (ctx : IRContext OpCode) (ops : Array OperationPtr)
     (env₀ : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
   let mut env := env₀
   for op in ops do
+    if (← get).cut then break
     let name := opName ctx op
     let what := s!"'{name}'{pathStr path}"
     match op.getOpType! ctx with
@@ -631,6 +695,14 @@ partial def walkOps (ctx : IRContext OpCode) (ops : Array OperationPtr)
           | _ => pure false
         if onResult then env ← syncOpInstance ctx op env path
         else env ← affineApply ctx op env path
+      else if castOps.contains name then
+        -- Integer casts VeIR does not register: host arithmetic like `.arith` above.
+        let onResult ← (op.getOperands! ctx).toList.anyM fun v => do
+          match env[v]? with
+          | some (.result _ _) => pure true
+          | _ => pure false
+        if onResult then env ← syncOpInstance ctx op env path
+        else env ← evalHostArith ctx op env
       else if name == "veir.opaque_constant" then
         -- A non-integer constant (VEIR-004): an opaque value (D22).
         env := env.insert (.opResult ⟨op, 0⟩) (.val (opaqueOf op [] 0))
@@ -945,6 +1017,7 @@ partial def hierarchyInstance (ctx : IRContext OpCode) (op : OperationPtr)
   for pt in iterationPoints sizes do
     modify fun st => { st with
       blocking := [start],
+      cut := false,
       launchInst := if name == "air.launch" then some (start, pt) else st.launchInst,
       rankInst := if isRank then some (start, path.length, pt, sizes) else st.rankInst }
     let first := (← get).events.size
@@ -958,7 +1031,7 @@ partial def hierarchyInstance (ctx : IRContext OpCode) (op : OperationPtr)
     let _ ← walkOps ctx ops.pop env' (path ++ pt)
     inner := inner ++ (List.range' first ((← get).events.size - first)).toArray
   modify fun st => { st with blocking := outer.blocking, launchInst := outer.launchInst,
-                              rankInst := outer.rankInst }
+                              rankInst := outer.rankInst, cut := outer.cut }
   let blocking := op.getNumResults! ctx = 0
   let endEv : Event := { op := op, kind := if blocking then .scopeEndBlocking else .scopeEnd,
                          operandEvents := inner, implicitDeps := [], dataDeps := [],
@@ -972,7 +1045,8 @@ selects, as upstream MLIR does; its results are what that region yields. -/
 partial def branchInstance (ctx : IRContext OpCode) (op : OperationPtr)
     (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
   let what := s!"'{opName ctx op}'{pathStr path}"
-  let some r ← chosenRegion ctx op env what | return env
+  let some cenv ← controlEnv ctx op (op.getOperands! ctx).toList env path | return env
+  let some r ← chosenRegion ctx op cenv what | return env
   if r ≥ op.getNumRegions! ctx then
     if op.getNumResults! ctx = 0 then return env
     throw s!"{what}: the chosen region does not exist"
@@ -981,6 +1055,7 @@ partial def branchInstance (ctx : IRContext OpCode) (op : OperationPtr)
   let ops := blockOps ctx block
   let some term := ops.back? | throw s!"{what}: expected a terminator"
   let inner ← walkOps ctx ops.pop env path
+  if (← get).cut then return env
   let ys ← (term.getOperands! ctx).toList.mapM fun v => liftE (lookupH inner ctx v what)
   let mut out := env
   for i in [0:op.getNumResults! ctx], h in ys do
@@ -993,9 +1068,10 @@ partial def forLoop (ctx : IRContext OpCode) (op : OperationPtr)
   let what := s!"scf.for{pathStr path}"
   let operands := op.getOperands! ctx
   if operands.size < 3 then throw s!"{what}: expected bounds and a step"
-  let lb ← liftE (knownInt env ctx what operands[0]!)
-  let ub ← liftE (knownInt env ctx what operands[1]!)
-  let step ← liftE (knownInt env ctx what operands[2]!)
+  let some cenv ← controlEnv ctx op (operands.extract 0 3).toList env path | return env
+  let lb ← liftE (knownInt cenv ctx what operands[0]!)
+  let ub ← liftE (knownInt cenv ctx what operands[1]!)
+  let step ← liftE (knownInt cenv ctx what operands[2]!)
   if step ≤ 0 then throw s!"{what}: a step of {step} is not supported"
   let block ← liftE (singleBlock ctx op what)
   let args := block.getArguments! ctx
@@ -1012,6 +1088,7 @@ partial def forLoop (ctx : IRContext OpCode) (op : OperationPtr)
     for a in args.toList.drop 1, h in iter do
       env' := env'.insert a h
     env' ← walkOps ctx ops.pop env' (path ++ [iv])
+    if (← get).cut then return env
     iter ← (term.getOperands! ctx).toList.mapM fun v => liftE (lookupH env' ctx v what)
   let mut out := env
   for i in [0:op.getNumResults! ctx], h in iter do
@@ -1028,8 +1105,9 @@ partial def parallelLoop (ctx : IRContext OpCode) (op : OperationPtr)
   if seg.size != 4 then throw s!"{what}: expected 4 operand segments"
   let n := seg[0]!.toNat
   let operands := op.getOperands! ctx
+  let some cenv ← controlEnv ctx op (operands.extract 0 (3 * n)).toList env path | return env
   let ints (start : Nat) : IM (List Int) :=
-    (operands.extract start (start + n)).toList.mapM fun v => liftE (knownInt env ctx what v)
+    (operands.extract start (start + n)).toList.mapM fun v => liftE (knownInt cenv ctx what v)
   let lbs ← ints 0
   let ubs ← ints n
   let steps ← ints (2 * n)
@@ -1053,6 +1131,7 @@ partial def parallelLoop (ctx : IRContext OpCode) (op : OperationPtr)
     for a in args, iv in pt do
       env' := env'.insert a (.val (intVal ctx a iv))
     env' ← walkOps ctx ops.pop env' (path ++ pt)
+    if (← get).cut then return env
     let vs ← (term.getOperands! ctx).toList.mapM fun v => liftE (lookupH env' ctx v what)
     reduced := reduced ++ [vs]
   -- Fold each reduction region over the iterations' values.
@@ -1078,9 +1157,10 @@ partial def parallelLoop (ctx : IRContext OpCode) (op : OperationPtr)
 
 end
 
-/-- Instantiate a function, with the given scalar arguments (others are unknown). -/
-def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : List Int) :
-    Except String IProgram := do
+/-- Instantiate a function, with the given scalar arguments (others are unknown) and the values
+of event results decided so far (D59). -/
+def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : List Int)
+    (decisions : Std.HashMap ResultKey Int := {}) : Except String IProgram := do
   let .func .func := func.getOpType! ctx
     | throw s!"expected a func.func, but got '{opName ctx func}'"
   let block ← singleBlock ctx func "func.func"
@@ -1114,7 +1194,7 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
           let name := String.fromUTF8! nm.value
           decls := decls.insert name { name, size, broadcast, type }
   let go : IM (Std.HashMap ValuePtr HVal × Array Nat) := do
-    modify fun st => { st with chanDecls := decls, moduleOps := mops }
+    modify fun st => { st with chanDecls := decls, moduleOps := mops, decisions }
     let mut env : Std.HashMap ValuePtr HVal := {}
     let mut argBufs := #[]
     let mut scalars := scalarArgs
@@ -1138,7 +1218,8 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
   return { prog, ctxs := st.ctxs, buffers := st.buffers, dmas := st.dmas,
            resultBufs := st.resultBufs, viewResults := st.viewResults, viewPos := st.viewPos,
            argBufs, loops := st.loops,
-           chanDecls := st.chanDecls, chans := st.chans, issues := st.issues, inits := st.inits }
+           chanDecls := st.chanDecls, chans := st.chans, issues := st.issues, inits := st.inits,
+           decides := st.decides, resultKeys := st.resultKeys }
 
 /-! ### Running -/
 
@@ -1155,14 +1236,19 @@ def MState.resolve (s : MState) (h : HVal) : Option Val :=
   | .result e i => s.results[(e, i)]?
   | .tok _ => none
 
-/-- Memref arguments hold `1000 · argument + element` (integers) or an opaque value. -/
+/-- Memref arguments hold the contents given (`argData`), or else `1000 · argument + element`
+(integers) or an opaque value. -/
 def IProgram.initState (ip : IProgram) : MState := Id.run do
   let mut mem := {}
   for b in ip.argBufs, j in [0:ip.argBufs.size] do
     let t := ip.buffers[b]!.type
+    let given := ip.argData[j]?
     for q in [0:t.numel] do
-      let x : Val := if t.bitwidth > 0 then .rv (.int t.bitwidth (.val (BitVec.ofInt t.bitwidth (1000 * j + q))))
-        else .opaque 1000000 (1000 * j + q).toUInt64
+      let n : Int := match given with
+        | some vs => vs[q]?.getD 0
+        | none => 1000 * j + q
+      let x : Val := if t.bitwidth > 0 then .rv (.int t.bitwidth (.val (BitVec.ofInt t.bitwidth n)))
+        else .opaque 1000000 n.toNat.toUInt64
       mem := mem.insert (b, (q : Int)) x
   for (b, vs) in ip.inits.toList do
     for x in vs, q in [0:vs.size] do

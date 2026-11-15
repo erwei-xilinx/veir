@@ -15,7 +15,7 @@ VeIR. The subset is AIR's async dependency graph: `air.execute`, `air.wait_all` 
 4. **A checker.** `sameReach`, proven sound, decides whether two versions of a function order
    their events identically. It is run on the output of AIR's own C++ pass.
 
-## Status (2026-11-14, read first)
+## Status (2026-11-15, read first)
 
 Every verdict `air-veir` prints now comes from one model, written in Lean, with its checks proven.
 Three kinds of code are distinguished, and every claim in this directory should say which it rests
@@ -24,8 +24,8 @@ on:
 | Kind | What | Files |
 | --- | --- | --- |
 | **Semantics (definitions)** | Events with dependencies (`Events.lean`); stream elements of channels and DMAs, their labels and when each may fire (`ChanSem.lean`: `En`, `Run`); what each label does to memory (`ChanMem.lean`: `MemSpec`); the AIE target's step function (`Aie.lean`: `Model.steps`, `settle`; `AieCert.lean`: `post`, `Reach`) | as listed |
-| **Proven (Lean kernel, no `sorry`)** | the theorems below, about those definitions | `DepGraph`, `Events`, `Race`, `Determinism`, `Schedule`, `Pattern`, `ChanSem`, `ChanMem`, `ChanFast`, `AieCert` |
-| **Trusted glue (tested, not proven)** | turning IR into the model: events, loops and hierarchy instances (`Instance.lean`), channel endpoints (`Channels.lean`), elements and footprints (`ChanGlue.lean`), the AIE model from `aie.device` (`Aie.lean`: `extract`); running atomic event bodies (`finishExecute`, `finishDma` for run-time patterns) | as listed |
+| **Proven (Lean kernel, no `sorry`)** | the theorems below, about those definitions | `DepGraph`, `Events`, `Race`, `Determinism`, `Schedule`, `Pattern`, `ChanSem`, `ChanMem`, `ChanFast`, `ChanDecide`, `AieCert` |
+| **Trusted glue (tested, not proven)** | turning IR into the model: events, loops and hierarchy instances (`Instance.lean`), channel endpoints (`Channels.lean`), elements and footprints (`ChanGlue.lean`), rounds of instantiation on run-time control flow (`Running.lean`), the AIE model from `aie.device` (`Aie.lean`: `extract`); running atomic event bodies (`finishExecute`, `finishDma` for run-time patterns) | as listed |
 
 What the proven checks give, for any program the glue accepts:
 
@@ -35,16 +35,28 @@ What the proven checks give, for any program the glue accepts:
 | DEADLOCK | `Chan.checkH_false` | no execution completes |
 | race-free, outcome | `Chan.raceFree_of_racesOk`, `Chan.outcome_uniqueH` | every complete execution ends with the printed memory (given effects framed by footprints) |
 | race, second execution | `Chan.checkH_true` on the second execution | both executions are valid; that they end differently is computed |
+| control flow on device values (D59) | `Chan.decision_reads` | every execution, at each decision, reads the value the program was instantiated with |
 | AIE: outcomes, deadlock, fault | `Aie.Cert.parents_sound` | each is reached by an execution of the model |
 | AIE: "exactly the reachable states" | `Aie.Cert.exact` | the listed verdicts are all of the model's |
 
 Covered: `air.execute`, `air.wait_all`, tokens, `scf.for`/`scf.parallel`, `scf.if`/`affine.if`/
-`scf.index_switch` on known conditions, `air.dma_memcpy_nd` (element by element when its pattern
-is known, D20/D21), channels (D28-D36, D51), broadcast (D29), hierarchy ops and ranks (D37-D49),
-event results as memory (D4). Refused, pending a decision:
-- puts on one subchannel that tokens do not order (packet fan-in at the AIR level);
-- an element from an async put to sync and async gets at once (D51 decides one get only);
-- `air.channel.issue` (#2261), not modelled yet.
+`scf.index_switch`, `air.dma_memcpy_nd` (element by element when its pattern is known, D20/D21),
+channels (D28-D36, D51), broadcast (D29, D53), unordered puts into one stream (D52, one model per
+order), `air.channel.issue` (D54, D58), per-launch streams (D56), run-time offsets (D23), event
+results as memory (D4, D57), `memref.global`, whole views as transfer ends, hierarchy ops and ranks
+(D37-D49).
+
+Control flow decided by values events compute (D59, D60) is instantiated while running, for the
+input given (`--args` for scalars, `--mem` for memref contents): rounds of instantiation propose
+the values (`Running.lean`, not proven), and the whole program they end with is checked. When it
+completes and is race-free, `Chan.decision_reads` proves every execution reads the values used;
+otherwise the output says this is not established, and its verdicts are for that control flow.
+
+Refused, pending a decision or work:
+- an access pattern on a view (D14, AIR-009);
+- a slot fed both by a broadcast put and by other puts;
+- programs over 20000 events; run-time offsets over big buffers may time out (the race scan treats
+  such an access as the whole buffer, element by element).
 
 Not verification, and not to be read as such: the Python scripts (`Test/Air/bounded/*.py`,
 `sweep_dependency.py`) only generate inputs and count verdicts; their recorded numbers before

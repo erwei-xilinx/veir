@@ -16,6 +16,9 @@ function the verdict is:
   analysed. `async ok` / `async bad` give its verdict.
 Chunks the model does not cover are listed with the first reason.
 
+Scalar (index, integer) arguments are all given as 2 (`--args`): loop bounds and branch conditions
+that depend on them are then known, and each verdict holds for that input (D59).
+
   AIR_OPT=/path/to/air-opt Test/Air/sweep_dependency.py /path/to/mlir-air/mlir/test/Transform/AIRDependency/*.mlir
 """
 
@@ -27,12 +30,13 @@ import tempfile
 
 AIR_VEIR = ".lake/build/bin/air-veir"
 GENERIC = ["--mlir-print-op-generic", "--mlir-print-local-scope"]
+SCALARS = "--args=" + ",".join(["2"] * 16)
 
 
 def analyse(path):
     """{function: (deadlock, races, errors)}, or a refusal string."""
     try:
-        v = subprocess.run([AIR_VEIR, "races", "--allow-unregistered-dialect", path],
+        v = subprocess.run([AIR_VEIR, "races", "--allow-unregistered-dialect", SCALARS, path],
                            capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
         return "TIMEOUT"

@@ -1,0 +1,90 @@
+// D59, D60: a loop bound read on the device. The blocking wait orders the loop's decision after
+// the execute computing the bound.
+func.func @device_bound(%n: memref<1xi32>, %buf: memref<8xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c7 = arith.constant 7 : i32
+  %t, %k = air.execute -> (index) {
+    %v = memref.load %n[%c0] : memref<1xi32>
+    %i = arith.index_cast %v : i32 to index
+    air.execute_terminator %i : index
+  }
+  air.wait_all [%t]
+  scf.for %i = %c0 to %k step %c1 {
+    memref.store %c7, %buf[%i] : memref<8xi32>
+  }
+  return
+}
+
+// No token path from the execute to the loop: the decision reads the bound unordered (D60).
+func.func @unordered_bound(%n: memref<1xi32>, %buf: memref<8xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c7 = arith.constant 7 : i32
+  %t, %k = air.execute -> (index) {
+    %v = memref.load %n[%c0] : memref<1xi32>
+    %i = arith.index_cast %v : i32 to index
+    air.execute_terminator %i : index
+  }
+  scf.for %i = %c0 to %k step %c1 {
+    memref.store %c7, %buf[%i] : memref<8xi32>
+  }
+  return
+}
+
+// A branch on a value the device computes.
+func.func @device_branch(%n: memref<1xi32>, %buf: memref<8xi32>) {
+  %c0 = arith.constant 0 : index
+  %c5 = arith.constant 5 : i32
+  %c7 = arith.constant 7 : i32
+  %c9 = arith.constant 9 : i32
+  %t, %big = air.execute -> (i1) {
+    %v = memref.load %n[%c0] : memref<1xi32>
+    %b = arith.cmpi sgt, %v, %c5 : i32
+    air.execute_terminator %b : i1
+  }
+  air.wait_all [%t]
+  scf.if %big {
+    memref.store %c9, %buf[%c0] : memref<8xi32>
+  } else {
+    memref.store %c7, %buf[%c0] : memref<8xi32>
+  }
+  return
+}
+
+// The bound reaches a core through a channel: the host sends it after starting the segment, and
+// the herd loops that many times. The rounds instantiate the herd's loop once the value arrived.
+air.channel @cnt [1, 1]
+air.channel @res [1, 1]
+func.func @channel_bound(%n: memref<1xi32>, %buf: memref<8xi32>) {
+  %c1 = arith.constant 1 : index
+  air.launch (%lx, %ly) in (%sx = %c1, %sy = %c1) args(%nn = %n, %bb = %buf) : memref<1xi32>, memref<8xi32> {
+    %seg = air.segment @s async args(%b2 = %bb) : memref<8xi32> {
+      %c1_s = arith.constant 1 : index
+      air.herd @h tile (%tx, %ty) in (%hx = %c1_s, %hy = %c1_s) args(%b3 = %b2) : memref<8xi32> {
+        %c0 = arith.constant 0 : index
+        %c1_h = arith.constant 1 : index
+        %c7 = arith.constant 7 : i32
+        %l1 = memref.alloc() : memref<1xi32, 2>
+        air.channel.get @cnt[] (%l1[] [] []) : (memref<1xi32, 2>)
+        %t, %k = air.execute -> (index) {
+          %v = memref.load %l1[%c0] : memref<1xi32, 2>
+          %i = arith.index_cast %v : i32 to index
+          air.execute_terminator %i : index
+        }
+        %o = memref.alloc() : memref<8xi32, 2>
+        air.wait_all [%t]
+        scf.for %i = %c0 to %k step %c1_h {
+          memref.store %c7, %o[%i] : memref<8xi32, 2>
+        }
+        air.channel.put @res[] (%o[] [] []) : (memref<8xi32, 2>)
+        memref.dealloc %o : memref<8xi32, 2>
+        memref.dealloc %l1 : memref<1xi32, 2>
+      }
+    }
+    air.channel.put @cnt[] (%nn[] [] []) : (memref<1xi32>)
+    air.channel.get @res[] (%bb[] [] []) : (memref<8xi32>)
+    air.wait_all [%seg]
+  }
+  return
+}

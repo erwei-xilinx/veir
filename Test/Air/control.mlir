@@ -25,4 +25,8 @@
 // INTERP-NEXT:  races (see `races`); an execution with {{.*}} ends the same
 // INTERP-LABEL: @float_fill: %arg0 = [opaque<{{.*}}>, opaque<{{.*}}>, opaque<{{.*}}>, opaque<{{.*}}>]
 
-// RUNTIME: 'scf.if': the branch condition is not known before running (a branch on a runtime value is not supported)
+// A condition computed on the device (D59). Here the cmpi reads the execute's result with no token
+// path (D57), so the part before the branch races and its value is not determined.
+// RUNTIME: @runtime_branch: 3 event(s), 3 buffer(s), 1 race(s)
+// RUNTIME-NEXT: the value deciding 'scf.if' is not computed in the execution proposed for the part of the program before it
+// RUNTIME: race: RAW on the results of an event element 0 between finish of event 0 (air.execute) and finish of event 1 (a synchronous op)

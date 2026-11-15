@@ -1,0 +1,13 @@
+// D59: a loop bound loaded on the device, synchronous; air-dependency makes the load async and
+// leaves the index_cast reading its result without a token (AIR-024).
+func.func @device_bound_sync(%n: memref<1xi32>, %buf: memref<8xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c7 = arith.constant 7 : i32
+  %v = memref.load %n[%c0] : memref<1xi32>
+  %k = arith.index_cast %v : i32 to index
+  scf.for %i = %c0 to %k step %c1 {
+    memref.store %c7, %buf[%i] : memref<8xi32>
+  }
+  return
+}

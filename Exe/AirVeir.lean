@@ -5,6 +5,7 @@ import Veir.Air.Instance
 import Veir.Air.Channels
 import Veir.Air.ChanGlue
 import Veir.Air.AieCert
+import Veir.Air.Running
 
 /-! # `air-veir`: AIR async programs in VeIR
 
@@ -58,6 +59,11 @@ Options:
                                  in order. `run` uses 0 for missing ones; `races` treats
                                  missing ones as unknown, so the accesses they shape cover
                                  their whole buffer
+  --mem=<i>:<v,v,...>            contents of the i-th memref argument (counting memref
+  --mem=<i>@<file>               arguments only), as integers; from a file, separated by
+                                 commas or white space. Loop bounds and branch conditions
+                                 computed on the device from them are followed (D59); the
+                                 verdicts hold for that input
   --help                         print this message"
 
 structure Args where
@@ -69,6 +75,16 @@ structure Args where
   por : Bool := true
   allOutcomes : Bool := false
   scalarArgs : Option (List Int) := none
+  /-- `--mem` options, as given. -/
+  memSpecs : List String := []
+  /-- Contents of memref arguments, by position among the memref arguments (D59), read from
+  `memSpecs` by `loadArgData`. -/
+  argData : Std.HashMap Nat (Array Int) := {}
+
+/-- Integers separated by commas, spaces or newlines. -/
+def parseInts (txt : String) : Option (Array Int) :=
+  let words := (txt.split fun c => c == ',' || c == ' ' || c == '\n' || c == '\t' || c == '\r').toList
+  ((words.map (·.toString)).filter (· ≠ "")).toArray.mapM String.toInt?
 
 def parseArgs (args : List String) : Except String Args := do
   let mut positional : List String := []
@@ -78,6 +94,7 @@ def parseArgs (args : List String) : Except String Args := do
   let mut por := true
   let mut allOutcomes := false
   let mut scalarArgs : Option (List Int) := none
+  let mut memSpecs : List String := []
   for a in args do
     if a == "--allow-unregistered-dialect" then allowUnregistered := true
     else if a.startsWith "--max-orders=" then
@@ -94,11 +111,31 @@ def parseArgs (args : List String) : Except String Args := do
       let some xs := ((a.drop "--args=".length).toString.splitOn ",").mapM String.toInt?
         | throw s!"invalid {a}"
       scalarArgs := some xs
+    else if a.startsWith "--mem=" then
+      -- `--mem=<i>:<v,v,...>` or `--mem=<i>@<file>`, read below.
+      memSpecs := memSpecs ++ [(a.drop "--mem=".length).toString]
     else if a.startsWith "-" then throw s!"unknown option {a}"
     else positional := positional ++ [a]
   match positional with
-  | command :: files => return { command, files, allowUnregistered, maxOrders, maxStates, por, allOutcomes, scalarArgs }
+  | command :: files => return { command, files, allowUnregistered, maxOrders, maxStates, por, allOutcomes, scalarArgs,
+                                 memSpecs }
   | [] => throw "expected a command"
+
+/-- Read `--mem=<i>:<v,v,...>` and `--mem=<i>@<file>`: the contents of the `i`-th memref argument. -/
+def loadArgData (args : Args) : IO Args := do
+  let mut data : Std.HashMap Nat (Array Int) := {}
+  for m in args.memSpecs do
+    let (iTxt, rest, fromFile) := match m.splitOn "@", m.splitOn ":" with
+      | i :: r, _ => if i.toNat?.isSome && !r.isEmpty then (i, "@".intercalate r, true) else
+          match m.splitOn ":" with
+          | [i, r] => (i, r, false)
+          | _ => ("", "", false)
+      | _, _ => ("", "", false)
+    let some i := iTxt.toNat? | throw (IO.userError s!"invalid --mem={m}: expected <i>:<values> or <i>@<file>")
+    let txt ← if fromFile then IO.FS.readFile rest else pure rest
+    let some vs := parseInts txt | throw (IO.userError s!"invalid --mem={m}: expected integers")
+    data := data.insert i vs
+  return { args with argData := data }
 
 /-- The `func.func`s at the top level of a module. -/
 def topLevelFuncs (ctx : IRContext OpCode) (top : OperationPtr) : Array OperationPtr :=
@@ -170,6 +207,7 @@ def kindName : EventKind → String
   | .syncOp => "a synchronous op"
   | .issue => "air.channel.issue"
   | .issueBlocking => "air.channel.issue (sync)"
+  | .decide => "control-flow decision"
 
 /-- Instantiate a function's events (Veir.Air.Instance), with the scalar arguments given. -/
 def extractOrThrow (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List Int := []) :
@@ -178,8 +216,50 @@ def extractOrThrow (ctx : IRContext OpCode) (func : OperationPtr) (scalars : Lis
   | .ok ip =>
     unless ip.prog.graph.forwardB do
       throw (IO.userError s!"@{funcName ctx func}: the event graph is not topologically numbered")
+    unless ip.decides.isEmpty do
+      throw (IO.userError s!"@{funcName ctx func}: control flow on values events compute (D59) is \
+        supported by races, run and outcome only")
     return ip
   | .error e => throw (IO.userError s!"@{funcName ctx func}: {e}")
+
+/-- Instantiate with run-time control flow (D59, `Veir.Air.Running`), on the memref contents given;
+also returns the line saying what is known of the decisions, if there are any. -/
+def extractRunning (args : Args) (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List Int)
+    (partialOk : Bool := false) : IO (IProgram × Option String) := do
+  let name := funcName ctx func
+  match instantiateRunning ctx func scalars args.argData with
+  | .error e => throw (IO.userError s!"@{name}: {e}")
+  | .ok (ip, _, status) =>
+    unless ip.prog.graph.forwardB do
+      throw (IO.userError s!"@{name}: the event graph is not topologically numbered")
+    for (j, vs) in args.argData.toList do
+      let some b := ip.argBufs[j]? | throw (IO.userError s!"@{name}: --mem={j}: there are {ip.argBufs.size} memref argument(s)")
+      let t := ip.buffers[b]!.type
+      if t.bitwidth == 0 then throw (IO.userError s!"@{name}: --mem={j}: only integer buffers can be given")
+      if vs.size != t.numel then
+        throw (IO.userError s!"@{name}: --mem={j}: {vs.size} value(s) for {t.numel} element(s)")
+    let values (d : Decision) : String :=
+      let ev := ip.prog.events[d.event]!
+      let vs := (d.reads.zip (d.values.getD [])).map fun ((e, _), n) => s!"event {e} = {n}"
+      s!"'{opName ctx ev.op}'{pathStr ip.ctxs[d.event]!.path} ({", ".intercalate vs})"
+    let shown := (ip.decides.toList.take 6).map values
+    let more := if ip.decides.size > 6 then s!", and {ip.decides.size - 6} more" else ""
+    if let .undetermined what := status then
+      if !partialOk then
+        throw (IO.userError s!"@{name}: {what}: the value deciding it (D59) is not computed in the \
+          execution proposed for the part of the program before it (see `races`)")
+    let line := match status with
+      | .none => none
+      | .undetermined what => some s!"  control flow on values events compute (D59): the value deciding \
+          {what} is not computed in the execution proposed for the part of the program before it. \
+          Below, the verdicts for that part alone, instantiated up to the decisions not known; a \
+          deadlock there may come from what those decisions control, which is left out"
+      | .proven n => some s!"  control flow on values events compute (D59), {n} decision(s): \
+          {"; ".intercalate shown}{more}. Every execution reads these values (proven, Chan.decision_reads)"
+      | .notEstablished n why => some s!"  control flow on values events compute (D59), {n} decision(s): \
+          {"; ".intercalate shown}{more}. These are the values one execution computes; that every \
+          execution reads them is not established ({why}), so the verdicts below are for this control flow"
+    return (ip, line)
 
 /-- `run` takes missing scalar arguments to be 0. -/
 def runScalars (args : Args) : List Int := (args.scalarArgs.getD []) ++ List.replicate 64 0
@@ -242,7 +322,7 @@ def orderDesc (o : List (StreamKey × List Nat)) : String :=
 def cmdRun (args : Args) (file : String) : IO Unit := do
   let (ctx, top) ← load args file
   for func in topLevelFuncs ctx.raw top do
-    let ip ← extractOrThrow ctx.raw func (runScalars args)
+    let (ip, dline) ← extractRunning args ctx.raw func (runScalars args)
     let name := funcName ctx.raw func
     -- The proven model (Veir.Air.ChanSem, ChanMem, ChanFast), built by Veir.Air.ChanGlue.
     let ca ← match ip.analyzeChannels with
@@ -286,6 +366,7 @@ def cmdRun (args : Args) (file : String) : IO Unit := do
     | some h => IO.println s!"@{name}: {h}"
     | none =>
       IO.println s!"@{name}: {(outcomes.head?.map (·.1)).getD "no outcome"}"
+      if let some l := dline then IO.println l
       for l in lines.eraseDups do IO.println l
       for (o, tag) in outcomes.drop 1 do
         IO.println s!"  another order of puts ends differently (D52): {o}{tag}"
@@ -359,7 +440,7 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
   let (ctx, top) ← load args file
   let mut clean := true
   for func in topLevelFuncs ctx.raw top do
-    let ip ← extractOrThrow ctx.raw func (args.scalarArgs.getD [])
+    let (ip, dline) ← extractRunning args ctx.raw func (args.scalarArgs.getD []) (partialOk := true)
     let name := funcName ctx.raw func
     let (fps0, issues) := ip.footprints ctx.raw
     let p := ip.prog
@@ -388,6 +469,7 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
     let raceCount := reports.length + (chanLines.filter (·.startsWith "  race")).length
     IO.println s!"@{name}: {p.events.size} event(s), {ip.buffers.size} buffer(s), \
       {raceCount} race(s), {issues.size} problem(s) inside single events"
+    if let some l := dline then IO.println l
     for l in chanLines do IO.println l
     for r in reports do
       IO.println s!"  race: {r.kind} on {r.buffer} element {r.element} between {eventAt r.first} and \
@@ -396,7 +478,7 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
       IO.println s!"  event {i.event}{pathStr ip.ctxs[i.event]!.path}: {i.msg}"
     let chanBad := chanLines.any fun l => l.startsWith "  error" || l.startsWith "  DEADLOCK" ||
       l.startsWith "  internal" || l.startsWith "  races not" || l.startsWith "  race"
-    if !reports.isEmpty || !issues.isEmpty || chanBad then clean := false
+    if !reports.isEmpty || !issues.isEmpty || chanBad || !ip.complete then clean := false
   return clean
 
 def cmdReduce (args : Args) (file : String) : IO Unit := do
@@ -496,7 +578,7 @@ deadlock-free, it is the only outcome (`deterministic`, C3). -/
 def cmdOutcome (args : Args) (file : String) : IO Unit := do
   let (ctx, top) ← load args file
   for func in topLevelFuncs ctx.raw top do
-    let ip ← extractOrThrow ctx.raw func (runScalars args)
+    let (ip, _) ← extractRunning args ctx.raw func (runScalars args)
     let name := funcName ctx.raw func
     let ca ← match ip.analyzeChannels with
       | .ok ca => pure ca
@@ -597,6 +679,7 @@ def main (argv : List String) : IO UInt32 := do
     return 2
   | .ok args =>
     try
+      let args ← loadArgData args
       match args.command, args.files with
       | "graph", [f] => cmdGraph args f; return 0
       | "run", [f] => cmdRun args f; return 0

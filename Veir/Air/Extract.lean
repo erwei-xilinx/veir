@@ -73,6 +73,9 @@ inductive EventKind where
   `issueBlocking` when it has no result. -/
   | issue
   | issueBlocking
+  /-- A loop bound or branch condition computed by events (D59): reads those results when the
+  host reaches it, blocking, ordered after them only by tokens (D60, as D45 and D57). -/
+  | decide
 deriving DecidableEq, Repr, Inhabited
 
 structure Event where

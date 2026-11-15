@@ -1,4 +1,5 @@
 import Veir.Air.ChanFast
+import Veir.Air.ChanDecide
 
 /-! Tests for the channel semantics (`Veir.Air.ChanSem`, `Veir.Air.ChanMem`): small programs whose
 answer is known, and the axioms the theorems rest on. -/
@@ -112,3 +113,17 @@ private def bcast (dep : Bool) : Prog where
 #guard check (bcast true) == some false
 #guard fastCheck (bcast false) == some true
 #guard fastCheck (bcast true) == some false
+
+/-! D59: decisions on values events compute (`Veir.Air.ChanDecide`). -/
+
+/--
+info: 'Veir.Air.Chan.value_after_writer' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms value_after_writer
+
+/--
+info: 'Veir.Air.Chan.decision_reads' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms decision_reads

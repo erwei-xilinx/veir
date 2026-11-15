@@ -42,8 +42,12 @@ separate hardware mode.
   `repeat_count` (T5);
 - DMA-to-DMA `aie.flow`s, a sender reaching several receivers as a broadcast (T3: all take each
   word);
-- cores as code: `aie.use_lock`, `cf.br`, `scf.for` with constant bounds, `aie.end`; any other op
-  is an opaque computation on its memref operands (D22);
+- cores as code: `aie.use_lock`, `cf.br`, `scf.for` with constant bounds, `aie.end`. Each run of
+  lock-free ops between them is one atomic `exec`, interpreted: `arith`, `memref.load`/`store`
+  (indices may be constants, inner induction variables, or those of enclosing counter loops),
+  `memref.copy`, and lock-free `scf.for`. Any other op is an opaque computation on its memref
+  operands (D22). A value computed before a lock operation and used after it is refused. An
+  error at run time (out of bounds, an arith failure) is reported as a FAULT;
 - runtime sequences of `aiex.dma_configure_task_for` (on an `aie.shim_dma_allocation`),
   `aiex.dma_start_task`, `aiex.dma_await_task` and `aiex.dma_free_task`.
 
@@ -78,8 +82,8 @@ More than one outcome means the design is nondeterministic.
 - `npu.write32` and other runtime ops.
 
 **Not modelled:**
-- core computation, which stays opaque, so data a core produces compares only by provenance;
-- timing.
+- timing;
+- interleavings finer than an `exec` (it runs atomically, as an AIR event does).
 
 **Trusted, not proven:** the extraction, the semantics and the explorer. They are executable code,
 tested by `Test/Air/aie.mlir`.

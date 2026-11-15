@@ -58,6 +58,7 @@ is wrong; the replacement is pending or recorded).
 | D48 | `air-to-aie` test inputs that put a sync `channel.get` in a segment before the herd feeding it are lowering fixtures, not valid programs; D35 stands (they deadlock under it) | ✅ 2026-11-14 ("a，那些只是lowering的测试写法") | sweep verdicts `async bad` | — |
 | D49 | (1) `air.custom` is an event (async with a result, blocking without), reading and writing each memref operand whole, opaque values. (2) `memref.alloc {air.symmetric}` belongs in an `air.rank` body: one buffer per rank, a family. (3) A cross-rank DMA side (`src_rank`/`dst_rank` = R) addresses rank R's buffer of the family; ranks are ordered only through channels. (4) `air.translate %src, %from, %to` is rank `%to`'s buffer of `%src`'s family, `%src` must be rank `%from`'s; heap bases play no part | ✅ 2026-11-14 ("1 2 3 4 都对") | `Instance.lean`: `symmetricBuffer`, `peerBuffer`, `translateInstance`, `customInstance` | AIR-021 |
 | D50 | On a channel whose every dimension has size 1 (e.g. `[1, 1]`), an endpoint with no indices (`@C[]`) names subchannel `[0, ..., 0]`, as `aircc` connects them | ✅ 2026-11-14 ("D50 对") | `channelInstance` | — |
+| D22a | Refinement of D22 (2026-11-14): `memref.copy` between whole buffers (no view, no strided layout, equal sizes) copies element by element, as upstream MLIR defines it. Its footprint is unchanged (reads the source, writes the destination); other uninterpreted ops stay opaque | upstream semantics; no AIR decision involved | `finishExecute` | — |
 
 ## D1. Blocking `air.wait_all` ✅
 

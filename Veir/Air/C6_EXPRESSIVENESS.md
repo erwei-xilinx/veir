@@ -11,7 +11,8 @@ target, this file asks four questions:
 3. Can an AIR program state the behaviour it gives, with the semantics VeIR models?
 4. If not, what is the gap?
 
-The evidence comes from reading mlir-air at `9b81b5de0`. File and line references are to
+The evidence comes from reading mlir-air at `9b81b5de0`, which was 189 commits behind main; row 13
+and gap 4 are corrected for `9848a566f` (2026-11-14). File and line references are to
 `mlir/lib/`. They come from a code survey (2026-11-14). Four were re-checked by hand, marked ✓:
 - `out_of_order` hard-coded false;
 - `iteration` passed as `nullptr`;
@@ -34,7 +35,7 @@ The evidence comes from reading mlir-air at `9b81b5de0`. File and line reference
 | 10 | Multi-BD chains, ping-pong | yes (`generateDmaBdProgram`, `AIRToAIEPass.cpp:6851`) | (c) `air-label-scf-for-to-ping-pong`; (b) `unroll`, `hoist_alloc`; (d) `omit-ping-pong-transform`, `use-lock-race-condition-fix` | the same loop; double buffering is not part of AIR's meaning | **Expressible** (the behaviour is the loop's). Correctness of the lowering is phase 2's subject: AIR-022 is here |
 | 11 | Flows ending at a core (`WireBundle::Core`), cores reading or writing streams | **no** (no `WireBundle::Core` in `Conversion/` ✓; only cascade) | — | none | **Gap.** A core cannot consume or produce a stream word by word; every stream end is a DMA (or a cascade) |
 | 12 | Runtime-parameterised BDs (offset, length, repeat chosen at run time) | yes (`AIRRtToNpuPass.cpp:848-900, 1039-1051, 1088-1103`) | (a) non-constant offsets or sizes on L3-side transfers (one runtime dimension) | launch-level values (VeIR requires them known: `--args`) | expressible, with one runtime dimension |
-| 13 | Runtime register writes: `aiex.set_lock`, `npu.write32`, control packets | partly. `set_lock` on a herd lock (`AIRRtToNpuPass.cpp:1425`, option (d) `emit-herd-lock`, or (c) automatic with run-time parameters); `write32` only for tracing; **control packets not found** | — | none | **Gap**, and an open question: the user recalled an application lowering dynamic offsets to control packets (partial reconfiguration). The survey did not find it in `Conversion/` |
+| 13 | Runtime register writes: `aiex.set_lock`, `npu.write32`, control packets | yes, since #2261 (`7b20edb5f`, 2026-11-04): a core (or the host) patches a BD's offset (or length) and starts it through control packets (`lowerDeviceIssue`, `lowerOnChipIssue` in `AIRToAIEPass.cpp`; host tables in `AIRRtToNpuPass.cpp`). Also `set_lock` on a herd lock; `write32` for tracing | (a) `air.channel.issue` paired with a channel op tagged `air.device_issue`, produced by `air-dma-to-channel` from a put/get whose offset a core computes or whose length is a run-time scalar | a transfer whose offset or length is known only at run time | **Expressible** (since #2261). Its semantics is not yet confirmed or modelled in VeIR |
 
 ## The gaps
 
@@ -49,7 +50,9 @@ The evidence comes from reading mlir-air at `9b81b5de0`. File and line reference
    buffer this". `depth` is documented but not implemented (AIR-010).
 3. **Out-of-order reception** (row 5) and **core stream ends** (row 11) are hardware modes no AIR
    construct reaches.
-4. **Run-time reconfiguration** (row 13): beyond RTPs and a herd start lock, nothing found.
+4. ~~Run-time reconfiguration~~: withdrawn. The earlier survey read a checkout 189 commits behind main;
+   `air.channel.issue` (#2261) lets a core or the host patch and start a transfer through control
+   packets (row 13).
 
 Gaps of mechanism only, where AIR reaches the same behaviour by other means: BD iteration (row
 2), non-zero pad values (row 4).
@@ -57,6 +60,6 @@ Gaps of mechanism only, where AIR reaches the same behaviour by other means: BD 
 ## Next
 
 - Confirm the framing of gap 1 with the user (it is the biggest claim here).
-- Locate the control-packet path the user recalled, or record that it lives outside `Conversion/`.
+- Confirm the semantics of `air.channel.issue` with the user, then model it.
 - Model cascade and `keep_pkt_header` so that rows 6 and 8 can be validated as rows 3, 7 and 10
   were.

@@ -47,7 +47,7 @@ def analyse(path):
             out[cur] = [False, int(m.group(2)), 0, False]
         elif cur and "DEADLOCK" in line:
             out[cur][0] = True
-        elif cur and ("no put provides" in line or "no get takes" in line):
+        elif cur and ("are never got" in line or "no put provides" in line or "no get takes" in line):
             # Elements nothing takes, or a get nothing feeds: a fragment of a program.
             out[cur][3] = True
             out[cur][2] += line.startswith("  error")

@@ -314,6 +314,12 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
           chanLines := chanLines ++ [s!"  note: {noGet.length} element(s) of async puts no get takes (D34)"]
       | some true =>
         chanLines := chanLines ++ ["  no deadlock (proven, Chan.checkH_true): an execution completes, and every execution can (Chan.completes_from_anywhere)"]
+        -- Elements of sync puts that nothing gets stay in the buffer (D30): a fragment of a program.
+        let orphans := (List.range cp.elems.size).filter fun k => match cp.elems[k]? with
+          | some e => e.src.isSome && e.buffered && e.dsts.any (·.isNone)
+          | none => false
+        if !orphans.isEmpty then
+          chanLines := chanLines ++ [s!"  note: {orphans.length} element(s) of sync puts are never got (buffered, D30)"]
         let arr := cv.trace.toArray
         let mut seen : Std.HashSet (Nat × Nat × String) := {}
         if !cv.raceFree && cv.witnesses.isEmpty then

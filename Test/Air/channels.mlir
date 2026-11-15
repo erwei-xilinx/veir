@@ -34,6 +34,6 @@
 // INTERP-NEXT:  44 start/finish order(s) allowed, 1 distinct outcome(s)
 // INTERP-LABEL: @padding: a schedule: %arg0 = [0 : i32, 1 : i32], %arg1 = [0 : i32, 0 : i32, 0 : i32, 1 : i32, 0 : i32]
 
-// D50: on a [1, 1] channel, @C[] is subchannel [0, 0].
+// Decision D50 -- on a [1, 1] channel, @C[] is subchannel [0, 0].
 // RUN: air-veir run --allow-unregistered-dialect %S/Inputs/d50_implicit_index.mlir 2>/dev/null | filecheck %s --check-prefix=D50
 // D50: @implicit_index: a schedule: %arg0 = [0 : i32, 1 : i32, 2 : i32, 3 : i32], %arg1 = [0 : i32, 1 : i32, 2 : i32, 3 : i32]

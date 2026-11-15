@@ -23,4 +23,4 @@
 // (AIR-014).
 // OUT-LABEL: @dma_then_call: 2 event(s), 2 buffer(s), 0 race(s)
 // OUT-LABEL: @fifo_before_loop:
-// OUT-NEXT:  error: channel order race (D33): two puts on @C[] (events 0 and 2) with no token path between them
+// OUT-NEXT:  error: channel order race (D33): two puts on @C[0, 0] (events 0 and 2) with no token path between them

@@ -7,7 +7,7 @@
 
 // mlir-air's channel_drain_hierarchy.mlir after air-dependency deadlocks (AIR-012).
 // RACES-LABEL: @drain_dep: 12 event(s)
-// RACES-NEXT:  DEADLOCK: no schedule exists; stuck (checked by stuckB): finish of event 6 {{.*}}(air.channel.put), {{.*}}(end of a hierarchy op){{.*}}(air.channel.get)
+// RACES-NEXT:  DEADLOCK (proven, Chan.checkH_false): no execution completes; these events never finish: event 6 {{.*}}(air.channel.put), {{.*}}(end of a hierarchy op){{.*}}(air.channel.get)
 // RACES-LABEL: @drain_fixed: 12 event(s), 3 buffer(s), 0 race(s)
 // RACES-NEXT:  no deadlock
 // RACES-LABEL: @herd_tiles: 18 event(s), 6 buffer(s), 0 race(s)
@@ -26,17 +26,17 @@
 // RACES-NEXT:  no deadlock
 
 // INTERP-LABEL: @drain_dep: deadlocks
-// INTERP-LABEL: @drain_fixed: a schedule: {{.*}}%arg0 = [1000 : i32, 1001 : i32, 1002 : i32, 1003 : i32], %arg1 = [1000 : i32, 1001 : i32, 1002 : i32, 1003 : i32]
-// INTERP-NEXT:  1 distinct outcome(s)
-// INTERP-LABEL: @herd_tiles: a schedule: {{.*}}%arg0 = [1000 : i32, 1001 : i32, 1002 : i32, 1003 : i32]
-// INTERP-NEXT:  1 distinct outcome(s)
+// INTERP-LABEL: @drain_fixed: {{.*}}%arg0 = [1000 : i32, 1001 : i32, 1002 : i32, 1003 : i32], %arg1 = [1000 : i32, 1001 : i32, 1002 : i32, 1003 : i32]
+// INTERP-NEXT:  race-free: every execution ends with this memory
+// INTERP-LABEL: @herd_tiles: {{.*}}%arg0 = [1000 : i32, 1001 : i32, 1002 : i32, 1003 : i32]
+// INTERP-NEXT:  race-free: every execution ends with this memory
 // INTERP-LABEL: @sync_herd: {{.*}}%arg2 = [1000 : i32, 1001 : i32, 1002 : i32, 1003 : i32]
 // INTERP-NEXT:  1 finishing order(s) allowed, 1 distinct outcome(s)
 // INTERP-LABEL: @async_herd_unordered:
 // INTERP-NEXT:  2 distinct outcome(s)
 // INTERP-LABEL: @token_arg:
 // INTERP-NEXT:  1 distinct outcome(s)
-// INTERP-LABEL: @rank_talk: a schedule: %arg0 = [1001 : i32, 1000 : i32, 2 : i32, 3 : i32]
+// INTERP-LABEL: @rank_talk: %arg0 = [1001 : i32, 1000 : i32, 2 : i32, 3 : i32]
 
 // Decision D47 -- an L1 buffer outside the herd, used whole by every tile, is one buffer (D46 = A):
 // the tiles race. AIR privatises it per core (AIR-023), a hack.

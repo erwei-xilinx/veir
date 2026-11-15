@@ -3,6 +3,7 @@ import Veir.Printer
 import Veir.Air.Rewrite
 import Veir.Air.Instance
 import Veir.Air.Channels
+import Veir.Air.ChanGlue
 import Veir.Air.Aie
 
 /-! # `air-veir`: AIR async programs in VeIR
@@ -251,27 +252,24 @@ def cmdRun (args : Args) (file : String) : IO Unit := do
           let some (o, _) := outcomes.find? (·.2 == r) | continue
           IO.println s!"  order {o}: {r}"
     else
-      -- With channels an event is two steps, its start and its finish (Veir.Air.Channels).
+      -- With channels: the proven channel model (Veir.Air.ChanSem, ChanMem, ChanGlue).
       let ca ← match ip.analyzeChannels with
         | .ok ca => pure ca
         | .error e => throw (IO.userError s!"@{name}: {e}")
-      match ca.progress with
-      | .deadlocks _ => IO.println s!"@{name}: deadlocks (see `races`)"
-      | .unchecked => IO.println s!"@{name}: internal error: unchecked schedule"
-      | .completes sched =>
-        let run (o : List Nat) := outcome ip (ip.runNodes ctx.raw ca o)
-        IO.println s!"@{name}: a schedule: {run sched}"
-        let g' : DepGraph := ⟨ca.andGraph.preds.pop⟩
-        let orders := g'.orders args.maxOrders
-        let outcomes := orders.map fun o => (o, run o)
-        let distinct := outcomes.foldl (init := ([] : List String)) fun acc (_, r) =>
-          if acc.contains r then acc else acc ++ [r]
-        let capped := if orders.length ≥ args.maxOrders then " (enumeration capped)" else ""
-        IO.println s!"  {orders.length} start/finish order(s) allowed{capped}, {distinct.length} distinct outcome(s)"
-        if distinct.length > 1 then
-          for r in distinct do
-            let some (o, _) := outcomes.find? (·.2 == r) | continue
-            IO.println s!"  order {o}: {r}"
+      let cm ← match ip.chanModel ca with
+        | .ok cm => pure cm
+        | .error e => do IO.println s!"@{name}: not covered: {e}"; continue
+      let (fps0, _) := ip.footprints ctx.raw
+      let cv := cm.verdict (ip.labelFp ca cm fps0)
+      match cv.completes with
+      | some false => IO.println s!"@{name}: deadlocks (see `races`)"
+      | none => IO.println s!"@{name}: internal error: the proposed execution failed its check"
+      | some true =>
+        IO.println s!"@{name}: {outcome ip (ip.runLabels ctx.raw ca cm cv.trace)}"
+        if cv.raceFree then
+          IO.println s!"  race-free: every execution ends with this memory (Chan.outcome_uniqueH)"
+        else
+          IO.println s!"  races (see `races`): other executions may end differently"
 
 def cmdRaces (args : Args) (file : String) : IO Bool := do
   let (ctx, top) ← load args file
@@ -292,43 +290,45 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
       let ca ← match ip.analyzeChannels with
         | .ok ca => pure ca
         | .error e => throw (IO.userError s!"@{name}: {e}")
-      chanLines := chanLines ++ ca.errors.map (s!"  error: " ++ ·) ++ ca.warnings.map (s!"  warning: " ++ ·)
-      match ca.progress with
-      | .completes _ => chanLines := chanLines ++ ["  no deadlock: a schedule exists (checked by scheduleB)"]
-      | .unchecked => chanLines := chanLines ++ ["  internal error: Kahn's answer failed its check"]
-      | .deadlocks stuck =>
-        let evs := (stuck.filter (· < 2 * p.events.size)).map fun node =>
-          s!"{if node % 2 == 0 then "start" else "finish"} of {eventAt (node / 2)}"
-        chanLines := chanLines ++ [s!"  DEADLOCK: no schedule exists; stuck (checked by stuckB): {", ".intercalate evs}"]
-      chanLines := chanLines ++ ca.xferIssues.map (s!"  " ++ ·)
-      let n := p.events.size
-      let total := n + ca.xfers.size
-      let fps := (List.range total).toArray.map fun v =>
-        (if v < n then fps0[v]! else []) ++ ca.footprint n v
-      -- A node's name: an event, or a transfer (`node ≥ n`).
-      let nodeAt (v : Nat) : String :=
-        if v < n then eventAt v
-        else match ca.xfers[v - n]? with
-          | some (P, G) => s!"the transfer from {eventAt P} to event {G}"
-          | none => s!"node {v}"
-      match ip.raceGraph ca with
-      | none => chanLines := chanLines ++ ["  races not checked: the orderings form a cycle"]
-      | some (g3, pos) =>
-        let mut inv : Array Nat := Array.replicate total 0
-        for v in [0:total] do inv := inv.set! pos[v]! v
-        let fp : Footprint := fun i => fps[inv[i]!]?.getD []
-        for (i, j) in races g3 fp do
-          let (u, v) := if inv[i]! < inv[j]! then (inv[i]!, inv[j]!) else (inv[j]!, inv[i]!)
-          let witness := (fp i).findSome? fun a => (fp j).findSome? fun b =>
-            if a.conflictsB b then
-              let bs : Std.HashSet Int := Std.HashSet.ofList b.elems
-              (a.elems.find? bs.contains).map fun x =>
-                let kind := match a.kind, b.kind with
-                  | .write, .read => "RAW" | .read, .write => "WAR" | _, _ => "WAW"
-                (kind, ip.buffers[a.buf]!.name, x)
-            else none
-          if let some (kind, buffer, x) := witness then
-            chanLines := chanLines ++ [s!"  race: {kind} on {buffer} element {x} between {nodeAt u} and {nodeAt v}, with no token path between them"]
+      -- D33 and D37 come from the extraction; the rest from the proven channel model.
+      let ruleErrors := ca.errors.filter fun e => e.startsWith "channel order race" || (e.splitOn "(D37)").length > 1
+      chanLines := chanLines ++ ruleErrors.map (s!"  error: " ++ ·) ++ ca.warnings.map (s!"  warning: " ++ ·)
+      match ip.chanModel ca with
+      | .error e => chanLines := chanLines ++ [s!"  error: not covered: {e}"]
+      | .ok cm =>
+        let cp := cm.prog
+        let labelAt := cm.labelName eventAt
+        let fp := ip.labelFp ca cm fps0
+        let cv := cm.verdict fp
+        let fired : Std.HashSet Chan.Label := Std.HashSet.ofList cv.trace
+        match cv.completes with
+        | none => chanLines := chanLines ++ ["  internal error: the proposed execution failed its check"]
+        | some false =>
+          let unfinished := (List.range p.events.size).filter fun v => !fired.contains (.finish v)
+          let waiting := (List.range cp.elems.size).filter fun k =>
+            match cp.elems[k]? with
+            | some e => e.dst.isSome && !Chan.gotH fired k || e.src.isSome && !Chan.sentH fired k
+            | none => false
+          chanLines := chanLines ++ [s!"  DEADLOCK (proven, Chan.checkH_false): no execution completes; these events never finish: {", ".intercalate (unfinished.map eventAt)}"]
+          if let some k := waiting.head? then
+            chanLines := chanLines ++ [s!"  the first element that never moves: element {cm.pos[k]!} of {cm.slotName[k]!}"]
+        | some true =>
+          chanLines := chanLines ++ ["  no deadlock (proven, Chan.checkH_true): an execution completes, and every execution can (Chan.completes_from_anywhere)"]
+          let arr := cv.trace.toArray
+          if !cv.raceFree && cv.witnesses.isEmpty then
+            chanLines := chanLines ++ ["  race: the race check failed, and the reporter found no witness"]
+          for (i, j) in cv.witnesses do
+            let (x, y) := (arr[i]!, arr[j]!)
+            let witness := (fp x).findSome? fun a => (fp y).findSome? fun b =>
+              if a.conflictsB b then
+                let bs : Std.HashSet Int := Std.HashSet.ofList b.elems
+                (a.elems.find? bs.contains).map fun e =>
+                  let kind := match a.kind, b.kind with
+                    | .write, .read => "RAW" | .read, .write => "WAR" | _, _ => "WAW"
+                  (kind, if a.buf == ip.slotBuf then "an element in flight" else ip.buffers[a.buf]!.name, e)
+              else none
+            if let some (kind, buffer, e) := witness then
+              chanLines := chanLines ++ [s!"  race: {kind} on {buffer} element {e} between {labelAt x} and {labelAt y}, which no execution order fixes"]
     let raceCount := reports.length + (chanLines.filter (·.startsWith "  race")).length
     IO.println s!"@{name}: {p.events.size} event(s), {ip.buffers.size} buffer(s), \
       {raceCount} race(s), {issues.size} problem(s) inside single events"
@@ -448,9 +448,14 @@ def cmdOutcome (args : Args) (file : String) : IO Unit := do
       let ca ← match ip.analyzeChannels with
         | .ok ca => pure ca
         | .error e => throw (IO.userError s!"@{name}: {e}")
-      match ca.progress with
-      | .completes sched => IO.println s!"@{name}: {hostOutcome ip (ip.runNodes ctx.raw ca sched)}"
-      | _ => IO.println s!"@{name}: deadlocks"
+      let cm ← match ip.chanModel ca with
+        | .ok cm => pure cm
+        | .error e => do IO.println s!"@{name}: not covered: {e}"; continue
+      let cv := cm.verdict (fun _ => []) (checkRaces := false)
+      match cv.completes with
+      | some true => IO.println s!"@{name}: {hostOutcome ip (ip.runLabels ctx.raw ca cm cv.trace)}"
+      | some false => IO.println s!"@{name}: deadlocks"
+      | none => IO.println s!"@{name}: internal error: the proposed execution failed its check"
 
 /-- C6: explore every `aie.device` (AIE_SEMANTICS.md, `Veir.Air.Aie`). -/
 def cmdAie (args : Args) (file : String) : IO Bool := do

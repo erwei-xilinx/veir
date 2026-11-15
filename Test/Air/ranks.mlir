@@ -15,11 +15,11 @@
 // RACES-LABEL: @custom_ordered: 2 event(s), 2 buffer(s), 0 race(s)
 // RACES-LABEL: @custom_unordered: 2 event(s), 2 buffer(s), 1 race(s)
 
-// INTERP-LABEL: @signalled_read: a schedule: %arg0 = [1000 : i32, 1001 : i32, 1002 : i32, 1003 : i32]
-// INTERP-NEXT:  1 distinct outcome(s)
+// INTERP-LABEL: @signalled_read: %arg0 = [1000 : i32, 1001 : i32, 1002 : i32, 1003 : i32]
+// INTERP-NEXT:  race-free: every execution ends with this memory
 // INTERP-LABEL: @unsignalled_read:
 // INTERP-NEXT:  2 distinct outcome(s)
-// INTERP-LABEL: @translate_read: a schedule: %arg0 = [1000 : i32, 1001 : i32, 1002 : i32, 1003 : i32]
+// INTERP-LABEL: @translate_read: %arg0 = [1000 : i32, 1001 : i32, 1002 : i32, 1003 : i32]
 // INTERP-LABEL: @custom_unordered:
 // INTERP-NEXT:  2 distinct outcome(s)
 

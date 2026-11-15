@@ -36,3 +36,4 @@ import UnitTest.MemoryLayout
 import UnitTest.DataLayout
 import UnitTest.RegisterAllocation
 import UnitTest.Air
+import UnitTest.AirChan

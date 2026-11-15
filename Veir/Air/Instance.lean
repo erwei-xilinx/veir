@@ -557,6 +557,14 @@ partial def executeInstance (ctx : IRContext OpCode) (op : OperationPtr)
   let ev : Event := { op := op, kind := .execute, operandEvents := deps.toArray, implicitDeps := [],
                       dataDeps := dataDeps, body := body, yields := yields }
   let _ ← pushEvent ev { env := captured, allocBufs := allocBufs, path := path }
+  -- D54: an `air.execute` around an `air.channel.issue` (as air-dma-to-channel emits it after
+  -- air-dependency) is that issue: it runs in the core's program order, and its token follows it.
+  if let some iss := body.find? (opName ctx · == "air.channel.issue") then
+    if body.size != 1 then
+      throw s!"{what}: an air.channel.issue with other ops in one air.execute is not supported"
+    let (ideps, info) ← liftE (issueOperands ctx iss what)
+    if !ideps.isEmpty then throw s!"{what}: an air.channel.issue with its own dependencies inside an air.execute"
+    modify fun st => { st with issues := st.issues.insert id info }
   let mut out := env.insert (.opResult ⟨op, 0⟩) (.tok id)
   for y in yields, i in [0:yields.size] do
     out := out.insert (.opResult ⟨op, i + 1⟩) (.result id (i + 1))
@@ -691,6 +699,24 @@ partial def channelInstance (ctx : IRContext OpCode) (op : OperationPtr)
   modify fun st => { st with chans := st.chans.insert id info }
   if !blocking then return env.insert (.opResult ⟨op, 0⟩) (.tok id)
   return env
+
+/-- An `air.channel.issue`'s operands: its dependencies, and what it starts (D54). -/
+partial def issueOperands (ctx : IRContext OpCode) (op : OperationPtr) (what : String) :
+    Except String (Array ValuePtr × IssueInfo) := do
+  let props := unregProps ctx op
+  let some seg := denseInts (findProp props "operandSegmentSizes")
+    | throw s!"{what}: missing operandSegmentSizes"
+  if seg.size != 4 then throw s!"{what}: unexpected operand segments"
+  let operands := op.getOperands! ctx
+  let mut groups : Array (Array ValuePtr) := #[]
+  let mut start := 0
+  for n in seg do
+    groups := groups.push (operands.extract start (start + n.toNat))
+    start := start + n.toNat
+  let some (.flatSymbolRefAttr chanRef) := findProp props "chan_name" | throw s!"{what}: missing chan_name"
+  let chan := if chanRef.value.startsWith "@" then (chanRef.value.drop 1).toString else chanRef.value
+  let some (.integerAttr iid) := findProp props "issue_id" | throw s!"{what}: missing issue_id"
+  return (groups[0]!, { chan, issueId := iid.value.toNat, offset := groups[2]![0]?, length := groups[3]![0]? })
 
 /-- `air.channel.issue` (D54): an event that starts the transfer of the channel op tagged with its
 `issue_id`. Its offset or length is read when it runs. -/

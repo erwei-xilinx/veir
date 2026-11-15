@@ -59,14 +59,16 @@ structure ChanModel where
 
 /-- The streams of a program: the slots a put feeds together (one, or a broadcast's), and slots
 only gets read. -/
-def streamsOf (list : List Endpoint) : List (String × List (List Int)) := Id.run do
-  let mut streams : List (String × List (List Int)) := []
+abbrev StreamKey := String × List (List Int) × Option (Nat × List Int)
+
+def streamsOf (list : List Endpoint) : List StreamKey := Id.run do
+  let mut streams : List StreamKey := []
   for ep in list do
     if ep.isPut then
-      if !streams.contains (ep.chan, ep.feeds) then streams := streams ++ [(ep.chan, ep.feeds)]
+      if !streams.contains (ep.chan, ep.feeds, ep.inst) then streams := streams ++ [(ep.chan, ep.feeds, ep.inst)]
   for ep in list do
-    if !ep.isPut && !(streams.any fun (c, fs) => c == ep.chan && fs.contains ep.slot) then
-      streams := streams ++ [(ep.chan, [ep.slot])]
+    if !ep.isPut && !(streams.any fun (c, fs, i) => c == ep.chan && fs.contains ep.slot && i == ep.inst) then
+      streams := streams ++ [(ep.chan, [ep.slot], ep.inst)]
   return streams
 
 /-- The orders of `xs` in which every `a` with `before a b` comes before `b`, at most `limit`. -/
@@ -85,13 +87,13 @@ partial def linearOrders (xs : List Nat) (before : Nat → Nat → Bool) (limit 
 /-- D52: puts from different subchannels feeding one stream with no token order between them
 arrive whole, in any order. Every order the tokens allow, per stream (events of its puts). -/
 def IProgram.putOrders (ip : IProgram) (ca : ChanAnalysis) (limit : Nat := 64) :
-    Except String (List (List ((String × List (List Int)) × List Nat))) := do
+    Except String (List (List (StreamKey × List Nat))) := do
   let g := ip.prog.graph
   let rows := g.reachRows
   let list := (List.range ip.prog.events.size).filterMap fun v => ca.endpoints[v]?
-  let mut choices : List (List ((String × List (List Int)) × List Nat)) := [[]]
-  for (chan, slots) in streamsOf list do
-    let puts := list.filter fun ep => ep.isPut && ep.chan == chan && ep.feeds == slots
+  let mut choices : List (List (StreamKey × List Nat)) := [[]]
+  for (chan, slots, inst) in streamsOf list do
+    let puts := list.filter fun ep => ep.isPut && ep.chan == chan && ep.feeds == slots && ep.inst == inst
     -- Puts on one subchannel must be ordered by tokens (D33); only different subchannels may race.
     for a in puts do
       for b in puts do
@@ -100,13 +102,13 @@ def IProgram.putOrders (ip : IProgram) (ca : ChanAnalysis) (limit : Nat := 64) :
     let orders := linearOrders (puts.map (·.event)) (fun a b => g.reachFast rows a b) (limit + 1)
     if orders.length > limit then
       throw s!"@{chan} {slots}: more than {limit} orders of the puts feeding it (D52); too many to check one by one"
-    choices := choices.flatMap fun c => orders.map fun o => c ++ [((chan, slots), o)]
+    choices := choices.flatMap fun c => orders.map fun o => c ++ [((chan, slots, inst), o)]
     if choices.length > limit then
       throw s!"more than {limit} orders of puts across the program's streams (D52); too many to check one by one"
   return choices
 
 def IProgram.chanModel (ip : IProgram) (ca : ChanAnalysis)
-    (putOrder : List ((String × List (List Int)) × List Nat) := []) : Except String ChanModel := do
+    (putOrder : List (StreamKey × List Nat) := []) : Except String ChanModel := do
   let p := ip.prog
   let g := p.graph
   let rows := g.reachRows
@@ -114,9 +116,9 @@ def IProgram.chanModel (ip : IProgram) (ca : ChanAnalysis)
   let list := (List.range n).filterMap fun v => ca.endpoints[v]?
   let streams := streamsOf list
   -- A slot belongs to one stream: no put feeds it together with other slots and another alone.
-  for (c, fs) in streams do
-    for (c', fs') in streams do
-      if c == c' && fs != fs' && fs.any fs'.contains then
+  for (c, fs, i) in streams do
+    for (c', fs', i') in streams do
+      if c == c' && i == i' && fs != fs' && fs.any fs'.contains then
         throw s!"@{c}: slot(s) fed both as {fs} and as {fs'}; mixing broadcast and other puts on one slot is not in the proven channel model yet"
   let mut elems : Array Chan.Elem := #[]
   let mut srcOf : Array (Option (Nat × Nat)) := #[]
@@ -128,16 +130,16 @@ def IProgram.chanModel (ip : IProgram) (ca : ChanAnalysis)
   let mut dstLoc : Array (List (Option (Nat × Int))) := #[]
   let mut srcShift : Array (Option Nat) := #[]
   let mut dstShift : Array (List (Option Nat)) := #[]
-  for (chan, slots) in streams do
-    let puts0 := list.filter fun ep => ep.isPut && ep.chan == chan && ep.feeds == slots
+  for (chan, slots, inst) in streams do
+    let puts0 := list.filter fun ep => ep.isPut && ep.chan == chan && ep.feeds == slots && ep.inst == inst
     let name := if slots.length == 1 then s!"@{chan}{slots.head!}" else s!"@{chan} broadcast to {slots}"
     -- The stream's order: the token order (D33, D34), or the order chosen for puts the tokens
     -- leave unordered (D52, `putOrders`).
-    let puts := match putOrder.lookup (chan, slots) with
+    let puts := match putOrder.lookup (chan, slots, inst) with
       | some evs => evs.filterMap fun v => puts0.find? fun (ep : Endpoint) => ep.event == v
       | none => puts0
     for (a, b) in puts.zip puts.tail do
-      if !g.reachFast rows a.event b.event && (putOrder.lookup (chan, slots)).isNone then
+      if !g.reachFast rows a.event b.event && (putOrder.lookup (chan, slots, inst)).isNone then
         throw s!"{name}: puts of events {a.event} and {b.event} feed it with no token path between them; choose an order (D52, putOrders)"
     let mut pr : List (Endpoint × Nat) := []
     let mut ps := 0
@@ -146,7 +148,7 @@ def IProgram.chanModel (ip : IProgram) (ca : ChanAnalysis)
       ps := ps + ep.count
     let mut grs : List (List (Endpoint × Nat) × Nat) := []
     for slot in slots do
-      let gets := list.filter fun ep => !ep.isPut && ep.chan == chan && ep.slot == slot
+      let gets := list.filter fun ep => !ep.isPut && ep.chan == chan && ep.slot == slot && ep.inst == inst
       for (a, b) in gets.zip gets.tail do
         if !g.reachFast rows a.event b.event then
           throw s!"@{chan}{slot}: gets of events {a.event} and {b.event} read it with no token path between them (D33)"

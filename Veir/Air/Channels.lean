@@ -68,6 +68,8 @@ structure Endpoint where
   /-- D54: the `air.channel.issue` whose run-time offset (in elements) is added to every position
   when it runs; `none` if the positions are those above. -/
   shiftBy : Option Nat := none
+  /-- D56: the `air.launch` instance it belongs to; each has its own streams. -/
+  inst : Option (Nat × List Int) := none
 deriving Inhabited
 
 def Endpoint.count (e : Endpoint) : Nat :=
@@ -127,7 +129,8 @@ def IProgram.endpoint (ip : IProgram) (v : Nat) (issue : Option Nat := none) :
     let stream := (← srcStream dims info.padBefore info.padAfter).map (·.map (· + shift))
     if shiftBy.isNone then checkBounds t ip.buffers[buf]!.name (stream.filterMap id)
     return some { event := v, isPut := true, sync, chan := info.chan, slot := info.indices,
-                  feeds := ← feedSlots decl info.indices info.dest, stream, buf, shiftBy }
+                  feeds := ← feedSlots decl info.indices info.dest, stream, buf, shiftBy,
+                  inst := c.launchInst }
   else
     let dst0 :=
       if info.padBefore.isEmpty then (positions dims).map (·, false)
@@ -137,7 +140,7 @@ def IProgram.endpoint (ip : IProgram) (v : Nat) (issue : Option Nat := none) :
       throw s!"{what}: padding rank differs from the pattern's"
     if shiftBy.isNone then checkBounds t ip.buffers[buf]!.name (dst.map (·.1))
     return some { event := v, isPut := false, sync, chan := info.chan, slot := info.indices,
-                  feeds := [info.indices], dst, buf, shiftBy }
+                  feeds := [info.indices], dst, buf, shiftBy, inst := c.launchInst }
 
 def IProgram.analyzeChannels (ip : IProgram) : Except String ChanAnalysis := do
   let p := ip.prog
@@ -168,20 +171,23 @@ def IProgram.analyzeChannels (ip : IProgram) : Except String ChanAnalysis := do
   for v in [0:n] do
     if let some ep ← ip.endpoint v issueOf[v]? then eps := eps.insert v ep
   let mut errors : List String := []
-  -- D33: one subchannel, one direction: totally ordered by tokens.
+  -- D33: one subchannel, one direction, one launch instance (D56): totally ordered by tokens.
   let list := (List.range n).filterMap fun v => eps[v]?
   for a in list do
     for b in list do
       if a.event < b.event && a.chan == b.chan && a.isPut == b.isPut && a.slot == b.slot &&
-          !g.reachFast rows a.event b.event then
+          a.inst == b.inst && !g.reachFast rows a.event b.event then
         errors := errors ++ [s!"channel order race (D33): two {if a.isPut then "puts" else "gets"} on @{a.chan}{a.slot} (events {a.event} and {b.event}) with no token path between them"]
-  -- D37: instances of one `air.launch` may run one after another, so they must not communicate.
+  -- D37, D56: each launch instance has its own streams, so instances cannot communicate. A put
+  -- whose slot only another instance gets from is an attempt to.
   for P in list do
-    for G in list do
-      if P.isPut && !G.isPut && P.chan == G.chan && P.feeds.contains G.slot then
-        if let (some (lp, pi), some (lg, gi)) := (ip.ctxs[P.event]!.launchInst, ip.ctxs[G.event]!.launchInst) then
-          if lp == lg && pi != gi then
-            errors := errors ++ [s!"@{G.chan}{G.slot}: event {P.event}'s put feeds event {G.event}'s get across two instances of one air.launch ({pi} and {gi}), which may run one after another (D37)"]
+    if !P.isPut then continue
+    for slot in P.feeds do
+      let mine := list.any fun G => !G.isPut && G.chan == P.chan && G.slot == slot && G.inst == P.inst
+      if mine then continue
+      if let some G := list.find? fun G => !G.isPut && G.chan == P.chan && G.slot == slot && G.inst != P.inst then
+        if let (some (_, pi), some (_, gi)) := (P.inst, G.inst) then
+          errors := errors ++ [s!"@{G.chan}{G.slot}: event {P.event}'s put in air.launch instance {pi} feeds a slot only instance {gi} gets from (event {G.event}); each instance has its own streams and instances do not communicate (D37, D56)"]
   return { endpoints := eps, errors, issueOf }
 
 end

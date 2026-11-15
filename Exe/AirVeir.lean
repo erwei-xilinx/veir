@@ -235,8 +235,8 @@ def cmdGraph (args : Args) (file : String) : IO Unit := do
       IO.println s!"  warning: event {v} reads a result of event {u} without waiting for it"
 
 /-- The orders chosen for puts no token orders (D52), for messages. -/
-def orderDesc (o : List ((String × List (List Int)) × List Nat)) : String :=
-  "; ".intercalate (o.filterMap fun ((c, _), evs) =>
+def orderDesc (o : List (StreamKey × List Nat)) : String :=
+  "; ".intercalate (o.filterMap fun ((c, _, _), evs) =>
     if evs.length > 1 then some s!"@{c}: events {evs}" else none)
 
 def cmdRun (args : Args) (file : String) : IO Unit := do

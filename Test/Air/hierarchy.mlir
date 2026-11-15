@@ -19,8 +19,9 @@
 // RACES:       race: RAW on %arg0 element {{[0-9]+}} between the transfer of element {{[0-9]+}} of event 1 (iteration [0, 0]) (air.dma_memcpy_nd) and the read of element {{[0-9]+}} of event 3 (air.dma_memcpy_nd)
 // RACES-LABEL: @token_arg: 4 event(s), 3 buffer(s), 0 race(s)
 // RACES-LABEL: @launch_talk:
-// RACES-NEXT:  error: @L[1]: event 1's put feeds event 4's get across two instances of one air.launch ([0] and [1]), which may run one after another (D37)
-// RACES-NEXT:  error: @L[0]: event 3's put feeds event 2's get across two instances of one air.launch ([1] and [0]), which may run one after another (D37)
+// RACES-NEXT:  error: @L[1]: event 1's put in air.launch instance [0] feeds a slot only instance [1] gets from (event 4); each instance has its own streams and instances do not communicate (D37, D56)
+// RACES-NEXT:  error: @L[0]: event 3's put in air.launch instance [1] feeds a slot only instance [0] gets from (event 2); each instance has its own streams and instances do not communicate (D37, D56)
+// RACES-NEXT:  DEADLOCK (proven, Chan.checkH_false)
 // RACES-LABEL: @nested_segment: 6 event(s), 3 buffer(s), 0 race(s)
 // RACES-LABEL: @rank_talk: 6 event(s), 2 buffer(s), 0 race(s)
 // RACES-NEXT:  no deadlock

@@ -69,6 +69,17 @@ structure ChanInfo where
   padBefore : Array Int
   padAfter : Array Int
   dest : Option Int
+  /-- `air.device_issue`: the `air.channel.issue` that starts this transfer (D54). -/
+  issueId : Option Nat := none
+deriving Inhabited
+
+/-- An `air.channel.issue` (D54): the transfer it starts, and the run-time offset (in elements,
+added to the paired op's start) or outermost length it gives. -/
+structure IssueInfo where
+  chan : String
+  issueId : Nat
+  offset : Option ValuePtr
+  length : Option ValuePtr
 deriving Inhabited
 
 structure IProgram where
@@ -86,6 +97,7 @@ structure IProgram where
   loops : Nat
   chanDecls : Std.HashMap String ChanDecl := {}
   chans : Std.HashMap Nat ChanInfo := {}
+  issues : Std.HashMap Nat IssueInfo := {}
 deriving Inhabited
 
 structure IState where
@@ -99,6 +111,7 @@ structure IState where
   loops : Nat := 0
   chanDecls : Std.HashMap String ChanDecl := {}
   chans : Std.HashMap Nat ChanInfo := {}
+  issues : Std.HashMap Nat IssueInfo := {}
   /-- The `air.launch` instance being walked. -/
   launchInst : Option (Nat × List Int) := none
   /-- The `air.rank` instance being walked: its start event, the length of the path before its
@@ -250,7 +263,7 @@ def pushEvent (e : Event) (c : EventCtx) : IM Nat := do
   let id := st.events.size
   let blocking := e.kind == .waitAllBlocking || e.kind == .dmaBlocking ||
     e.kind == .putBlocking || e.kind == .getBlocking || e.kind == .scopeEndBlocking ||
-    e.kind == .syncOp
+    e.kind == .syncOp || e.kind == .issueBlocking
   -- A blocking event waits for the blocking events before it, so later events need only wait for
   -- the last one: the same order, with a linear number of edges.
   set { st with events := st.events.push { e with implicitDeps := st.blocking },
@@ -467,12 +480,21 @@ partial def walkOps (ctx : IRContext OpCode) (ops : Array OperationPtr)
                           dataDeps := [], body := #[], yields := #[] }
       let id ← pushEvent ev { path := path }
       if op.getNumResults! ctx = 1 then env := env.insert (.opResult ⟨op, 0⟩) (.tok id)
-    | .arith _ => env ← evalHostArith ctx op env
+    | .arith _ =>
+      -- On a value an event computes, arith runs when the host reaches it: a blocking event
+      -- (D45). Otherwise it is evaluated now.
+      let onResult ← (op.getOperands! ctx).toList.anyM fun v => do
+        match env[v]? with
+        | some (.result _ _) => pure true
+        | _ => pure false
+      if onResult then env ← syncOpInstance ctx op env path
+      else env ← evalHostArith ctx op env
     | .func .return => pure ()
     | .builtin .unregistered =>
       if name == "air.dma_memcpy_nd" then env ← dmaInstance ctx op env path
       else if name == "air.channel.put" then env ← channelInstance ctx op env path true
       else if name == "air.channel.get" then env ← channelInstance ctx op env path false
+      else if name == "air.channel.issue" then env ← issueInstance ctx op env path
       else if name == "memref.alloc" then
         let ty := (ValuePtr.opResult ⟨op, 0⟩).getType! ctx
         let b ← if hasAttrNamed ctx op "air.symmetric" then
@@ -654,9 +676,58 @@ partial def channelInstance (ctx : IRContext OpCode) (op : OperationPtr)
   let ev : Event := { op := op, kind := kind, operandEvents := deps.toArray, implicitDeps := [],
                       dataDeps := dataDeps, body := #[], yields := #[] }
   let id ← pushEvent ev { env := captured, path := path }
+  -- D54: a transfer an `air.channel.issue` starts. One transfer per issue; more
+  -- (`air.device_issue_count`) are not modelled yet.
+  let attrOf (n : String) : Option Int :=
+    match (((op.getAttributes! ctx).entries.find? (·.1 == n.toUTF8)).map (·.2) : Option Attribute) with
+    | some (.integerAttr i) => some i.value
+    | _ => none
+  let issueId := (attrOf "air.device_issue").map Int.toNat
+  if let some cnt := attrOf "air.device_issue_count" then
+    if cnt != 1 then
+      throw s!"{what}: air.device_issue_count = {cnt}: several transfers started by issues are not modelled yet (D54)"
   let info : ChanInfo := { chan := chan, isPut := isPut, indices := indices, side := side,
-                           padBefore := padBefore, padAfter := padAfter, dest := dest }
+                           padBefore := padBefore, padAfter := padAfter, dest := dest, issueId }
   modify fun st => { st with chans := st.chans.insert id info }
+  if !blocking then return env.insert (.opResult ⟨op, 0⟩) (.tok id)
+  return env
+
+/-- `air.channel.issue` (D54): an event that starts the transfer of the channel op tagged with its
+`issue_id`. Its offset or length is read when it runs. -/
+partial def issueInstance (ctx : IRContext OpCode) (op : OperationPtr)
+    (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
+  let what := s!"air.channel.issue{pathStr path}"
+  let props := unregProps ctx op
+  let some seg := denseInts (findProp props "operandSegmentSizes")
+    | throw s!"{what}: missing operandSegmentSizes"
+  if seg.size != 4 then throw s!"{what}: unexpected operand segments"
+  let operands := op.getOperands! ctx
+  let mut groups : Array (Array ValuePtr) := #[]
+  let mut start := 0
+  for n in seg do
+    groups := groups.push (operands.extract start (start + n.toNat))
+    start := start + n.toNat
+  let some (.flatSymbolRefAttr chanRef) := findProp props "chan_name" | throw s!"{what}: missing chan_name"
+  let chan := if chanRef.value.startsWith "@" then (chanRef.value.drop 1).toString else chanRef.value
+  let some (.integerAttr iid) := findProp props "issue_id" | throw s!"{what}: missing issue_id"
+  let deps ← groups[0]!.toList.mapM fun v => liftE (tokOf env ctx what v)
+  let offset := groups[2]![0]?
+  let length := groups[3]![0]?
+  let mut captured : Std.HashMap ValuePtr HVal := {}
+  let mut dataDeps : List Nat := []
+  for v in (offset.toList ++ length.toList) do
+    let h ← liftE (lookupH env ctx v what)
+    if let .tok _ := h then throw s!"{what}: a token used as an offset or length"
+    if let .result e _ := h then
+      if !dataDeps.contains e then dataDeps := dataDeps ++ [e]
+    captured := captured.insert v h
+  let blocking := op.getNumResults! ctx = 0
+  let ev : Event := { op := op, kind := if blocking then .issueBlocking else .issue,
+                      operandEvents := deps.toArray, implicitDeps := [], dataDeps := dataDeps,
+                      body := #[], yields := #[] }
+  let id ← pushEvent ev { env := captured, path := path }
+  let info : IssueInfo := { chan := chan, issueId := iid.value.toNat, offset := offset, length := length }
+  modify fun st => { st with issues := st.issues.insert id info }
   if !blocking then return env.insert (.opResult ⟨op, 0⟩) (.tok id)
   return env
 
@@ -892,7 +963,7 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
   let prog : Program := { func, events := st.events, hostOps := #[] }
   return { prog, ctxs := st.ctxs, buffers := st.buffers, dmas := st.dmas,
            resultBufs := st.resultBufs, viewResults := st.viewResults, argBufs, loops := st.loops,
-           chanDecls := st.chanDecls, chans := st.chans }
+           chanDecls := st.chanDecls, chans := st.chans, issues := st.issues }
 
 /-! ### Running -/
 

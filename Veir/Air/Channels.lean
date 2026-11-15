@@ -65,6 +65,9 @@ structure Endpoint where
   /-- A get's padded destination positions; empty for a put. -/
   dst : List (Int × Bool) := []
   buf : Nat
+  /-- D54: the `air.channel.issue` whose run-time offset (in elements) is added to every position
+  when it runs; `none` if the positions are those above. -/
+  shiftBy : Option Nat := none
 deriving Inhabited
 
 def Endpoint.count (e : Endpoint) : Nat :=
@@ -74,9 +77,12 @@ structure ChanAnalysis where
   endpoints : Std.HashMap Nat Endpoint
   /-- D33 and D37 violations. -/
   errors : List String
+  /-- D54: the `air.channel.issue` that starts each transfer tagged `air.device_issue`. -/
+  issueOf : Std.HashMap Nat Nat := {}
 
 /-- The endpoint of a channel event, from what is known before running. -/
-def IProgram.endpoint (ip : IProgram) (v : Nat) : Except String (Option Endpoint) := do
+def IProgram.endpoint (ip : IProgram) (v : Nat) (issue : Option Nat := none) :
+    Except String (Option Endpoint) := do
   let some info := ip.chans[v]? | return none
   let c := ip.ctxs[v]!
   let e := ip.prog.events[v]!
@@ -92,31 +98,75 @@ def IProgram.endpoint (ip : IProgram) (v : Nat) : Except String (Option Endpoint
     match xs.mapM fun | .inl n => some n | .inr vp => (c.env[vp]? >>= fun | .val x => x.toInt? | _ => none) with
     | some a => pure a
     | none => throw s!"{what}: a channel transfer's pattern must be known before running"
-  let dims ← sidePositions t (← entries info.side.offsets) (← entries info.side.sizes) (← entries info.side.strides)
+  -- D54: the issue gives the outermost length, or an offset in elements added to every position:
+  -- known before running (host values), or read when the issue runs.
+  let mut sizes ← entries info.side.sizes
+  let mut shift : Int := 0
+  let mut shiftBy : Option Nat := none
+  if let some i := issue then
+    let some ii := ip.issues[i]? | throw s!"{what}: internal error: no issue {i}"
+    let ic := ip.ctxs[i]!
+    if let some lv := ii.length then
+      match ic.env[lv]? with
+      | some (.val x) =>
+        match x.toInt? with
+        | some n => if sizes.size > 0 then sizes := sizes.set! 0 n
+        | none => throw s!"{what}: the length air.channel.issue gives is not known before running (pass --args)"
+      | _ => throw s!"{what}: a length computed by an event is not supported (D54: a host issue gives a launch value)"
+    if let some ov := ii.offset then
+      match ic.env[ov]? with
+      | some (.val x) =>
+        match x.toInt? with
+        | some n => shift := n
+        | none => throw s!"{what}: the offset air.channel.issue gives is not known (pass --args)"
+      | some (.result _ _) => shiftBy := some i
+      | _ => throw s!"{what}: the offset air.channel.issue gives is not a value"
+  let dims ← sidePositions t (← entries info.side.offsets) sizes (← entries info.side.strides)
   let sync := e.kind == .putBlocking || e.kind == .getBlocking
   if info.isPut then
-    let stream ← srcStream dims info.padBefore info.padAfter
-    checkBounds t ip.buffers[buf]!.name (stream.filterMap id)
+    let stream := (← srcStream dims info.padBefore info.padAfter).map (·.map (· + shift))
+    if shiftBy.isNone then checkBounds t ip.buffers[buf]!.name (stream.filterMap id)
     return some { event := v, isPut := true, sync, chan := info.chan, slot := info.indices,
-                  feeds := ← feedSlots decl info.indices info.dest, stream, buf }
+                  feeds := ← feedSlots decl info.indices info.dest, stream, buf, shiftBy }
   else
-    let dst :=
+    let dst0 :=
       if info.padBefore.isEmpty then (positions dims).map (·, false)
       else paddedDst 0 (dims.zip ((info.padBefore.toList.map Int.toNat).zip (info.padAfter.toList.map Int.toNat)))
+    let dst := dst0.map fun (q, pad) => (q + shift, pad)
     if !info.padBefore.isEmpty && info.padBefore.size != dims.length then
       throw s!"{what}: padding rank differs from the pattern's"
-    checkBounds t ip.buffers[buf]!.name (dst.map (·.1))
+    if shiftBy.isNone then checkBounds t ip.buffers[buf]!.name (dst.map (·.1))
     return some { event := v, isPut := false, sync, chan := info.chan, slot := info.indices,
-                  feeds := [info.indices], dst, buf }
+                  feeds := [info.indices], dst, buf, shiftBy }
 
 def IProgram.analyzeChannels (ip : IProgram) : Except String ChanAnalysis := do
   let p := ip.prog
   let g := p.graph
   let rows := g.reachRows
   let n := p.events.size
+  -- D54: pair each tagged transfer with the issue of its `issue_id`, in order, within one launch
+  -- instance; any other count is an error.
+  let mut issueOf : Std.HashMap Nat Nat := {}
+  let mut keys : List (Nat × Option (Nat × List Int)) := []
+  for v in [0:n] do
+    if let some id := (ip.chans[v]?).bind (·.issueId) then
+      let k := (id, ip.ctxs[v]!.launchInst)
+      if !keys.contains k then keys := keys ++ [k]
+    if let some ii := ip.issues[v]? then
+      let k := (ii.issueId, ip.ctxs[v]!.launchInst)
+      if !keys.contains k then keys := keys ++ [k]
+  for (id, li) in keys do
+    let tagged := (List.range n).filter fun v =>
+      ((ip.chans[v]?).bind (·.issueId)) == some id && ip.ctxs[v]!.launchInst == li
+    let issues := (List.range n).filter fun v =>
+      ((ip.issues[v]?).map (·.issueId)) == some id && ip.ctxs[v]!.launchInst == li
+    if tagged.length != issues.length then
+      throw s!"issue_id {id}: {issues.length} air.channel.issue(s) for {tagged.length} transfer(s) tagged air.device_issue in one launch instance (D54)"
+    for t in tagged, i in issues do
+      issueOf := issueOf.insert t i
   let mut eps : Std.HashMap Nat Endpoint := {}
   for v in [0:n] do
-    if let some ep ← ip.endpoint v then eps := eps.insert v ep
+    if let some ep ← ip.endpoint v issueOf[v]? then eps := eps.insert v ep
   let mut errors : List String := []
   -- D33: one subchannel, one direction: totally ordered by tokens.
   let list := (List.range n).filterMap fun v => eps[v]?
@@ -132,7 +182,7 @@ def IProgram.analyzeChannels (ip : IProgram) : Except String ChanAnalysis := do
         if let (some (lp, pi), some (lg, gi)) := (ip.ctxs[P.event]!.launchInst, ip.ctxs[G.event]!.launchInst) then
           if lp == lg && pi != gi then
             errors := errors ++ [s!"@{G.chan}{G.slot}: event {P.event}'s put feeds event {G.event}'s get across two instances of one air.launch ({pi} and {gi}), which may run one after another (D37)"]
-  return { endpoints := eps, errors }
+  return { endpoints := eps, errors, issueOf }
 
 end
 

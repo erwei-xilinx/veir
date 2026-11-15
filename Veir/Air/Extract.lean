@@ -69,6 +69,10 @@ inductive EventKind where
   /-- An op without `async` that is not otherwise an event (`memref.dealloc`, `linalg.*`,
   `func.call`, ...): a blocking event whose body is the op itself (D45). -/
   | syncOp
+  /-- `air.channel.issue` (D54): starts the transfer of the channel op it is paired with;
+  `issueBlocking` when it has no result. -/
+  | issue
+  | issueBlocking
 deriving DecidableEq, Repr, Inhabited
 
 structure Event where

@@ -1,0 +1,37 @@
+#map = affine_map<()[s0] -> (s0 * 32768 + 7)>
+module {
+  air.channel @cin [1, 1]
+  // D54: the core loads an index (2) and issues the put at element offset 2 * 4 past its static
+  // start: the get receives src[8..12).
+  func.func @core_issue(%src: memref<16xi32>, %out: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%l) in (%ls=%c1) args(%a=%src, %o=%out) : memref<16xi32>, memref<4xi32> {
+      %c0 = arith.constant 0 : index
+      %c4 = arith.constant 4 : index
+      %u1 = arith.constant 1 : index
+      %p = air.channel.put async @cin[%c0, %c0] (%a[%c0] [%c4] [%u1]) {air.device_issue = 0 : i64} : (memref<16xi32>)
+      air.segment @seg args(%so=%o) : memref<4xi32> {
+        %s1 = arith.constant 1 : index
+        air.herd @router tile (%x, %y) in (%sx=%s1, %sy=%s1) {
+          %k0 = arith.constant 0 : index
+          %k2 = arith.constant 2 : i32
+          %k4 = arith.constant 4 : i64
+          %idx = memref.alloc() : memref<1xi32, 2 : i32>
+          memref.store %k2, %idx[%k0] : memref<1xi32, 2 : i32>
+          %v = memref.load %idx[%k0] : memref<1xi32, 2 : i32>
+          %e = arith.extsi %v : i32 to i64
+          %off = arith.muli %e, %k4 : i64
+          air.channel.issue @cin[%x, %y] offset(%off : i64) {issue_id = 0 : i64}
+          memref.dealloc %idx : memref<1xi32, 2 : i32>
+        }
+        air.herd @mvm tile (%x, %y) in (%sx=%s1, %sy=%s1) args(%oo=%so) : memref<4xi32> {
+          %buf = memref.alloc() : memref<4xi32, 2 : i32>
+          air.channel.get @cin[%x, %y] (%buf[] [] []) : (memref<4xi32, 2 : i32>)
+          air.dma_memcpy_nd (%oo[] [] [], %buf[] [] []) : (memref<4xi32>, memref<4xi32, 2 : i32>)
+          memref.dealloc %buf : memref<4xi32, 2 : i32>
+        }
+      }
+    }
+    return
+  }
+}

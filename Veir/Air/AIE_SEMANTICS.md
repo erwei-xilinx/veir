@@ -78,3 +78,10 @@ tested by `Test/Air/aie.mlir`.
 - **AIR-022:** `air-to-aie` lowers an in-place relay (get into a buffer, then put it, in a loop) to
   ping-pong BDs whose S2MM can refill a buffer before the MM2S has sent it. The lowered design has
   4 outcomes; the AIR input has 1.
+- Phase 2 (`Test/Air/bounded/check_lowering.py`, 24 in-place relay programs):
+  - 14 lowered correctly;
+  - 6 are AIR-022: every K = 4 case within the bound, and only those;
+  - 4 exceed 2M states (a 2×1 herd through L2; partial-order reduction would help).
+
+  The memtile relay is lowered correctly; the L1 relay with a core between its S2MM and MM2S
+  is not.

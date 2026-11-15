@@ -425,6 +425,20 @@ Status of the hierarchy layer (layer 5):
 | C5 | `sweep_dependency.py` analyses each chunk before and after `air-dependency` (D45 makes the input analysable). Over 232 AIR test files (all of `AIRDependency/`, and every test with a herd and channels): 100 functions analysed; 50 ok, 22 problems already in the input, 25 fragments (a sync put nothing gets), and **3 introduced by `air-dependency`**: AIR-012 (drain edge deadlock) and AIR-014 (channel FIFO order lost across a loop, twice). With branches supported, 5 more: AIR-020 (ops after `scf.if`/`affine.if` do not wait for accesses inside it, 4 tests) and `shared_l1_placement` (likely AIR-012). Inputs already async (tests of other passes) are analysed as written. Output: `~/air-issues/notes/sweep_2026_11_14.out`. |
 | C6 | Deferred until the whole dialect is covered (below). |
 
+### C6: the target model (started 2026-11-14)
+
+Target: the AIE2P DMA buffer descriptors and locks, at the level `air-to-aie` and `airrt-to-npu`
+produce. Hardware decisions T1-T5 and what the model covers are in
+[`AIE_SEMANTICS.md`](AIE_SEMANTICS.md).
+
+- `air-veir aie <file>` (phase 1) explores a design: every interleaving, deadlocks with a run
+  reaching them, and the distinct outcomes of host memory.
+- `air-veir outcome <file>` prints an AIR program's host memory after one complete run. For a
+  race-free program, this is its only outcome (C3).
+- `Test/Air/bounded/check_lowering.py` (phase 2) compiles small data-movement programs with
+  `aircc`. It then requires the design to reach exactly the program's one outcome, without
+  deadlocking.
+
 ### Order of work (decided 2026-11-14)
 
 1. Finish the AIR dialect layer by layer: layer 5 is `air.launch` / `air.segment` / `air.herd`;

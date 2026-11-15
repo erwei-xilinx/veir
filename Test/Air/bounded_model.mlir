@@ -9,7 +9,7 @@
 // RUN: grep -c '^OK' %t.check.txt | filecheck %s --check-prefix=COUNT
 // RUN: not grep FAIL %t.check.txt
 // RUN: python3 %S/bounded/gen.py --events 3 --data > %t.data.mlir
-// RUN: air-veir run %t.data.mlir | grep -c 'finishing order' | filecheck %s --check-prefix=DATA
+// RUN: air-veir run %t.data.mlir | grep -c '^@' | filecheck %s --check-prefix=DATA
 
 // COUNT: 2295
 // DATA: 229

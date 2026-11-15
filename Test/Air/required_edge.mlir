@@ -15,8 +15,8 @@
 
 // KEPT: OK @f: 3 event(s), same reachability (1 edge(s) before, 1 after)
 
-// GOOD:      program order: event 0 = [1 : i32], event 1 = [10 : i32], event 2 = [2 : i32]
-// GOOD-NEXT: 3 finishing order(s) allowed, 1 distinct outcome(s)
+// GOOD:      @f: event 0 = [1 : i32], event 1 = [10 : i32], event 2 = [2 : i32]
+// GOOD-NEXT: race-free: every execution ends with this memory
 
 // REJECT:      FAIL @f: the dependency graphs order the events differently
 // REJECT-NEXT: the second allows finishing order [1, 2, 0], which the first forbids
@@ -25,6 +25,7 @@
 
 // RACE: warning: event 2 reads a result of event 0 without waiting for it
 
-// BAD:      6 finishing order(s) allowed, 2 distinct outcome(s)
-// BAD-DAG:  event 0 = [1 : i32], event 1 = [10 : i32], event 2 = [2 : i32]
+// D4: the read of event 0's result is unordered, a race on its results; two checked executions
+// end differently.
 // BAD-DAG:  fault: event 2: 'arith.addi' read a result of event 0 before it was available
+// BAD-DAG:  ends differently: event 0 = [1 : i32], event 1 = [10 : i32], event 2 = [2 : i32]

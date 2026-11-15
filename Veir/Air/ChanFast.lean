@@ -617,13 +617,14 @@ def possible (p : Prog) : Label → Bool
     | some e => !e.buffered && e.src.isSome && !e.dsts.isEmpty && e.dsts.all (·.isSome)
     | none => false
 
-/-- Kahn's algorithm on `hbPredsI`: fire each possible label once all it needs has fired. -/
-def genTrace (p : Prog) (idx : Array (List Nat)) : List Label := Id.run do
+/-- Kahn's algorithm on `hbPredsI`, plus `extra` orderings: fire each possible label once all it
+needs has fired. -/
+def genTraceWith (p : Prog) (idx : Array (List Nat)) (extra : Label → List Label) : List Label := Id.run do
   let labels := (cands p).filter (possible p)
   let mut cnt : Std.HashMap Label Nat := {}
   let mut succ : Std.HashMap Label (List Label) := {}
   for l in labels do
-    let ps := (hbPredsI p idx l).eraseDups
+    let ps := (hbPredsI p idx l ++ extra l).eraseDups
     cnt := cnt.insert l ps.length
     for z in ps do
       succ := succ.insert z (l :: succ.getD z [])
@@ -638,6 +639,13 @@ def genTrace (p : Prog) (idx : Array (List Nat)) : List Label := Id.run do
       cnt := cnt.insert s c
       if c == 0 && cnt.contains s then stack := stack.push s
   return out.toList
+
+def genTrace (p : Prog) (idx : Array (List Nat)) : List Label := genTraceWith p idx fun _ => []
+
+/-- An execution in which `y` fires before `x` (for a race between them), if there is one. -/
+def altTrace (p : Prog) (idx : Array (List Nat)) (x y : Label) : Option (List Label) :=
+  let t := genTraceWith p idx fun l => if l == x then [y] else []
+  if checkH p idx t == some true then some t else none
 
 /-- Each event's elements. -/
 def buildIndex (p : Prog) : Array (List Nat) := Id.run do

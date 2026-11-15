@@ -27,7 +27,7 @@
 
 // Memory inside an air.execute is modelled since layer 2.
 // RUN: air-veir run --allow-unregistered-dialect %S/Inputs/memref_in_execute.mlir | filecheck %s --check-prefix=MEMREF
-// MEMREF: program order: event 0 = [buffer 0]
+// MEMREF: @f: event 0 = [buffer 0]
 
 // AIR accepts an air.execute whose terminator yields the wrong type; so does the structure check,
 // but the semantics refuses it.

@@ -12,11 +12,11 @@
 // RACES-NEXT:  no deadlock
 // RACES-LABEL: @herd_tiles: 18 event(s), 6 buffer(s), 0 race(s)
 // RACES-NEXT:  no deadlock
-// RACES-LABEL: @herd_shared_write: 6 event(s), 2 buffer(s), 6 race(s)
-// RACES-NEXT:  race: WAW on %arg0 element 0 between event 1 (iteration [0, 0]) (air.dma_memcpy_nd) and event 2 (iteration [0, 1]) (air.dma_memcpy_nd), with no token path between them
+// RACES-LABEL: @herd_shared_write: 6 event(s), 2 buffer(s), {{[1-9][0-9]*}} race(s)
+// RACES:       race: WAW on %arg0 element 0 between the transfer of element 0 of event {{[1-4]}} (iteration {{.*}}) (air.dma_memcpy_nd) and the transfer of element 0 of event {{[1-4]}} (iteration {{.*}}) (air.dma_memcpy_nd)
 // RACES-LABEL: @sync_herd: 4 event(s), 3 buffer(s), 0 race(s)
 // RACES-LABEL: @async_herd_unordered: 4 event(s), 3 buffer(s), 1 race(s)
-// RACES-NEXT:  race: RAW on %arg0 element 0 between event 1 (iteration [0, 0]) (air.dma_memcpy_nd) and event 3 (air.dma_memcpy_nd)
+// RACES:       race: WAR on %arg0 element {{[0-9]+}} between the read of element {{[0-9]+}} of event 3 (air.dma_memcpy_nd) and the transfer of element {{[0-9]+}} of event 1 (iteration [0, 0]) (air.dma_memcpy_nd)
 // RACES-LABEL: @token_arg: 4 event(s), 3 buffer(s), 0 race(s)
 // RACES-LABEL: @launch_talk:
 // RACES-NEXT:  error: @L[1]: event 1's put feeds event 4's get across two instances of one air.launch ([0] and [1]), which may run one after another (D37)
@@ -31,15 +31,15 @@
 // INTERP-LABEL: @herd_tiles: {{.*}}%arg0 = [1000 : i32, 1001 : i32, 1002 : i32, 1003 : i32]
 // INTERP-NEXT:  race-free: every execution ends with this memory
 // INTERP-LABEL: @sync_herd: {{.*}}%arg2 = [1000 : i32, 1001 : i32, 1002 : i32, 1003 : i32]
-// INTERP-NEXT:  1 finishing order(s) allowed, 1 distinct outcome(s)
+// INTERP-NEXT:  race-free: every execution ends with this memory
 // INTERP-LABEL: @async_herd_unordered:
-// INTERP-NEXT:  2 distinct outcome(s)
+// INTERP-NEXT:  races (see `races`); an execution with {{.*}} ends differently
 // INTERP-LABEL: @token_arg:
-// INTERP-NEXT:  1 distinct outcome(s)
+// INTERP-NEXT:  race-free: every execution ends with this memory
 // INTERP-LABEL: @rank_talk: %arg0 = [1001 : i32, 1000 : i32, 2 : i32, 3 : i32]
 
 // Decision D47 -- an L1 buffer outside the herd, used whole by every tile, is one buffer (D46 = A):
 // the tiles race. AIR privatises it per core (AIR-023), a hack.
 // RUN: not air-veir races --allow-unregistered-dialect %S/Inputs/d47_herd_scratch.mlir 2>/dev/null | filecheck %s --check-prefix=SCRATCH
 // SCRATCH: @herd_scratch: 4 event(s), 2 buffer(s), 1 race(s)
-// SCRATCH-NEXT: race: {{.*}} between event 1 (iteration [0, 0]) (a synchronous op) and event 2 (iteration [1, 0]) (a synchronous op)
+// SCRATCH:      race: {{.*}} between finish of event 1 (iteration [0, 0]) (a synchronous op) and finish of event 2 (iteration [1, 0]) (a synchronous op)

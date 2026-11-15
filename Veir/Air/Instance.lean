@@ -1137,16 +1137,6 @@ def IProgram.footprints (ctx : IRContext OpCode) (ip : IProgram) :
             issues := issues.push ⟨v, s!"air.dma_memcpy_nd reads out of bounds: {m}"⟩
           if let .error m := checkBounds dt ip.buffers[db]!.name dpos then
             issues := issues.push ⟨v, s!"air.dma_memcpy_nd writes out of bounds: {m}"⟩
-          if sb == db then
-            let mut firstWrite : Std.HashMap Int Nat := {}
-            for x in dpos, j in [0:dpos.length] do
-              if !firstWrite.contains x then firstWrite := firstWrite.insert x j
-            for x? in stream, i in [0:stream.length] do
-              if let some x := x? then
-                if let some j := firstWrite[x]? then
-                  if i > j then
-                    issues := issues.push ⟨v, s!"race inside air.dma_memcpy_nd on {ip.buffers[sb]!.name}: element {x} is read at step {i}, after it may already be written at step {j} (D21)"⟩
-                    break
     | .execute | .syncOp =>
       let mut vals : Std.HashMap ValuePtr Val := {}
       let mut localBuf : Std.HashMap ValuePtr Nat := {}
@@ -1194,6 +1184,41 @@ def IProgram.footprints (ctx : IRContext OpCode) (ip : IProgram) :
     | _ => pure ()
     fps := fps.push acc
   return (fps, issues)
+
+/-- A DMA whose buffers and patterns are known before running: its source buffer and stream
+(`none` for padding), its destination buffer and positions. `none` if anything is unknown or the
+DMA is invalid (D20); such a DMA stays one atomic event. -/
+def IProgram.staticDma (ip : IProgram) (v : Nat) :
+    Option (Nat × List (Option Int) × Nat × List Int) := do
+  let e ← ip.prog.events[v]?
+  if e.kind != .dma && e.kind != .dmaBlocking then none
+  let info ← ip.dmas[v]?
+  let c ← ip.ctxs[v]?
+  let staticOf (h : HVal) : Option Val := match h with | .val v => some v | _ => none
+  let bufOfH (h : HVal) : Option Nat := match h with
+    | .val (.buf b) => some b
+    | .result e i => ip.resultBufs[(e, i)]?
+    | _ => none
+  let sb ← c.env[info.src.memref]? >>= bufOfH
+  let db ← c.env[info.dst.memref]? >>= bufOfH
+  let entries (xs : Array (Int ⊕ ValuePtr)) : Option (Array Int) :=
+    xs.mapM fun | .inl n => some n | .inr vp => c.env[vp]? >>= staticOf >>= Val.toInt?
+  let st := ip.buffers[sb]!.type
+  let dt := ip.buffers[db]!.type
+  let r : Except String _ := do
+    let sdims ← sidePositions st (← (entries info.src.offsets).elim (throw "") pure)
+      (← (entries info.src.sizes).elim (throw "") pure) (← (entries info.src.strides).elim (throw "") pure)
+    let ddims ← sidePositions dt (← (entries info.dst.offsets).elim (throw "") pure)
+      (← (entries info.dst.sizes).elim (throw "") pure) (← (entries info.dst.strides).elim (throw "") pure)
+    let stream ← srcStream sdims info.padBefore info.padAfter
+    let dpos := positions ddims
+    if stream.length != dpos.length then throw ""
+    checkBounds st "" (stream.filterMap id)
+    checkBounds dt "" dpos
+    pure (sb, stream, db, dpos)
+  match r with
+  | .ok x => some x
+  | .error _ => none
 
 /-- The races, with a witness each: exactly `races` (proven exact by `raceFreeB_iff`). -/
 def IProgram.raceReports (ip : IProgram) (fps : Array (List Access)) : List RaceReport :=

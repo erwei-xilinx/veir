@@ -9,7 +9,7 @@
 
 // SAME: OK @f: 3 event(s), same reachability (0 edge(s) before, 0 after)
 
-// INTERP: 6 finishing order(s) allowed, 1 distinct outcome(s)
+// INTERP: race-free: every execution ends with this memory
 
 // EXTRA:     FAIL @f: the dependency graphs order the events differently
 // EXTRA-NOT: the second allows

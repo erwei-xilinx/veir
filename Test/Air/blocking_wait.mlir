@@ -16,8 +16,8 @@
 // GRAPH-NEXT: event 3: air.execute waits for [0], keeps [], after blocking [1], reads results of [0]
 // GRAPH-NOT:  warning
 
-// INTERP:      program order: event 0 = [5 : i32], event 2 = [10 : i32], event 3 = [25 : i32]
-// INTERP-NEXT: 2 finishing order(s) allowed, 1 distinct outcome(s)
+// INTERP:      @f: event 0 = [5 : i32], event 2 = [10 : i32], event 3 = [25 : i32]
+// INTERP-NEXT: race-free: every execution ends with this memory
 
 // REDUCE:      "air.wait_all"(%{{.*}}#0) : (!air.async.token) -> ()
 // REDUCE:      "air.execute"() ({

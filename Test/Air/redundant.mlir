@@ -19,8 +19,8 @@
 
 // CHECK-OK: OK @f: 3 event(s), same reachability (3 edge(s) before, 2 after)
 
-// INTERP:      program order: event 0 = [1 : i32], event 1 = [2 : i32], event 2 = [3 : i32]
-// INTERP-NEXT: 1 finishing order(s) allowed, 1 distinct outcome(s)
+// INTERP:      @f: event 0 = [1 : i32], event 1 = [2 : i32], event 2 = [3 : i32]
+// INTERP-NEXT: race-free: every execution ends with this memory
 
 "builtin.module"() ({
   "func.func"() <{function_type = () -> (), sym_name = "f"}> ({

@@ -9,15 +9,16 @@
 // IN-LABEL: @call_then_dma: 2 event(s), 2 buffer(s), 0 race(s)
 // A sync op blocks what follows it, not what came before (D25).
 // IN-LABEL: @dma_then_call: 2 event(s), 2 buffer(s), 1 race(s)
-// IN-NEXT:  race: WAR on %arg0 element 0 between event 0 (air.dma_memcpy_nd) and event 1 (a synchronous op), with no token path between them
+// IN-NEXT:  no deadlock
+// IN-NEXT:  race: RAW on %arg0 element {{[0-9]+}} between finish of event 1 (a synchronous op) and the read of element {{[0-9]+}} of event 0 (air.dma_memcpy_nd)
 // IN-LABEL: @sync_herd_body: 5 event(s), 2 buffer(s), 0 race(s)
 // IN-NEXT:  no deadlock
 // IN-LABEL: @fifo_before_loop: 21 event(s), 2 buffer(s), 0 race(s)
 // IN-NEXT:  no deadlock
 
-// INTERP-LABEL: @use_after_dealloc: program order: fault: event 1 (air.dma_memcpy_nd): a buffer it uses was deallocated
+// INTERP-LABEL: @use_after_dealloc: fault: {{.*}}a buffer it uses was deallocated
 // INTERP-LABEL: @dma_then_call:
-// INTERP-NEXT:  2 distinct outcome(s)
+// INTERP-NEXT:  races (see `races`); an execution with {{.*}} ends differently
 
 // air-dependency orders the DMA before the call, but loses the order of the put before the loop
 // (AIR-014).

@@ -26,4 +26,4 @@
 // EXECOK: OK @air_execute_0: 5 event(s), same reachability
 
 // INTERP: event 0 = [1 : i64], event 3 = [1 : i64], event 4 = [2 : i64, 2 : i32]
-// INTERP-NEXT: 25 finishing order(s) allowed, 1 distinct outcome(s)
+// INTERP-NEXT: race-free: every execution ends with this memory

@@ -1038,6 +1038,22 @@ def IProgram.finishExecute (ctx : IRContext OpCode) (ip : IProgram) (v : Nat) (s
       | none =>
         let r : Val := if ins.any (· == .undef) then .undef else opaqueOf inner ins.toList 0
         for i in [0:inner.getNumResults! ctx] do vals := vals.insert (.opResult ⟨inner, i⟩) r
+    else if iname == "memref.copy" && ins.size == 2 && (ins[0]! matches .buf _) && (ins[1]! matches .buf _) &&
+        (operands.toList.all fun o =>
+          let t := typeString (o.getType! ctx)
+          !((t.splitOn "strided").length > 1) &&
+            (match parseMemRefType t, bufOfVal (ins[0]!) with
+              | .ok ty, some a => ty.numel == ip.buffers[a]!.type.numel
+              | _, _ => false)) then
+      -- Upstream memref.copy on whole buffers: element by element (a refinement of D22's opaque
+      -- value; the footprint is unchanged).
+      let some a := bufOfVal ins[0]! | return fail "memref.copy of an unknown buffer"
+      let some b := bufOfVal ins[1]! | return fail "memref.copy to an unknown buffer"
+      if freed.contains a || freed.contains b then return fail "memref.copy on a deallocated buffer"
+      let n := ip.buffers[a]!.type.numel
+      if n != ip.buffers[b]!.type.numel then return fail "memref.copy between buffers of different sizes"
+      for q in [0:n] do
+        mem := mem.insert (b, (q : Int)) (mem[(a, (q : Int))]?.getD .undef)
     else
       -- Not interpreted (D22).
       let bufs := (memrefOperands ctx inner).filterMap fun m => lookup m >>= bufOfVal

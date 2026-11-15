@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """C6 phase 2: translation-validate AIR's lowering (aircc) on small data-movement programs.
 
-Every program moves N elements from the host through a herd (and optionally an L2 buffer in
-the segment) and back, in K chunks, with every relay in place (a get into a buffer, then a put
-from it). For each program:
+Every program moves N elements from the host through a herd (and optionally an L2 buffer in the
+segment, or a broadcast to two tiles) and back, in K chunks. The herd relays each chunk in place
+(a get into a buffer, then a put from it) or through a copy into a second buffer. For each
+program:
 
 1. VeIR's AIR model must find the input race-free and deadlock-free (`air-veir races`). Its one
    outcome (`deterministic`, C3) is `air-veir outcome`.
@@ -33,29 +34,43 @@ GENERIC = ["--mlir-print-op-generic", "--mlir-print-local-scope"]
 N = 32
 
 
-def program(path, k, hoist, tiles):
-    """An AIR program in custom syntax."""
-    c = N // k // tiles  # elements per chunk per tile
-    per = N // tiles     # elements per tile
+def program(path, k, hoist, tiles, body="inplace"):
+    """An AIR program in custom syntax.
+
+    `body`: the herd relays each chunk in place (`inplace`: get into %a, put %a) or through a
+    copy (`copy`: get into %a, memref.copy to %b, put %b). `path = "bcast"`: one put on a
+    broadcast channel feeds both tiles; tile t returns its copy to the t-th half of a 2N output."""
+    bcast = path == "bcast"
+    c = N // k // (1 if bcast else tiles)  # elements per chunk per tile
+    per = 0 if bcast else N // tiles      # input elements per tile
+    NO = 2 * N if bcast else N
     L = ["module {"]
-    for ch in ["In", "Out"] + (["ToL1", "FromL1"] if path == "l2" else []):
-        L.append(f"  air.channel @{ch} [{tiles}, 1]")
-    L.append(f"  func.func @f(%in: memref<{N}xi32>, %out: memref<{N}xi32>) {{")
+    if bcast:
+        L.append(f"  air.channel @In [1, 1] {{broadcast_shape = [{tiles}, 1]}}")
+        L.append(f"  air.channel @Out [{tiles}, 1]")
+    else:
+        for ch in ["In", "Out"] + (["ToL1", "FromL1"] if path == "l2" else []):
+            L.append(f"  air.channel @{ch} [{tiles}, 1]")
+    L.append(f"  func.func @f(%in: memref<{N}xi32>, %out: memref<{NO}xi32>) {{")
     L.append("    %c1 = arith.constant 1 : index")
-    L.append(f"    air.launch (%lx) in (%ls=%c1) args(%ain=%in, %aout=%out) : memref<{N}xi32>, memref<{N}xi32> {{")
+    L.append(f"    air.launch (%lx) in (%ls=%c1) args(%ain=%in, %aout=%out) : memref<{N}xi32>, memref<{NO}xi32> {{")
     L += ["      %c0 = arith.constant 0 : index", "      %u1 = arith.constant 1 : index",
           f"      %ck = arith.constant {k} : index", f"      %cc = arith.constant {c} : index",
-          f"      %cp = arith.constant {per} : index"]
+          f"      %cp = arith.constant {N if bcast else per} : index"]
     for t in range(tiles):
         L.append(f"      %t{t} = arith.constant {t} : index")
 
     def host(op, ch, buf):
-        for t in range(tiles):
+        for t in range(1 if (bcast and op == "put") else tiles):
             L.append(f"      scf.for %i{op}{t} = %c0 to %ck step %u1 {{")
             L.append(f"        %b{op}{t} = arith.muli %t{t}, %cp : index")
             L.append(f"        %m{op}{t} = arith.muli %i{op}{t}, %cc : index")
             L.append(f"        %o{op}{t} = arith.addi %b{op}{t}, %m{op}{t} : index")
-            L.append(f"        air.channel.{op} @{ch}[%t{t}, %c0] (%{buf}[%o{op}{t}] [%cc] [%u1]) : (memref<{N}xi32>)")
+            if bcast and op == "put":
+                L.append(f"        air.channel.put @{ch}[%c0, %c0] (%{buf}[%m{op}{t}] [%cc] [%u1]) : (memref<{N}xi32>)")
+            else:
+                ty = NO if op == "get" else N
+                L.append(f"        air.channel.{op} @{ch}[%t{t}, %c0] (%{buf}[%o{op}{t}] [%cc] [%u1]) : (memref<{ty}xi32>)")
             L.append("      }")
 
     def l2relay(src, dst):
@@ -87,18 +102,25 @@ def program(path, k, hoist, tiles):
     L.append(f"        air.herd @h tile (%x, %y) in (%sx=%stiles, %sy=%s1) {{")
     L += ["          %h0 = arith.constant 0 : index", "          %h1 = arith.constant 1 : index",
           f"          %hk = arith.constant {k} : index"]
+    bufs = ["%a", "%b"] if body == "copy" else ["%a"]
     if hoist:
-        L.append(f"          %a = memref.alloc() : memref<{c}xi32, 2>")
+        for b in bufs:
+            L.append(f"          {b} = memref.alloc() : memref<{c}xi32, 2>")
     L.append("          scf.for %j = %h0 to %hk step %h1 {")
     if not hoist:
-        L.append(f"            %a = memref.alloc() : memref<{c}xi32, 2>")
+        for b in bufs:
+            L.append(f"            {b} = memref.alloc() : memref<{c}xi32, 2>")
     L.append(f"            air.channel.get @{hin}[%x, %y] (%a[] [] []) : (memref<{c}xi32, 2>)")
-    L.append(f"            air.channel.put @{hout}[%x, %y] (%a[] [] []) : (memref<{c}xi32, 2>)")
+    if body == "copy":
+        L.append(f"            memref.copy %a, %b : memref<{c}xi32, 2> to memref<{c}xi32, 2>")
+    L.append(f"            air.channel.put @{hout}[%x, %y] ({bufs[-1]}[] [] []) : (memref<{c}xi32, 2>)")
     if not hoist:
-        L.append(f"            memref.dealloc %a : memref<{c}xi32, 2>")
+        for b in bufs:
+            L.append(f"            memref.dealloc {b} : memref<{c}xi32, 2>")
     L.append("          }")
     if hoist:
-        L.append(f"          memref.dealloc %a : memref<{c}xi32, 2>")
+        for b in bufs:
+            L.append(f"          memref.dealloc {b} : memref<{c}xi32, 2>")
     L.append("        }")
     if path == "l2":
         l2relay("FromL1", "Out")
@@ -125,14 +147,17 @@ def main():
     tmp = args.keep or tempfile.mkdtemp(prefix="check_lowering.")
     os.makedirs(tmp, exist_ok=True)
     stats = {}
-    for path, k, hoist, tiles in itertools.product(["direct", "l2"], [1, 2, 4], [False, True], [1, 2]):
-        name = f"{path}_k{k}_{'hoist' if hoist else 'inner'}_t{tiles}"
+    cases = [(p, k, h, t, b) for p, k, h, t, b in
+             itertools.product(["direct", "l2", "bcast"], [1, 2, 4], [False, True], [1, 2], ["inplace", "copy"])
+             if not (p == "bcast" and t == 1)]
+    for path, k, hoist, tiles, body in cases:
+        name = f"{path}_k{k}_{'hoist' if hoist else 'inner'}_t{tiles}_{body}"
         if args.only and args.only != name:
             continue
         d = os.path.join(tmp, name)
         os.makedirs(d, exist_ok=True)
         src = os.path.join(d, "in.mlir")
-        open(src, "w").write(program(path, k, hoist, tiles))
+        open(src, "w").write(program(path, k, hoist, tiles, body))
         g = os.path.join(d, "in.generic.mlir")
         r = run([air_opt, src] + GENERIC)
         if r.returncode:

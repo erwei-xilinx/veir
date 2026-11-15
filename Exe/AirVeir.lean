@@ -476,6 +476,9 @@ def cmdAie (args : Args) (file : String) : IO Bool := do
         IO.println s!"  DEADLOCK: the runtime sequence cannot finish; a run reaching it ({tr.size} step(s)):"
         for l in tr.toList.drop (tr.size - min tr.size 12) do IO.println s!"    {l}"
       | none => IO.println "  no deadlock"
+      if let some (f, tr) := r.fault then
+        ok := false
+        IO.println s!"  FAULT: {f} (after {tr.size} step(s))"
       IO.println s!"  {r.outcomes.size} distinct outcome(s) of host memory"
       for o in (if args.allOutcomes then r.outcomes.toList else r.outcomes.toList.take 4) do
         let parts := (m.hostArgs.toList.zip o.toList).map fun (b, vs) =>

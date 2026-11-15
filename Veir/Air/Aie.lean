@@ -57,25 +57,47 @@ structure Chan where
   repeatCount : Nat
 deriving Inhabited, Repr
 
+/-- An operand of a core statement. -/
+inductive Arg where
+  | reg (r : Nat)
+  | lit (v : Val)
+  /-- The induction variable of an enclosing counter loop: `lb + (trips - counter) * step`. -/
+  | outerIv (counter : Nat) (lb step trips : Int) (width : Nat)
+deriving Inhabited
+
+/-- Core computation between lock operations, run atomically (as one AIR event runs): `arith`,
+`memref.load`/`store`/`copy` on buffers, lock-free `scf.for`; anything else is opaque (D22). -/
+inductive Stmt where
+  | arith (f : Array RuntimeValue → Except String (Array RuntimeValue)) (op : Nat) (ins : Array Arg)
+      (outs : Array Nat)
+  | load (buf : Nat) (idx : Array Arg) (dst : Nat)
+  | store (src : Arg) (buf : Nat) (idx : Array Arg)
+  | copy (src dst : Nat)
+  | forLoop (iv : Nat) (width : Nat) (lb ub step : Arg) (body : Array Stmt)
+  | opaque (op : Nat) (ins : Array Arg) (reads writes : Array Nat) (outs : Array Nat)
+deriving Inhabited
+
 /-- Core instructions. Loop counters are per core. -/
 inductive Instr where
   | acq (lock : Nat) (value : Int)
   | rel (lock : Nat) (value : Int)
   /-- An opaque computation: reads `reads` whole and overwrites `writes` whole (D22). -/
   | eff (op : Nat) (reads writes : Array Nat)
+  /-- Lock-free computation, interpreted; `reads`/`writes` are its buffers, for the reduction. -/
+  | exec (stmts : Array Stmt) (nregs : Nat) (reads writes : Array Nat)
   | jmp (target : Nat)
   /-- Set a counter. -/
   | setc (counter : Nat) (value : Nat)
   /-- Decrement a counter; jump to `target` while it is still positive. -/
   | loop (counter : Nat) (target : Nat)
   | halt
-deriving Inhabited, Repr
+deriving Inhabited
 
 structure Core where
   name : String
   code : Array Instr
   counters : Nat
-deriving Inhabited, Repr
+deriving Inhabited
 
 /-- A runtime-sequence task: a BD chain on a shim channel. -/
 structure Task where
@@ -144,6 +166,8 @@ structure EState where
   runtime : Array RtOp := #[]
   hostArgs : Array Nat := #[]
   flows : Array ((Int × Int × Nat × Nat) × (Int × Int × Nat × Nat)) := #[]
+  /-- Induction variables of the counter loops enclosing the code being compiled. -/
+  outerIvs : Std.HashMap ValuePtr (Nat × Int × Int × Int × Nat) := {}
 
 abbrev EM := StateT EState (Except String)
 
@@ -268,6 +292,115 @@ partial def dmaRegion (ctx : IRContext OpCode) (op : OperationPtr) (tile : Int �
         chans := st.chans.push { name, mm2s, bds, start := some start, repeatCount := rep },
         chanAt := st.chanAt.insert (tile.1, tile.2, mm2s, ch.toNat) id }
 
+/-- Whether an op's regions contain lock operations or control flow. -/
+partial def hasLocks (ctx : IRContext OpCode) (op : OperationPtr) : Bool := Id.run do
+  for r in [0:op.getNumRegions! ctx] do
+    let mut b := (op.getRegion! ctx r).getFirstBlock! ctx
+    for _ in [0:100000] do
+      match b with
+      | none => break
+      | some blk =>
+        for o in blockOps ctx blk do
+          let n := opName ctx o
+          if n == "aie.use_lock" || n.startsWith "cf." || hasLocks ctx o then return true
+        b := blk.getNextBlock! ctx
+  return false
+
+/-- The integer width of a value's type (`index` is 64). -/
+def widthOf (ctx : IRContext OpCode) (v : ValuePtr) : Nat :=
+  match typeString (v.getType! ctx) with
+  | "index" => 64
+  | t => match t.toList with
+    | 'i' :: ds => (String.ofList ds).toNat?.getD 64
+    | _ => 64
+
+/-- Compile lock-free ops to statements. `regs` numbers the values defined so far in this run. -/
+partial def compileStmts (ctx : IRContext OpCode) (ops : Array OperationPtr)
+    (regs : Std.HashMap ValuePtr Nat) (nregs : Nat) :
+    EM (Array Stmt × Std.HashMap ValuePtr Nat × Nat × Array Nat × Array Nat) := do
+  let mut regs := regs
+  let mut nregs := nregs
+  let mut out : Array Stmt := #[]
+  let mut reads : Array Nat := #[]
+  let mut writes : Array Nat := #[]
+  for o in ops do
+    let n := opName ctx o
+    let st ← get
+    let argOf (v : ValuePtr) : EM Arg := do
+      match constOf ctx v with
+      | some c => return .lit (intVal ctx v c)
+      | none =>
+        match regs[v]? with
+        | some r => return .reg r
+        | none =>
+          match st.outerIvs[v]? with
+          | some (c, lb, step, trips, w) => return .outerIv c lb step trips w
+          | none => throw s!"core: '{n}' uses a value computed before a lock operation (not supported)"
+    let bufOf (v : ValuePtr) : EM Nat := do
+      match st.bufOf[v]? with
+      | some b => return b
+      | none => throw s!"core: '{n}' accesses a memref that is not an aie.buffer"
+    let newRegs (k : Nat) : Array Nat := (List.range k).toArray.map (nregs + ·)
+    if n == "arith.constant" || n == "scf.yield" then continue
+    else if n.startsWith "arith." then
+      let ins ← (o.getOperands! ctx).mapM argOf
+      let outs := newRegs (o.getNumResults! ctx)
+      for i in [0:outs.size] do regs := regs.insert (.opResult ⟨o, i⟩) outs[i]!
+      nregs := nregs + outs.size
+      out := out.push (.arith (fun rs => evalArith ctx o rs) o.id ins outs)
+    else if n == "memref.load" then
+      let operands := o.getOperands! ctx
+      let b ← bufOf operands[0]!
+      let idx ← (operands.extract 1 operands.size).mapM argOf
+      regs := regs.insert (.opResult ⟨o, 0⟩) nregs
+      out := out.push (.load b idx nregs)
+      nregs := nregs + 1
+      reads := reads.push b
+    else if n == "memref.store" then
+      let operands := o.getOperands! ctx
+      let v ← argOf operands[0]!
+      let b ← bufOf operands[1]!
+      let idx ← (operands.extract 2 operands.size).mapM argOf
+      out := out.push (.store v b idx)
+      writes := writes.push b
+    else if n == "memref.copy" then
+      let operands := o.getOperands! ctx
+      let a ← bufOf operands[0]!
+      let b ← bufOf operands[1]!
+      out := out.push (.copy a b)
+      reads := reads.push a
+      writes := writes.push b
+    else if n == "scf.for" then
+      let operands := o.getOperands! ctx
+      if operands.size > 3 then throw "core: scf.for with iter_args is not supported"
+      let lb ← argOf operands[0]!
+      let ub ← argOf operands[1]!
+      let step ← argOf operands[2]!
+      let some body := (o.getRegion! ctx 0).getFirstBlock! ctx | throw "core: empty scf.for"
+      let iv := (body.getArguments! ctx)[0]!
+      let ivReg := nregs
+      regs := regs.insert iv ivReg
+      nregs := nregs + 1
+      let (stmts, regs', nregs', rs, ws) ← compileStmts ctx (blockOps ctx body) regs nregs
+      regs := regs'
+      nregs := nregs'
+      reads := reads ++ rs
+      writes := writes ++ ws
+      out := out.push (.forLoop ivReg (widthOf ctx iv) lb ub step stmts)
+    else
+      -- Opaque (D22): reads its memref operands whole, overwrites those it writes.
+      let ins ← ((o.getOperands! ctx).filter fun v => !isMemRefType (v.getType! ctx)).mapM argOf
+      let bufOfOpt (m : ValuePtr) : Option Nat := st.bufOf[m]?
+      let rs := (memrefOperands ctx o).filterMap bufOfOpt
+      let ws := writtenBuffers ctx o bufOfOpt
+      let outs := newRegs (o.getNumResults! ctx)
+      for i in [0:outs.size] do regs := regs.insert (.opResult ⟨o, i⟩) outs[i]!
+      nregs := nregs + outs.size
+      out := out.push (.opaque o.id ins rs ws outs)
+      reads := reads ++ rs
+      writes := writes ++ ws
+  return (out, regs, nregs, reads, writes)
+
 /-- A core's region as instructions. Blocks are laid out in order; `cf.br` jumps; `scf.for` with
 constant bounds becomes a counter loop; opaque ops read and write their memref operands (D22). -/
 partial def coreCode (ctx : IRContext OpCode) (op : OperationPtr) : EM (Array Instr × Nat) := do
@@ -282,8 +415,21 @@ partial def coreCode (ctx : IRContext OpCode) (op : OperationPtr) : EM (Array In
     let mut code := code
     let mut fixups := fixups
     let mut counters := counters
-    for o in ops do
+    -- Consecutive lock-free ops form one `exec`, so values flow between them.
+    let mut pending : Array OperationPtr := #[]
+    let isPlain (o : OperationPtr) : Bool :=
       let n := opName ctx o
+      !(n == "aie.use_lock" || n == "cf.br" || n == "aie.end" || n == "scf.yield" ||
+        n == "cf.cond_br" || n == "scf.if" || n == "scf.while" || (n == "scf.for" && hasLocks ctx o))
+    for o in ops ++ #[] do
+      let n := opName ctx o
+      if isPlain o then
+        pending := pending.push o
+        continue
+      if !pending.isEmpty then
+        let (stmts, _, nregs, reads, writes) ← compileStmts ctx pending {} 0
+        code := code.push (.exec stmts nregs reads writes)
+        pending := #[]
       if n == "aie.use_lock" then
         let u ← lockUse ctx o
         code := code.push (if u.acquire then .acq u.lock u.value else .rel u.lock u.value)
@@ -292,8 +438,6 @@ partial def coreCode (ctx : IRContext OpCode) (op : OperationPtr) : EM (Array In
         code := code.push (.jmp 0)
       else if n == "aie.end" then
         code := code.push .halt
-      else if n == "arith.constant" || n.startsWith "arith." || n == "affine.apply" then
-        pure ()
       else if n == "scf.for" then
         let operands := o.getOperands! ctx
         let some lb := constOf ctx operands[0]! | throw "core: scf.for bounds must be constants"
@@ -307,6 +451,8 @@ partial def coreCode (ctx : IRContext OpCode) (op : OperationPtr) : EM (Array In
         code := code.push (.setc c trips)
         let bodyStart := code.size
         let some body := (o.getRegion! ctx 0).getFirstBlock! ctx | throw "core: empty scf.for"
+        let iv := (body.getArguments! ctx)[0]!
+        modify fun es => { es with outerIvs := es.outerIvs.insert iv (c, lb, st, (trips : Int), widthOf ctx iv) }
         let (code', fix', ctr') ← emit (blockOps ctx body).pop code fixups counters
         code := code'
         fixups := fix'
@@ -317,12 +463,10 @@ partial def coreCode (ctx : IRContext OpCode) (op : OperationPtr) : EM (Array In
       else if n == "cf.cond_br" || n == "scf.if" || n == "scf.while" then
         throw s!"core: '{n}' is not supported yet"
       else
-        -- An opaque computation on its memref operands (D22).
-        let st ← get
-        let bufOf (m : ValuePtr) : Option Nat := st.bufOf[m]?
-        let reads := (memrefOperands ctx o).filterMap bufOf
-        let writes := writtenBuffers ctx o bufOf
-        code := code.push (.eff o.id reads writes)
+        pure ()
+    if !pending.isEmpty then
+      let (stmts, _, nregs, reads, writes) ← compileStmts ctx pending {} 0
+      code := code.push (.exec stmts nregs reads writes)
     return (code, fixups, counters)
   for b in blocks do
     start := start.insert b code.size
@@ -492,12 +636,14 @@ structure St where
   cores : Array CoreSt
   rtPc : Nat
   tasksDone : Array Bool
+  /-- A core computation went wrong (out of bounds, an arith failure): reported, not explored. -/
+  fault : Option String := none
 deriving Inhabited
 
 def St.key (s : St) : UInt64 :=
   let memH := s.mem.foldl (fun h a => a.foldl (fun h v => mixHash h (hash (showVal v))) h) 7
   mixHash (hash s.locks) (mixHash memH (mixHash (hash s.chans) (mixHash (hash s.cores)
-    (mixHash (hash s.rtPc) (hash s.tasksDone)))))
+    (mixHash (hash s.rtPc) (mixHash (hash s.tasksDone) (hash s.fault))))))
 
 def Model.init (m : Model) : St := Id.run do
   let mut mem := m.buffers.map fun (_, t) => Array.replicate t.numel Val.undef
@@ -535,7 +681,7 @@ def Model.showLabel (m : Model) : Label → String
   | .core k i => s!"{m.cores[k]!.name}: {match i with
       | .acq l v => s!"acquire {m.locks[l]!.1} {v}"
       | .rel l v => s!"release {m.locks[l]!.1} {v}"
-      | .eff _ _ _ => "compute"
+      | .eff _ _ _ | .exec _ _ _ _ => "compute"
       | _ => "control"}"
   | .rt (.start t) => s!"runtime: start task {t}"
   | .rt (.await t) => s!"runtime: await task {t}"
@@ -553,6 +699,67 @@ def Model.advance (m : Model) (c : Nat) (cs : ChanSt) : ChanSt × Option Nat :=
       match cs.task with
       | some t => ({ cs with bd := none, task := none, phase := 0, idx := 0 }, some t)
       | none => ({ cs with bd := none, phase := 0, idx := 0 }, none)
+
+def argVal (regs : Array Val) (counters : Array Nat) : Arg → Val
+  | .reg r => regs[r]!
+  | .lit v => v
+  | .outerIv c lb st trips w => .rv (.int w (.val (BitVec.ofInt w (lb + (trips - (counters[c]! : Int)) * st))))
+
+/-- The element an index list names in a buffer (row-major), checked against its shape. -/
+def linearIndex (t : MemRefType) (idx : Array Val) : Except String Nat := do
+  if idx.size != t.shape.length then throw "wrong number of indices"
+  let mut q : Int := 0
+  for i in idx, d in t.shape, stv in t.strides do
+    let some n := i.toInt? | throw "an index is not a known integer"
+    if n < 0 || n ≥ d then throw s!"index {n} is outside a dimension of size {d}"
+    q := q + n * stv
+  return q.toNat
+
+/-- Run statements on memory and registers. -/
+partial def runStmts (types : Array MemRefType) (counters : Array Nat) (stmts : Array Stmt)
+    (mem : Array (Array Val)) (regs : Array Val) : Except String (Array (Array Val) × Array Val) := do
+  let mut mem := mem
+  let mut regs := regs
+  for st in stmts do
+    match st with
+    | .arith f op ins outs =>
+      let vs := ins.map (argVal regs counters)
+      match vs.toList.mapM toRuntime? with
+      | some rs =>
+        let res ← f rs.toArray
+        for r in res, o in outs do regs := regs.set! o (.rv r)
+      | none =>
+        let v : Val := if vs.any (· == .undef) then .undef
+          else .opaque op (hash (", ".intercalate (vs.toList.map showVal)))
+        for o in outs do regs := regs.set! o v
+    | .load b idx dst =>
+      let q ← linearIndex types[b]! (idx.map (argVal regs counters))
+      regs := regs.set! dst ((mem[b]!)[q]!)
+    | .store src b idx =>
+      let q ← linearIndex types[b]! (idx.map (argVal regs counters))
+      let v := argVal regs counters src
+      mem := mem.modify b (·.set! q v)
+    | .copy a b =>
+      if (mem[a]!).size != (mem[b]!).size then throw "memref.copy between buffers of different sizes"
+      mem := mem.set! b mem[a]!
+    | .forLoop iv w lb ub step body =>
+      let some l := (argVal regs counters lb).toInt? | throw "scf.for: unknown lower bound"
+      let some u := (argVal regs counters ub).toInt? | throw "scf.for: unknown upper bound"
+      let some sp := (argVal regs counters step).toInt? | throw "scf.for: unknown step"
+      if sp ≤ 0 then throw "scf.for: non-positive step"
+      let trips := if u > l then ((u - l + sp - 1) / sp).toNat else 0
+      for k in [0:trips] do
+        regs := regs.set! iv (.rv (.int w (.val (BitVec.ofInt w (l + k * sp)))))
+        let (m', r') ← runStmts types counters body mem regs
+        mem := m'
+        regs := r'
+    | .opaque op ins reads writes outs =>
+      let vs := (ins.map (argVal regs counters)).toList ++ reads.toList.flatMap fun b => (mem[b]!).toList
+      let h := hash (", ".intercalate (vs.map showVal))
+      for b in writes do
+        mem := mem.set! b ((List.range (mem[b]!).size).toArray.map fun q => Val.opaque op (mixHash h (hash s!"{b}:{q}")))
+      for o in outs, i in [0:outs.size] do regs := regs.set! o (.opaque op (mixHash h (hash i)))
+  return (mem, regs)
 
 /-- Every step enabled in a state, with the state it leads to. -/
 def Model.steps (m : Model) (s : St) : Array (Label × St) := Id.run do
@@ -639,6 +846,12 @@ def Model.steps (m : Model) (s : St) : Array (Label × St) := Id.run do
       let mem := writes.foldl (fun mem b => mem.set! b ((List.range (mem[b]!).size).toArray.map fun q =>
         Val.opaque op (hash (", ".intercalate (ins.map showVal) ++ s!"#{b}:{q}")))) s.mem
       out := out.push (.core k i, { s with mem, cores := s.cores.set! k { cst with pc := cst.pc + 1 } })
+    | .exec stmts nregs _ _ =>
+      let types := m.buffers.map (·.2)
+      let cores := s.cores.set! k { cst with pc := cst.pc + 1 }
+      match runStmts types cst.counters stmts s.mem (Array.replicate nregs .undef) with
+      | .ok (mem, _) => out := out.push (.core k i, { s with mem, cores })
+      | .error e => out := out.push (.core k i, { s with cores, fault := some s!"{m.cores[k]!.name}: {e}" })
     | _ => pure ()
   -- Runtime sequence.
   if let some op := m.runtime[s.rtPc]? then
@@ -742,7 +955,7 @@ def Model.feet (m : Model) : Array Foot := Id.run do
       match i with
       | .acq l _ => f := { f with acq := f.acq.insert l }
       | .rel l _ => f := { f with rel := f.rel.insert l }
-      | .eff _ rs ws =>
+      | .eff _ rs ws | .exec _ _ rs ws =>
         f := { f with rd := rs.foldl (·.insert ·) f.rd, wr := ws.foldl (·.insert ·) f.wr }
         if (rs ++ ws).any isHost then f := { f with host := true }
       | _ => pure ()
@@ -798,7 +1011,7 @@ def Model.nextAct (m : Model) (feet : Array Foot) (s : St) (enabled : Std.HashSe
     match m.cores[k]!.code[s.cores[k]!.pc]? with
     | some (.acq l _) => some { enabled := on, acq := [l], others := releasers l }
     | some (.rel _ _) => some { enabled := on }
-    | some (.eff _ rs ws) => some { enabled := on, rd := rs.toList, wr := ws.toList, host := feet[a]!.host }
+    | some (.eff _ rs ws) | some (.exec _ _ rs ws) => some { enabled := on, rd := rs.toList, wr := ws.toList, host := feet[a]!.host }
     | _ => none
   else
     match m.runtime[s.rtPc]? with
@@ -844,6 +1057,8 @@ structure Result where
   /-- A reachable state where the runtime sequence has not finished and nothing can move, with
   the steps leading to it. -/
   deadlock : Option (Array String)
+  /-- A core computation that went wrong, with the steps leading to it. -/
+  fault : Option (String × Array String) := none
 
 /-- Every interleaving, depth first, up to `limit` distinct states. -/
 partial def Model.explore (m : Model) (limit : Nat := 200000) (por : Bool := true) : Result := Id.run do
@@ -854,6 +1069,7 @@ partial def Model.explore (m : Model) (limit : Nat := 200000) (por : Bool := tru
   let mut outcomes : Array (Array (Array Val)) := #[]
   let mut outKeys : Std.HashSet UInt64 := {}
   let mut deadlock : Option (Array String) := none
+  let mut fault : Option (String × Array String) := none
   let mut complete := true
   while !stack.isEmpty do
     let (s, trace) := stack.head!
@@ -864,6 +1080,9 @@ partial def Model.explore (m : Model) (limit : Nat := 200000) (por : Bool := tru
       complete := false
       break
     seen := seen.insert k
+    if let some f := s.fault then
+      if fault.isNone then fault := some (f, trace.reverse.toArray)
+      continue
     if s.rtPc ≥ m.runtime.size then
       let host := m.hostArgs.map (s.mem[·]!)
       let hk := host.foldl (fun h a => a.foldl (fun h v => mixHash h (hash (showVal v))) h) 11
@@ -878,7 +1097,7 @@ partial def Model.explore (m : Model) (limit : Nat := 200000) (por : Bool := tru
       continue
     for (l, s') in next do
       stack := (m.settle s', m.showLabel l :: trace) :: stack
-  return { states := seen.size, complete, outcomes, deadlock }
+  return { states := seen.size, complete, outcomes, deadlock, fault }
 
 end
 

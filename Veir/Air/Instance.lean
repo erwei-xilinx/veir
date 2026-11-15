@@ -98,6 +98,8 @@ structure IProgram where
   chanDecls : Std.HashMap String ChanDecl := {}
   chans : Std.HashMap Nat ChanInfo := {}
   issues : Std.HashMap Nat IssueInfo := {}
+  /-- Initial contents of buffers that have them (`memref.global`). -/
+  inits : Std.HashMap Nat (Array Val) := {}
 deriving Inhabited
 
 structure IState where
@@ -112,7 +114,12 @@ structure IState where
   chanDecls : Std.HashMap String ChanDecl := {}
   chans : Std.HashMap Nat ChanInfo := {}
   issues : Std.HashMap Nat IssueInfo := {}
-  /-- The `air.launch` instance being walked. -/
+  inits : Std.HashMap Nat (Array Val) := {}
+  /-- The buffer of each `memref.global` read so far. -/
+  globals : Std.HashMap String Nat := {}
+  /-- The module's ops, to find globals. -/
+  moduleOps : Array OperationPtr := #[]
+  /-- The launch instance being walked. -/
   launchInst : Option (Nat × List Int) := none
   /-- The `air.rank` instance being walked: its start event, the length of the path before its
   point, its point and its sizes (D49). -/
@@ -140,6 +147,19 @@ def pathStr : List Int → String
 def newBufferI (name : String) (t : TypeAttr) : IM Nat := do
   let ty ← liftE (parseMemRefType (typeString t))
   modifyGet fun st => (st.buffers.size, { st with buffers := st.buffers.push { name, type := ty } })
+
+/-- The elements of a `dense<...>` initial value: a splat or a list of integers; anything else
+(floats, bf16) is opaque (as VEIR-004's constants are). -/
+def denseValues (txt : String) (n w : Nat) (b : Nat) : Array Val :=
+  let inner := ((txt.splitOn "dense<").getD 1 "").takeWhile (· != '>') |>.toString
+  let toks := (inner.replace "[" "" |>.replace "]" "").splitOn "," |>.map (fun t => (t.trimAscii).toString) |>.filter (· != "")
+  let val (t : String) (q : Nat) : Val :=
+    match t.toInt? with
+    | some i => if w > 0 then .rv (.int w (.val (BitVec.ofInt w i))) else .opaque 2000000 (hash t)
+    | none => .opaque (2000000 + b) (mixHash (hash t) q.toUInt64)
+  match toks with
+  | [t] => (List.range n).toArray.map (val t ·)
+  | ts => (ts.zipIdx.map fun (t, q) => val t q).toArray
 
 /-- Whether an op carries a discardable unit attribute such as `air.symmetric`. -/
 def hasAttrNamed (ctx : IRContext OpCode) (op : OperationPtr) (name : String) : Bool :=
@@ -501,6 +521,30 @@ partial def walkOps (ctx : IRContext OpCode) (ops : Array OperationPtr)
             symmetricBuffer op s!"host alloc{pathStr path}" ty path
           else newBufferI s!"host alloc{pathStr path}" ty
         env := env.insert (.opResult ⟨op, 0⟩) (.val (.buf b))
+      else if name == "memref.get_global" then
+        -- Upstream memref.global: one buffer per global, holding its initial value.
+        let some (.flatSymbolRefAttr r) := findProp (unregProps ctx op) "name"
+          | throw s!"{what}: missing name"
+        let gname := if r.value.startsWith "@" then (r.value.drop 1).toString else r.value
+        let b ← match (← get).globals[gname]? with
+          | some b => pure b
+          | none =>
+            let ty := (ValuePtr.opResult ⟨op, 0⟩).getType! ctx
+            let b ← newBufferI s!"global @{gname}" ty
+            let g? := (← get).moduleOps.find? fun g =>
+              opName ctx g == "memref.global" &&
+                (match findProp (unregProps ctx g) "sym_name" with
+                 | some (.stringAttr n) => String.fromUTF8! n.value == gname
+                 | _ => false)
+            if let some g := g? then
+              if let some init := findProp (unregProps ctx g) "initial_value" then
+                let n := (← get).buffers[b]!.type.numel
+                let w := (← get).buffers[b]!.type.bitwidth
+                let vals := denseValues (Attribute.toString init) n w b
+                modify fun st => { st with inits := st.inits.insert b vals }
+            modify fun st => { st with globals := st.globals.insert gname b }
+            pure b
+        env := env.insert (.opResult ⟨op, 0⟩) (.val (.buf b))
       else if name == "scf.for" then env ← forLoop ctx op env path
       else if name == "scf.parallel" then env ← parallelLoop ctx op env path
       else if hierarchyOps.contains name then env ← hierarchyInstance ctx op env path
@@ -654,6 +698,8 @@ partial def channelInstance (ctx : IRContext OpCode) (op : OperationPtr)
   -- D50: on a channel whose every dimension has size 1, no indices name subchannel [0, ..., 0].
   let size := (← get).chanDecls[chan]!.size
   let indices := if indices₀.isEmpty && size.all (· == 1) then size.map fun _ => (0 : Int) else indices₀
+  if !indices.isEmpty && indices.length != size.length then
+    throw s!"{what}: {indices.length} index(es) on @{chan}, which has {size.length} dimension(s); what that names is not defined"
   let some memref := groups[2]!.toList.head? | throw s!"{what}: no memref"
   let pre := if isPut then "src" else "dst"
   let arr (name : String) : IM (Array Int) :=
@@ -962,8 +1008,10 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
   let ops := blockOps ctx block
   -- The module's `air.channel` declarations.
   let mut decls : Std.HashMap String ChanDecl := {}
+  let mut mops : Array OperationPtr := #[]
   if let some m := func.getParentOp! ctx then
     if let some mb := (m.getRegion! ctx 0).getFirstBlock! ctx then
+      mops := blockOps ctx mb
       for d in blockOps ctx mb do
         if opName ctx d == "air.channel" then
           let props := unregProps ctx d
@@ -987,7 +1035,7 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
           let name := String.fromUTF8! nm.value
           decls := decls.insert name { name, size, broadcast, type }
   let go : IM (Std.HashMap ValuePtr HVal × Array Nat) := do
-    modify fun st => { st with chanDecls := decls }
+    modify fun st => { st with chanDecls := decls, moduleOps := mops }
     let mut env : Std.HashMap ValuePtr HVal := {}
     let mut argBufs := #[]
     let mut scalars := scalarArgs
@@ -1010,7 +1058,7 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
   let prog : Program := { func, events := st.events, hostOps := #[] }
   return { prog, ctxs := st.ctxs, buffers := st.buffers, dmas := st.dmas,
            resultBufs := st.resultBufs, viewResults := st.viewResults, argBufs, loops := st.loops,
-           chanDecls := st.chanDecls, chans := st.chans, issues := st.issues }
+           chanDecls := st.chanDecls, chans := st.chans, issues := st.issues, inits := st.inits }
 
 /-! ### Running -/
 
@@ -1035,6 +1083,9 @@ def IProgram.initState (ip : IProgram) : MState := Id.run do
     for q in [0:t.numel] do
       let x : Val := if t.bitwidth > 0 then .rv (.int t.bitwidth (.val (BitVec.ofInt t.bitwidth (1000 * j + q))))
         else .opaque 1000000 (1000 * j + q).toUInt64
+      mem := mem.insert (b, (q : Int)) x
+  for (b, vs) in ip.inits.toList do
+    for x in vs, q in [0:vs.size] do
       mem := mem.insert (b, (q : Int)) x
   return { mem }
 

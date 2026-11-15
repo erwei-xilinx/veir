@@ -1,0 +1,18 @@
+module {
+  memref.global "private" constant @table : memref<4xi32> = dense<[1, 2, 3, 4]>
+  air.channel @C [1, 1]
+  // memref.global (upstream MLIR): a buffer holding its initial value; empty offsets with sizes and
+  // strides mean offset 0 (D14a).
+  func.func @global_table(%out: memref<4xi32>) {
+    %t = memref.get_global @table : memref<4xi32>
+    %c1 = arith.constant 1 : index
+    air.launch (%l) in (%ls=%c1) args(%a=%t, %o=%out) : memref<4xi32>, memref<4xi32> {
+      %k0 = arith.constant 0 : index
+      %k1 = arith.constant 1 : index
+      %k4 = arith.constant 4 : index
+      %p = air.channel.put async @C[%k0, %k0] (%a[] [%k4] [%k1]) : (memref<4xi32>)
+      air.channel.get @C[%k0, %k0] (%o[] [] []) : (memref<4xi32>)
+    }
+    return
+  }
+}

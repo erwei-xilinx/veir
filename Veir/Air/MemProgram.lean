@@ -230,6 +230,8 @@ the pattern is empty. -/
 def sidePositions (t : MemRefType) (offs sizes strides : Array Int) : Except String (List Dim) := do
   if offs.isEmpty && sizes.isEmpty && strides.isEmpty then
     return [⟨0, t.numel, 1⟩]
+  -- No offsets with sizes and strides: every offset 0 (D14a, as AIR's `get1DOffset` reads it).
+  let offs := if offs.isEmpty then Array.replicate sizes.size 0 else offs
   if offs.size != sizes.size || sizes.size != strides.size then
     throw "offsets, sizes and strides differ in length"
   let mut ds := []

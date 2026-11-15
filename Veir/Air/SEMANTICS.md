@@ -23,6 +23,7 @@ is wrong; the replacement is pending or recorded).
 | D12 | An op's async dependencies are waited for before it starts, DMAs included | ✅ 2026-11-13 | `Ready` | all trace theorems |
 | D13 | A DMA is an async op with read and write footprints; correctness is that conflicting accesses are ordered by tokens | ✅ 2026-11-13 (my time-window model ❌) | layer 2, not yet encoded | — |
 | D14 | Access-pattern addressing: element `k` at `Σ (offsets[i] + k[i]) · strides[i]` (the code's convention, not `memref.subview`'s) | ✅ for now, 2026-11-13; long-term alignment with subview open | layer 2 | — |
+| D14a | Empty offsets with sizes and strides given (`%m[] [16, 8] [8, 1]`) mean every offset 0 | from AIR's own lowering (`get1DOffset`, `AIRToAIESchedulingUtils.cpp`: empty offsets → 0), mlir-air `9848a566f` | `sidePositions` | — |
 | D15 | DMA src and dst have their own patterns; stride 0 repeats; `N(dst) = N(src) + padding` | ✅ 2026-11-13 | layer 2 | — |
 | D16 | Memory spaces 0 = L3, 1 = L2, 2 = L1; disjoint address spaces at function scope | ✅ 2026-11-13 | layer 2 | — |
 | D17 | `memref.dealloc` ends a lifetime; deallocating a buffer with an unordered access is an error | ✅ 2026-11-13 | layer 2 | — |

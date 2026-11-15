@@ -251,9 +251,11 @@ def pushEvent (e : Event) (c : EventCtx) : IM Nat := do
   let blocking := e.kind == .waitAllBlocking || e.kind == .dmaBlocking ||
     e.kind == .putBlocking || e.kind == .getBlocking || e.kind == .scopeEndBlocking ||
     e.kind == .syncOp
+  -- A blocking event waits for the blocking events before it, so later events need only wait for
+  -- the last one: the same order, with a linear number of edges.
   set { st with events := st.events.push { e with implicitDeps := st.blocking },
                 ctxs := st.ctxs.push { c with launchInst := st.launchInst },
-                blocking := if blocking then st.blocking ++ [id] else st.blocking }
+                blocking := if blocking then [id] else st.blocking }
   return id
 
 /-- What a body (an `air.execute`'s, or the single op of a synchronous op, D45) captures:

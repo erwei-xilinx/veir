@@ -132,8 +132,8 @@ def program(path, k, hoist, tiles, body="inplace"):
     return "\n".join(L) + "\n"
 
 
-def run(cmd, timeout=900):
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+def run(cmd, timeout=900, cwd=None):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
 
 
 def main():
@@ -147,7 +147,7 @@ def main():
     args = ap.parse_args()
     air_opt = os.environ.get("AIR_OPT") or sys.exit("set AIR_OPT")
     aircc = os.environ.get("AIRCC") or sys.exit("set AIRCC")
-    tmp = args.keep or tempfile.mkdtemp(prefix="check_lowering.")
+    tmp = os.path.abspath(args.keep or tempfile.mkdtemp(prefix="check_lowering."))
     os.makedirs(tmp, exist_ok=True)
     stats = {}
     cases = [(p, k, h, t, b) for p, k, h, t, b in
@@ -173,7 +173,8 @@ def main():
             else:
                 air = run([AIR_VEIR, "outcome", "--allow-unregistered-dialect", g]).stdout.strip()
                 air_out = air.split(": ", 1)[1] if ": " in air else air
-                lr = run([aircc, src, "--device=npu2", "--output-format=none", f"--tmpdir={d}/t", "-o", f"{d}/out"])
+                lr = run([aircc, src, "--device=npu2", "--output-format=none", f"--tmpdir={d}/t", "-o", f"{d}/out"],
+                         cwd=d)  # aircc leaves elfs_* directories in its working directory
                 npu = [f for f in os.listdir(f"{d}/t")] if os.path.isdir(f"{d}/t") else []
                 npu = [f for f in npu if f.startswith("npu.") and f.endswith(".mlir")]
                 if lr.returncode or not npu:
@@ -199,8 +200,10 @@ def main():
                         verdict = "LOWERING BUG: the design deadlocks"
                     elif "bound reached" in aie:
                         verdict = "AIE exploration bound reached"
+                    elif m and int(m.group(1)) == 1 and outs == [air_out] and "Cert.exact" in aie:
+                        verdict = "ok (proven complete)"
                     elif m and int(m.group(1)) == 1 and outs == [air_out]:
-                        verdict = "ok"
+                        verdict = "ok (reachable outcome only; not proven complete)"
                     elif m and int(m.group(1)) > 1:
                         verdict = f"LOWERING BUG: {m.group(1)} outcomes, the program has 1"
                     else:

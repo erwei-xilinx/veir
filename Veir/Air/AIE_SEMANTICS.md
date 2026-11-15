@@ -50,6 +50,17 @@ separate hardware mode.
 Host arguments start as AIR's model starts them (`1000·j + q`), so outcomes compare across the two
 models.
 
+**Partial-order reduction** is on by default (`--no-por` turns it off). It uses stubborn sets over
+agents (each channel, each core, the runtime):
+- an enabled action pulls in every agent that could ever conflict with it, judged on the agent's
+  whole static footprint: competing acquires, buffer read/write overlap, transfer parties,
+  anything touching host memory or shim channels;
+- a disabled action pulls in the agents that could enable it.
+
+Only the closed set's steps are expanded. Terminal states (deadlocks, the end of the runtime
+sequence) are preserved by Valmari's argument, which is not formalised here. The tests and
+`check_lowering.py --compare-por` compare the two.
+
 **Exploration:** every interleaving, with these normalisations:
 - local moves are taken eagerly: entering a BD's transfer or releases, advancing the chain, core
   control flow;
@@ -81,7 +92,10 @@ tested by `Test/Air/aie.mlir`.
 - Phase 2 (`Test/Air/bounded/check_lowering.py`, 24 in-place relay programs):
   - 14 lowered correctly;
   - 6 are AIR-022: every K = 4 case within the bound, and only those;
-  - 4 exceed 2M states (a 2×1 herd through L2; partial-order reduction would help).
+  - 4 exceeded 2M states (a 2×1 herd through L2). With partial-order reduction, 2 of them
+    complete (both correct), and 2 still exceed 2M (K = 4).
+  - `--compare-por`: wherever the unreduced search completes, the reduced one gives the same
+    deadlock verdict and the same set of outcomes (all 16 for the 2×1 K = 4 designs).
 
   The memtile relay is lowered correctly; the L1 relay with a core between its S2MM and MM2S
   is not.

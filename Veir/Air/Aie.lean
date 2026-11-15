@@ -692,6 +692,150 @@ partial def Model.settle (m : Model) (s : St) : St := Id.run do
     if !changed then break
   return s
 
+/-! ## Partial-order reduction (stubborn sets)
+
+Each DMA channel, each core and the runtime sequence is an *agent* with one next action in each
+state, enabled or not; a transfer is a joint action of its sender and receivers. From one agent
+with an enabled action, `stubborn` closes a set of agents:
+- for an enabled action, every agent that could ever conflict with it: another acquirer of one of
+  its locks, a reader or writer of a buffer it writes, a writer of a buffer it reads, the parties
+  of a transfer, and, for anything touching host memory or a shim channel, the runtime and all
+  such agents. This is judged on each agent's whole static footprint, conservatively;
+- for a disabled action, every agent that could enable it: the releasers of the lock it waits
+  for, the other parties of its transfer, the runtime for a shim channel with nothing queued, the
+  channel of the task an await waits for.
+
+Only the steps of agents in the set are expanded. Releases never disable anything, and steps
+outside the set commute with those inside, so every terminal state (a deadlock, or the end of the
+runtime sequence, after which nothing is explored) stays reachable (Valmari's stubborn sets). This
+argument is not formalised; `--no-por` explores without the reduction, and the tests compare the
+two. -/
+
+/-- What an agent may ever touch. -/
+structure Foot where
+  acq : Std.HashSet Nat := {}
+  rel : Std.HashSet Nat := {}
+  rd : Std.HashSet Nat := {}
+  wr : Std.HashSet Nat := {}
+  /-- Touches host memory or is a shim channel: conflicts with the runtime sequence. -/
+  host : Bool := false
+deriving Inhabited
+
+/-- Agents: channels `0 … C-1`, cores `C … C+K-1`, the runtime `C+K`. -/
+def Model.runtimeAgent (m : Model) : Nat := m.chans.size + m.cores.size
+
+def Model.feet (m : Model) : Array Foot := Id.run do
+  let isHost (b : Nat) := m.hostArgs.contains b
+  let mut out := #[]
+  for c in m.chans, ci in [0:m.chans.size] do
+    let mut f : Foot := { host := c.start.isNone }
+    let bds := c.bds ++ (m.tasks.filter (·.chan == ci)).flatMap (·.bds)
+    for bd in bds do
+      for u in bd.pre ++ bd.post do
+        f := if u.acquire then { f with acq := f.acq.insert u.lock } else { f with rel := f.rel.insert u.lock }
+      f := if c.mm2s then { f with rd := f.rd.insert bd.buf } else { f with wr := f.wr.insert bd.buf }
+      if isHost bd.buf then f := { f with host := true }
+    out := out.push f
+  for k in m.cores do
+    let mut f : Foot := {}
+    for i in k.code do
+      match i with
+      | .acq l _ => f := { f with acq := f.acq.insert l }
+      | .rel l _ => f := { f with rel := f.rel.insert l }
+      | .eff _ rs ws =>
+        f := { f with rd := rs.foldl (·.insert ·) f.rd, wr := ws.foldl (·.insert ·) f.wr }
+        if (rs ++ ws).any isHost then f := { f with host := true }
+      | _ => pure ()
+    out := out.push f
+  out := out.push { host := true }
+  return out
+
+def Model.ownersOf (m : Model) : Label → List Nat
+  | .chanLock c _ => [c]
+  | .transfer src dsts _ => src :: dsts.toList
+  | .taskBegin c _ => [c]
+  | .core k _ => [m.chans.size + k]
+  | .rt _ => [m.runtimeAgent]
+
+/-- An agent's next action: the resources it touches, whether it is enabled, and who could
+enable it. `none`: the agent never acts again. -/
+structure Act where
+  enabled : Bool
+  acq : List Nat := []
+  rd : List Nat := []
+  wr : List Nat := []
+  host : Bool := false
+  /-- Agents that must take part (a transfer's parties) or could enable it. -/
+  others : List Nat := []
+
+def Model.senders (m : Model) (c : Nat) : List Nat :=
+  (List.range m.chans.size).filter fun s => m.routes[s]!.contains c
+
+def Model.nextAct (m : Model) (feet : Array Foot) (s : St) (enabled : Std.HashSet Nat) (a : Nat) : Option Act :=
+  let releasers (l : Nat) := (List.range feet.size).filter fun b => b != a && feet[b]!.rel.contains l
+  let on := enabled.contains a
+  if a < m.chans.size then
+    let c := a
+    let cs := s.chans[c]!
+    match cs.bd with
+    | none =>
+      -- A shim channel waits for the runtime to queue a task; a tile channel's chain is over.
+      if m.chans[c]!.start.isNone then some { enabled := on, host := true, others := [m.runtimeAgent] }
+      else none
+    | some b =>
+      let bd := (m.bdsOf c cs)[b]!
+      let lockAct (u : LockUse) : Act :=
+        if u.acquire then { enabled := on, acq := [u.lock], host := feet[c]!.host, others := releasers u.lock }
+        else { enabled := on, host := feet[c]!.host }
+      if cs.phase == 0 then (bd.pre[cs.idx]?).map lockAct
+      else if cs.phase == 2 then (bd.post[cs.idx]?).map lockAct
+      else
+        let parties := if m.chans[c]!.mm2s then m.routes[c]!.toList else m.senders c
+        if m.chans[c]!.mm2s then some { enabled := on, rd := [bd.buf], host := feet[c]!.host, others := parties }
+        else some { enabled := on, wr := [bd.buf], host := feet[c]!.host, others := parties }
+  else if a < m.runtimeAgent then
+    let k := a - m.chans.size
+    match m.cores[k]!.code[s.cores[k]!.pc]? with
+    | some (.acq l _) => some { enabled := on, acq := [l], others := releasers l }
+    | some (.rel _ _) => some { enabled := on }
+    | some (.eff _ rs ws) => some { enabled := on, rd := rs.toList, wr := ws.toList, host := feet[a]!.host }
+    | _ => none
+  else
+    match m.runtime[s.rtPc]? with
+    | some (.start _) => some { enabled := on, host := true }
+    | some (.await t) => some { enabled := on, host := true, others := [m.tasks[t]!.chan] }
+    | none => none
+
+/-- Whether an action could ever conflict with what agent `b` may do. -/
+def conflicts (act : Act) (f : Foot) : Bool :=
+  act.acq.any f.acq.contains || act.wr.any (fun x => f.rd.contains x || f.wr.contains x) ||
+    act.rd.any f.wr.contains || (act.host && f.host)
+
+/-- The steps of a stubborn set: the smallest closure from any agent with an enabled action. -/
+def Model.stubborn (m : Model) (feet : Array Foot) (s : St) (next : Array (Label × St)) : Array (Label × St) := Id.run do
+  let enabled : Std.HashSet Nat := next.foldl (fun acc (l, _) => (m.ownersOf l).foldl (·.insert ·) acc) {}
+  let mut best : Option (Std.HashSet Nat) := none
+  for a0 in enabled.toList do
+    let mut inSet : Std.HashSet Nat := ({} : Std.HashSet Nat).insert a0
+    let mut work := [a0]
+    for _ in [0:feet.size * feet.size + 1] do
+      match work with
+      | [] => break
+      | a :: rest =>
+        work := rest
+        let some act := m.nextAct feet s enabled a | continue
+        let adds := if act.enabled then
+            act.others ++ ((List.range feet.size).filter fun b => b != a && conflicts act feet[b]!)
+          else act.others
+        for b in adds do
+          if !inSet.contains b then
+            inSet := inSet.insert b
+            work := b :: work
+    if best.all (inSet.size < ·.size) then best := some inSet
+  match best with
+  | none => return next
+  | some set => return next.filter fun (l, _) => (m.ownersOf l).all set.contains
+
 structure Result where
   states : Nat
   complete : Bool
@@ -702,7 +846,8 @@ structure Result where
   deadlock : Option (Array String)
 
 /-- Every interleaving, depth first, up to `limit` distinct states. -/
-partial def Model.explore (m : Model) (limit : Nat := 200000) : Result := Id.run do
+partial def Model.explore (m : Model) (limit : Nat := 200000) (por : Bool := true) : Result := Id.run do
+  let feet := m.feet
   let s0 := m.settle m.init
   let mut seen : Std.HashSet UInt64 := {}
   let mut stack : List (St × List String) := [(s0, [])]
@@ -726,7 +871,8 @@ partial def Model.explore (m : Model) (limit : Nat := 200000) : Result := Id.run
         outKeys := outKeys.insert hk
         outcomes := outcomes.push host
       continue
-    let next := m.steps s
+    let all := m.steps s
+    let next := if por then m.stubborn feet s all else all
     if next.isEmpty then
       if deadlock.isNone then deadlock := some trace.reverse.toArray
       continue

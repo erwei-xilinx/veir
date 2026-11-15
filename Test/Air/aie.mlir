@@ -29,3 +29,8 @@
 // RELAY-NEXT: 4 distinct outcome(s) of host memory
 // RELAY-DAG: %arg1 = [0..63]
 // RELAY-DAG: %arg1 = [32..63, 32..63]
+
+// Partial-order reduction (stubborn sets) must not change a verdict: the same checks without it.
+// RUN: air-veir aie --no-por --allow-unregistered-dialect %S/Inputs/aie_l2.mlir 2>/dev/null | filecheck %s --check-prefix=L2
+// RUN: not air-veir aie --no-por --allow-unregistered-dialect %S/Inputs/aie_inplace_relay.mlir 2>/dev/null | filecheck %s --check-prefix=RELAY
+// RUN: not air-veir aie --no-por --allow-unregistered-dialect %S/Inputs/aie_passthrough_deadlock.mlir 2>/dev/null | filecheck %s --check-prefix=DEAD

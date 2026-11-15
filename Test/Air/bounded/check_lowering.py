@@ -117,6 +117,8 @@ def main():
     ap.add_argument("--only")
     ap.add_argument("--keep", help="directory to keep every program and design in")
     ap.add_argument("--max-states", type=int, default=200000)
+    ap.add_argument("--compare-por", action="store_true",
+                    help="also explore without partial-order reduction; where that completes, the two verdicts must agree")
     args = ap.parse_args()
     air_opt = os.environ.get("AIR_OPT") or sys.exit("set AIR_OPT")
     aircc = os.environ.get("AIRCC") or sys.exit("set AIRCC")
@@ -151,7 +153,16 @@ def main():
                 else:
                     ag = os.path.join(d, "aie.generic.mlir")
                     open(ag, "w").write(run([air_opt, f"{d}/t/{npu[0]}"] + GENERIC).stdout)
-                    aie = run([AIR_VEIR, "aie", "--allow-unregistered-dialect", f"--max-states={args.max_states}", ag]).stdout
+                    aie = run([AIR_VEIR, "aie", "--allow-unregistered-dialect", "--all-outcomes", f"--max-states={args.max_states}", ag]).stdout
+                    if args.compare_por:
+                        full = run([AIR_VEIR, "aie", "--no-por", "--all-outcomes", "--allow-unregistered-dialect",
+                                    f"--max-states={args.max_states}", ag]).stdout
+                        def verdict_of(t):
+                            return sorted(l.strip() for l in t.splitlines()
+                                          if ("deadlock" in l.lower() and "a run" not in l) or "distinct" in l
+                                          or l.strip().startswith("%arg"))
+                        if "bound reached" not in full and verdict_of(full) != verdict_of(aie):
+                            print(f"{name}: POR MISMATCH\n--- por\n{aie}\n--- full\n{full}", flush=True)
                     m = re.search(r"(\d+) distinct outcome", aie)
                     outs = [l.strip() for l in aie.splitlines() if l.strip().startswith("%arg")]
                     if "refused" in aie:

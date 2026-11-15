@@ -51,6 +51,8 @@ Options:
                                  air.launch, air.herd, memref.alloc, ...)
   --max-orders=<n>               stop enumerating finishing orders after n (default 100000)
   --max-states=<n>               aie: stop exploring after n states (default 200000)
+  --no-por                       aie: explore without partial-order reduction
+  --all-outcomes                 aie: print every distinct outcome (default: the first 4)
   --args=<i,j,...>               values of the function's scalar (index, integer) arguments,
                                  in order. `run` uses 0 for missing ones; `races` treats
                                  missing ones as unknown, so the accesses they shape cover
@@ -63,6 +65,8 @@ structure Args where
   allowUnregistered : Bool := false
   maxOrders : Nat := 100000
   maxStates : Nat := 200000
+  por : Bool := true
+  allOutcomes : Bool := false
   scalarArgs : Option (List Int) := none
 
 def parseArgs (args : List String) : Except String Args := do
@@ -70,6 +74,8 @@ def parseArgs (args : List String) : Except String Args := do
   let mut allowUnregistered := false
   let mut maxOrders := 100000
   let mut maxStates := 200000
+  let mut por := true
+  let mut allOutcomes := false
   let mut scalarArgs : Option (List Int) := none
   for a in args do
     if a == "--allow-unregistered-dialect" then allowUnregistered := true
@@ -77,6 +83,8 @@ def parseArgs (args : List String) : Except String Args := do
       let some n := (a.drop "--max-orders=".length).toString.toNat?
         | throw s!"invalid {a}"
       maxOrders := n
+    else if a == "--no-por" then por := false
+    else if a == "--all-outcomes" then allOutcomes := true
     else if a.startsWith "--max-states=" then
       let some n := (a.drop "--max-states=".length).toString.toNat?
         | throw s!"invalid {a}"
@@ -88,7 +96,7 @@ def parseArgs (args : List String) : Except String Args := do
     else if a.startsWith "-" then throw s!"unknown option {a}"
     else positional := positional ++ [a]
   match positional with
-  | command :: files => return { command, files, allowUnregistered, maxOrders, maxStates, scalarArgs }
+  | command :: files => return { command, files, allowUnregistered, maxOrders, maxStates, por, allOutcomes, scalarArgs }
   | [] => throw "expected a command"
 
 /-- The `func.func`s at the top level of a module. -/
@@ -459,7 +467,7 @@ def cmdAie (args : Args) (file : String) : IO Bool := do
       IO.println s!"@{name}: refused: {e}"
       ok := false
     | .ok m =>
-      let r := m.explore args.maxStates
+      let r := m.explore args.maxStates args.por
       IO.println s!"@{name}: {m.chans.size} DMA channel(s), {m.cores.size} core(s), {m.locks.size} lock(s), \
         {m.tasks.size} task(s); {r.states} state(s){if r.complete then "" else " (bound reached)"}"
       match r.deadlock with
@@ -469,7 +477,7 @@ def cmdAie (args : Args) (file : String) : IO Bool := do
         for l in tr.toList.drop (tr.size - min tr.size 12) do IO.println s!"    {l}"
       | none => IO.println "  no deadlock"
       IO.println s!"  {r.outcomes.size} distinct outcome(s) of host memory"
-      for o in r.outcomes.toList.take 4 do
+      for o in (if args.allOutcomes then r.outcomes.toList else r.outcomes.toList.take 4) do
         let parts := (m.hostArgs.toList.zip o.toList).map fun (b, vs) =>
           s!"{m.buffers[b]!.1} = [{runs vs.toList}]"
         IO.println s!"    {", ".intercalate parts}"

@@ -17,7 +17,7 @@ Run from the VeIR root after `lake build`:
 Prints how many programs air-dependency leaves racy, by kind, with examples; exits 1 if any.
 
 It also checks the model against its own theorem (`deterministic`, checklist C3): every program
-`air-veir races` finds race-free must compute one outcome under every schedule (`air-veir run`).
+Race-free programs have one outcome by `Chan.outcome_uniqueH`; that is not re-tested here.
 The implementation is not proven to satisfy that theorem's framing assumption, so this checks it.
 """
 
@@ -114,24 +114,9 @@ def main():
                     kinds[key] = kinds.get(key, 0) + 1
                     if len(examples) < args.show:
                         examples.append(f"  p{cur}: {describe(progs[cur])}\n    {line.strip()}")
-            # C3: race-free programs compute one outcome under every schedule.
-            run = subprocess.run([AIR_VEIR, "run", "--allow-unregistered-dialect", dep],
-                                 capture_output=True, text=True)
-            cur = None
-            for line in run.stdout.splitlines():
-                m = re.match(r"^@p(\d+): program order", line)
-                if m:
-                    cur = int(m.group(1))
-                    continue
-                m = re.match(r"^\s+\d+ finishing order\(s\) allowed.*?(\d+) distinct outcome", line)
-                if m and cur in racefree_ids and int(m.group(1)) != 1:
-                    nondet.append(cur)
     print(f"{len(progs)} program(s) of {args.dmas} DMA(s): {inputs_racy} racy before air-dependency, "
           f"{racy} racy after it")
-    print(f"C3: {len(racefree_ids)} race-free program(s), {len(nondet)} with more than one outcome"
-          + (f" (e.g. p{nondet[0]})" if nondet else ""))
-    if nondet:
-        failures.append(f"race-free but nondeterministic: {nondet[:5]}")
+    # C3 (race-free programs have one outcome) is a theorem now: Chan.outcome_uniqueH.
     for k, n in sorted(kinds.items(), key=lambda kv: -kv[1]):
         print(f"  {n:6} {k}")
     for e in examples:

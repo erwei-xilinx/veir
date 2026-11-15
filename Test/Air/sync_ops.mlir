@@ -10,7 +10,7 @@
 // A sync op blocks what follows it, not what came before (D25).
 // IN-LABEL: @dma_then_call: 2 event(s), 2 buffer(s), 1 race(s)
 // IN-NEXT:  no deadlock
-// IN-NEXT:  race: RAW on %arg0 element {{[0-9]+}} between finish of event 1 (a synchronous op) and the read of element {{[0-9]+}} of event 0 (air.dma_memcpy_nd)
+// IN-NEXT:  race: WAR on %arg0 element {{[0-9]+}} between the read of element {{[0-9]+}} of event 0 (air.dma_memcpy_nd) and finish of event 1 (a synchronous op)
 // IN-LABEL: @sync_herd_body: 5 event(s), 2 buffer(s), 0 race(s)
 // IN-NEXT:  no deadlock
 // IN-LABEL: @fifo_before_loop: 21 event(s), 2 buffer(s), 0 race(s)

@@ -310,7 +310,8 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
         if !cv.raceFree && cv.witnesses.isEmpty then
           chanLines := chanLines ++ ["  race: the race check failed, and the reporter found no witness"]
         for (i, j) in cv.witnesses do
-          let (x, y) := (arr[i]!, arr[j]!)
+          -- Name the pair in event (program) order, not in the order this execution fired it.
+          let (x, y) := if cm.owner arr[j]! < cm.owner arr[i]! then (arr[j]!, arr[i]!) else (arr[i]!, arr[j]!)
           let witness := (fp x).findSome? fun a => (fp y).findSome? fun b =>
             if a.conflictsB b then
               let bs : Std.HashSet Int := Std.HashSet.ofList b.elems

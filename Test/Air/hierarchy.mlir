@@ -16,7 +16,7 @@
 // RACES:       race: WAW on %arg0 element 0 between the transfer of element 0 of event {{[1-4]}} (iteration {{.*}}) (air.dma_memcpy_nd) and the transfer of element 0 of event {{[1-4]}} (iteration {{.*}}) (air.dma_memcpy_nd)
 // RACES-LABEL: @sync_herd: 4 event(s), 3 buffer(s), 0 race(s)
 // RACES-LABEL: @async_herd_unordered: 4 event(s), 3 buffer(s), 1 race(s)
-// RACES:       race: WAR on %arg0 element {{[0-9]+}} between the read of element {{[0-9]+}} of event 3 (air.dma_memcpy_nd) and the transfer of element {{[0-9]+}} of event 1 (iteration [0, 0]) (air.dma_memcpy_nd)
+// RACES:       race: RAW on %arg0 element {{[0-9]+}} between the transfer of element {{[0-9]+}} of event 1 (iteration [0, 0]) (air.dma_memcpy_nd) and the read of element {{[0-9]+}} of event 3 (air.dma_memcpy_nd)
 // RACES-LABEL: @token_arg: 4 event(s), 3 buffer(s), 0 race(s)
 // RACES-LABEL: @launch_talk:
 // RACES-NEXT:  error: @L[1]: event 1's put feeds event 4's get across two instances of one air.launch ([0] and [1]), which may run one after another (D37)

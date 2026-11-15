@@ -32,9 +32,9 @@
 // RACES-LABEL: @out_of_bounds:
 // RACES:       event 0: air.dma_memcpy_nd reads out of bounds: position 4 is outside %arg0 (4 elements)
 // RACES-LABEL: @dynamic: 2 event(s), 2 buffer(s), 1 race(s)
-// RACES:       race: WAW on %arg1 element {{[0-9]+}} between {{.*}}event 1 (air.dma_memcpy_nd) and {{.*}}event 0 (air.dma_memcpy_nd)
+// RACES:       race: WAW on %arg1 element {{[0-9]+}} between {{.*}}event 0 (air.dma_memcpy_nd) and {{.*}}event 1 (air.dma_memcpy_nd)
 // RACES-LABEL: @linalg: 2 event(s), 2 buffer(s), 1 race(s)
-// RACES:       race: WAR on %arg0 element {{[0-9]+}} between the read of element {{[0-9]+}} of event 1 (air.dma_memcpy_nd) and finish of event 0 (air.execute)
+// RACES:       race: RAW on %arg0 element {{[0-9]+}} between finish of event 0 (air.execute) and the read of element {{[0-9]+}} of event 1 (air.dma_memcpy_nd)
 // RACES-LABEL: @dealloc_race: 3 event(s), 2 buffer(s), 1 race(s)
 // RACES:       race: WAR on alloc in event 0 element {{[0-9]+}} between the read of element {{[0-9]+}} of event 1 (air.dma_memcpy_nd) and finish of event 2 (air.execute)
 // RACES-LABEL: @load_store: 2 event(s), 1 buffer(s), 0 race(s), 0 problem(s)

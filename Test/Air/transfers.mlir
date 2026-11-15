@@ -12,10 +12,10 @@
 // RACES-NEXT:  no deadlock
 // RACES-LABEL: @shift_up: 2 event(s), 1 buffer(s), 1 race(s)
 // RACES-NEXT:  no deadlock
-// RACES-NEXT:  race: RAW on %arg0 element 1 between the transfer of element 0 of @C[] and the read of element 1 of @C[]
+// RACES-NEXT:  race: WAR on %arg0 element 1 between the read of element 1 of @C[] and the transfer of element 0 of @C[]
 // RACES-LABEL: @reuse_after_get: 3 event(s), 3 buffer(s), 0 race(s)
 // RACES-LABEL: @reuse_unordered: 3 event(s), 3 buffer(s), 1 race(s)
-// RACES:       race: RAW on %arg0 element {{[0-9]+}} between the transfer of element {{[0-9]+}} of event 2 (air.dma_memcpy_nd) and the read of element {{[0-9]+}} of @C[]
+// RACES:       race: WAR on %arg0 element {{[0-9]+}} between the read of element {{[0-9]+}} of @C[] and the transfer of element {{[0-9]+}} of event 2 (air.dma_memcpy_nd)
 
 // INTERP-LABEL: @same_place: %arg0 = [0 : i32, 1 : i32, 2 : i32, 3 : i32]
 // INTERP-NEXT:  race-free: every execution ends with this memory

@@ -115,3 +115,6 @@ tested by `Test/Air/aie.mlir`.
   - 8 are AIR-022: every in-place K = 4 case that completes;
   - 2 exceed 2M states;
   - 0 mismatches with and without partial-order reduction.
+- Packet relays (24 programs, results returned through packet flows): 20 correct; 4 are AIR-022,
+  the in-place K = 4 cases.
+- Phase 3, the expressiveness catalogue: [`C6_EXPRESSIVENESS.md`](C6_EXPRESSIVENESS.md).

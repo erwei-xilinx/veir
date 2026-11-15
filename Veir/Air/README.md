@@ -15,6 +15,41 @@ VeIR. The subset is AIR's async dependency graph: `air.execute`, `air.wait_all` 
 4. **A checker.** `sameReach`, proven sound, decides whether two versions of a function order
    their events identically. It is run on the output of AIR's own C++ pass.
 
+## Status (2026-11-14, read first)
+
+Every verdict `air-veir` prints now comes from one model, written in Lean, with its checks proven.
+Three kinds of code are distinguished, and every claim in this directory should say which it rests
+on:
+
+| Kind | What | Files |
+| --- | --- | --- |
+| **Semantics (definitions)** | Events with dependencies (`Events.lean`); stream elements of channels and DMAs, their labels and when each may fire (`ChanSem.lean`: `En`, `Run`); what each label does to memory (`ChanMem.lean`: `MemSpec`); the AIE target's step function (`Aie.lean`: `Model.steps`, `settle`; `AieCert.lean`: `post`, `Reach`) | as listed |
+| **Proven (Lean kernel, no `sorry`)** | the theorems below, about those definitions | `DepGraph`, `Events`, `Race`, `Determinism`, `Schedule`, `Pattern`, `ChanSem`, `ChanMem`, `ChanFast`, `AieCert` |
+| **Trusted glue (tested, not proven)** | turning IR into the model: events, loops and hierarchy instances (`Instance.lean`), channel endpoints (`Channels.lean`), elements and footprints (`ChanGlue.lean`), the AIE model from `aie.device` (`Aie.lean`: `extract`); running atomic event bodies (`finishExecute`, `finishDma` for run-time patterns) | as listed |
+
+What the proven checks give, for any program the glue accepts:
+
+| Verdict | Proven by | Meaning |
+| --- | --- | --- |
+| no deadlock | `Chan.checkH_true`, `Chan.completes_from_anywhere` | an execution completes, and from every state an execution reaches, one still can |
+| DEADLOCK | `Chan.checkH_false` | no execution completes |
+| race-free, outcome | `Chan.raceFree_of_racesOk`, `Chan.outcome_uniqueH` | every complete execution ends with the printed memory (given effects framed by footprints) |
+| race, second execution | `Chan.checkH_true` on the second execution | both executions are valid; that they end differently is computed |
+| AIE: outcomes, deadlock, fault | `Aie.Cert.parents_sound` | each is reached by an execution of the model |
+| AIE: "exactly the reachable states" | `Aie.Cert.exact` | the listed verdicts are all of the model's |
+
+Covered: `air.execute`, `air.wait_all`, tokens, `scf.for`/`scf.parallel`, `scf.if`/`affine.if`/
+`scf.index_switch` on known conditions, `air.dma_memcpy_nd` (element by element when its pattern
+is known, D20/D21), channels (D28-D36, D51), broadcast (D29), hierarchy ops and ranks (D37-D49),
+event results as memory (D4). Refused, pending a decision:
+- puts on one subchannel that tokens do not order (packet fan-in at the AIR level);
+- an element from an async put to sync and async gets at once (D51 decides one get only);
+- `air.channel.issue` (#2261), not modelled yet.
+
+Not verification, and not to be read as such: the Python scripts (`Test/Air/bounded/*.py`,
+`sweep_dependency.py`) only generate inputs and count verdicts; their recorded numbers before
+2026-11-14 come from the earlier, unproven checkers and must be re-run.
+
 ## What is and is not established
 
 Each claim is listed at its own level; they do not imply one another.
@@ -25,9 +60,9 @@ Each claim is listed at its own level; they do not imply one another.
 | The supported subset can be interpreted | Yes, by `Program.finishEvent` and `air-veir run`. |
 | The theorems pass Lean's kernel | Yes. No `sorry`, no `native_decide`, no new axioms (see [Theorems](#theorems)). |
 | The `air-dependency-canonicalize` output passes the checker | Yes, on every AIR test file in the subset (4 of 4), and on the fixtures. Only for those instances. |
-| Layer 2: events' memory footprints, races, DMA semantics | Executable (`MemProgram.lean`); the race checker it uses is proven exact (`raceFreeB_iff`), and race-free programs are proven deterministic for framed effects (`deterministic`). That `finishMem` and `footprints` are framed is **not proven**; it is checked exhaustively (`check_dependency.py`: every race-free program has one outcome). |
+| Layer 2: events' memory footprints, races, DMA semantics | DMAs with known patterns are element streams in the proven model (`ChanSem`, `ChanMem`); D20/D21 follow from it. Atomic events (bodies, DMAs with run-time patterns) are framed by their footprints by assumption: the glue's footprints are **not proven** to frame its effects. |
 | `air-dependency` makes programs race-free | **No**: every input of `check_dependency.py` is race-free (synchronous DMAs, D24), and `air-dependency` turns 30 of 196 (2 DMAs) and 922 of 2,744 (3 DMAs) of them into racy programs (AIR-007). |
-| Layer 4: channels (rendezvous, element streams, deadlocks) | Executable (`Channels.lean`). Every deadlock verdict carries a stuck set checked by `stuckB`, and every no-deadlock verdict a schedule checked by `scheduleB`; both checkers are proven sound (`no_schedule_of_stuckB`, `scheduleB_sound`). That the AND-graph built from the IR is the right one is **not proven**; it is tested. |
+| Layer 4: channels (rendezvous, element streams, deadlocks) | Semantics in Lean (`ChanSem.lean`), deadlock decided both ways and shown schedule-independent, races and determinism proven (`ChanMem`, `ChanFast`). The earlier AND-graph analysis was unproven against the semantics and is removed; under D51 it misjudged mixed sync/async transfers. Which put feeds which get is computed by trusted glue (`Channels.lean`, `ChanGlue.lean`). |
 | `air-dependency` keeps channel programs deadlock-free | **No**: of the 200 synchronous, deadlock-free channel programs of `check_channels.py`, `air-dependency` makes 93 deadlock (AIR-011). 48 of them need no edge at all (D36(a)); 45 have no correct all-async form. |
 | Layer 5: `air.launch`/`segment`/`herd`/`rank` | Executable (`Instance.lean`, `hierarchyInstance`): each op is a start event, its body once per instance, and an end event (its token). The graph and race theorems apply to the instances. |
 | `air-dependency` keeps hierarchy programs deadlock-free | **No**, under D38 (i): mlir-air's own `channel_drain_hierarchy.mlir` deadlocks after it (AIR-012); the edge comes from a general rule. |
@@ -233,6 +268,17 @@ None uses `Lean.ofReduceBool` or an axiom of this development.
 | `reachFast_eq` (`DepGraph.lean`) | the bit-set rows `reachRows` answer exactly as `reachB`; `reachB` alone is exponential on diamonds | — |
 | `sameReach_eq_sameReachFast`, `races_eq_racesFast` | `@[csimp]`: compiled code runs the polynomial versions, the theorems speak of the originals | — |
 | `cyclic_simultaneous_drop_unsound` (UnitTest) | on a cycle, deciding edges independently and dropping them together loses reachability | — |
+| `Chan.En.mono` (`ChanSem.lean`) | a label enabled stays enabled as others fire | — |
+| `Chan.Run.replay`, `Chan.completes_from_anywhere` | deadlock does not depend on the schedule: if one execution completes, every reachable state can still complete | — |
+| `Chan.check_true`, `Chan.check_false` | the reference checker decides completion both ways | — |
+| `Chan.HB.before` (`ChanMem.lean`) | every execution respects `HB` | — |
+| `Chan.deterministic` | race-free (by `HB`) channel programs with framed label effects end every complete execution with the same memory | `WF`, `LFramed`, `RaceFree` |
+| `Chan.MemSpec.framed` | the element labels' effects (read into flight, write at each destination) are framed by their footprints | events framed |
+| `Chan.checkH_true`, `Chan.checkH_false` (`ChanFast.lean`) | the fast checker on a proposed execution is right both ways | — |
+| `Chan.raceFree_of_racesOk` | the location-by-location race scan is sound | `HBEdges` (built in) |
+| `Chan.scanOk_sound` | one location's scan orders every conflicting pair, by transitivity | — |
+| `Chan.outcome_uniqueH` | the end-to-end statement of the fast checks | `WF`, `LFramed` |
+| `Aie.Cert.parents_sound`, `Cert.closed_complete`, `Cert.exact` (`AieCert.lean`) | an exploration's states are reachable; closed, they are all the reachable states | — |
 
 "Same traces" is the strongest notion here. It implies the same finishing orders (linear
 extensions) and the same final states, and holds for effectful bodies too, since `Sem` is
@@ -253,10 +299,15 @@ resources or memory are involved. Those are outside the model.
 The theorems assume the effects are framed by the footprints; that the implementation is, is
 checked exhaustively, not proven.
 
-**Layer 4's channel analysis** (`analyzeChannels`: which put feeds which get, the AND-graph's
-edges, transfer nodes, the intra-transfer check of D36(a)) is trusted, and tested
-(`channels.mlir`, `transfers.mlir`, `check_channels.py`). Its verdicts are checked: `scheduleB` or
-`stuckB` must accept the certificate before `air-veir` prints it.
+**The model built from IR** (`analyzeChannels`, `chanModel`, `labelFp`, `fireLabel`: which put
+feeds which get, element locations, footprints, concrete effects) is trusted, and tested. The
+verdicts on the model are proven: `checkH`, `racesOk`, `outcome_uniqueH`. D36 is not assumed; it
+follows from the element semantics.
+
+**The AIE model** (`Aie.extract`, `Model.steps`, `Model.settle`) is the definition of T1-T10;
+that it says what `AIE_SEMANTICS.md` says is not proven. Explorations are checked
+(`Cert.parentsB`, `Cert.closedB`); partial-order reduction is not proven, so verdicts found with it
+are only claimed reachable, never complete.
 
 **Checked per run instead of trusted:** the graph that `air-veir reduce` intends to produce
 (`reducedGraph`) is proven correct. That `applyReduction` turns it into IR is not.

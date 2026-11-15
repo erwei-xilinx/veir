@@ -50,7 +50,7 @@ variable {p : Prog}
 
 /-- `idx[v]` lists every element whose put or get is `v`. -/
 def Indexed (p : Prog) (idx : Array (List Nat)) : Prop :=
-  ∀ k e v, p.elems[k]? = some e → (e.src = some v ∨ e.dst = some v) → k ∈ idx.getD v []
+  ∀ k e v, p.elems[k]? = some e → (e.src = some v ∨ some v ∈ e.dsts) → k ∈ idx.getD v []
 
 def indexedB (p : Prog) (idx : Array (List Nat)) : Bool :=
   (List.range p.elems.size).all fun k =>
@@ -58,7 +58,7 @@ def indexedB (p : Prog) (idx : Array (List Nat)) : Bool :=
     | none => true
     | some e =>
       (match e.src with | none => true | some v => (idx.getD v []).contains k) &&
-        (match e.dst with | none => true | some v => (idx.getD v []).contains k)
+        e.dsts.all fun o => match o with | none => true | some v => (idx.getD v []).contains k
 
 theorem indexed_of_indexedB {idx : Array (List Nat)} (h : indexedB p idx = true) : Indexed p idx := by
   intro k e v hk hv
@@ -68,12 +68,20 @@ theorem indexed_of_indexedB {idx : Array (List Nat)} (h : indexedB p idx = true)
   simp only [Bool.and_eq_true] at this
   rcases hv with hv | hv
   · have := this.1; rw [hv] at this; simpa using this
-  · have := this.2; rw [hv] at this; simpa using this
+  · have := this.2
+    simp only [List.all_eq_true] at this
+    simpa using this _ hv
 
 /-! ### Enabledness on a hash set -/
 
 def sentH (S : LSet) (k : Nat) : Bool := S.contains (.push k) || S.contains (.xfer k)
-def gotH (S : LSet) (k : Nat) : Bool := S.contains (.pull k) || S.contains (.xfer k)
+def gotH (S : LSet) (k i : Nat) : Bool := S.contains (.pull k i) || S.contains (.xfer k)
+
+def gotAtH (S : LSet) (e : Elem) (k v : Nat) : Bool :=
+  (List.range e.dsts.length).all fun i => e.dsts[i]? != some (some v) || gotH S k i
+
+def allStartedH (S : LSet) (e : Elem) : Bool :=
+  !e.dsts.isEmpty && e.dsts.all fun o => match o with | none => false | some d => S.contains (.start d)
 
 def enH (p : Prog) (idx : Array (List Nat)) (S : LSet) : Label → Bool
   | .start v => decide (v < p.graph.size) && (p.graph.predsOf v).all fun u => S.contains (.finish u)
@@ -81,7 +89,7 @@ def enH (p : Prog) (idx : Array (List Nat)) (S : LSet) : Label → Bool
       (idx.getD v []).all fun k =>
         match p.elems[k]? with
         | none => true
-        | some e => (e.src != some v || sentH S k) && (e.dst != some v || gotH S k)
+        | some e => (e.src != some v || sentH S k) && gotAtH S e k v
   | .read k =>
     match p.elems[k]? with
     | none => false
@@ -92,55 +100,57 @@ def enH (p : Prog) (idx : Array (List Nat)) (S : LSet) : Label → Bool
     match p.elems[k]? with
     | none => false
     | some e => e.buffered && S.contains (.read k) && prevB e (sentH S)
-  | .pull k =>
+  | .pull k i =>
     match p.elems[k]? with
     | none => false
     | some e => e.buffered &&
-        (match e.dst with | none => false | some d => S.contains (.start d)) &&
-        S.contains (.push k) && prevB e (gotH S)
+        (match e.dsts[i]? with | some (some d) => S.contains (.start d) | _ => false) &&
+        S.contains (.push k) && prevB e (fun j => gotH S j i)
   | .xfer k =>
     match p.elems[k]? with
     | none => false
-    | some e => !e.buffered && S.contains (.read k) &&
-        (match e.dst with | none => false | some d => S.contains (.start d)) &&
-        prevB e (gotH S)
+    | some e => !e.buffered && S.contains (.read k) && allStartedH S e && prevAllB e (gotH S)
 
 theorem enH_iff {idx : Array (List Nat)} {S : LSet} {F : List Label} {l : Label}
     (hi : Indexed p idx) (hr : Rep S F) : enH p idx S l = true ↔ En p F l := by
   have hc := hr.contains
   have hs : ∀ k, sentH S k = sentB F k := fun k => by simp [sentH, sentB, hc]
-  have hg : ∀ k, gotH S k = gotB F k := fun k => by simp [gotH, gotB, hc]
+  have hg : ∀ k i, gotH S k i = gotB F k i := fun k i => by simp [gotH, gotB, hc]
+  have hga : ∀ e k v, gotAtH S e k v = gotAtB F e k v := fun e k v => by simp [gotAtH, gotAtB, hg]
+  have has : ∀ e, allStartedH S e = allStartedB F e := fun e => by
+    simp only [allStartedH, allStartedB]
+    congr 1
+    apply List.all_congr rfl
+    intro o
+    cases o <;> simp [hc]
   cases l with
   | finish v =>
     simp only [enH, Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true, hc,
       List.contains_iff_mem]
     constructor
     · rintro ⟨⟨hlt, hst⟩, h⟩
-      refine ⟨hlt, hst, fun k e hk => ⟨fun hsv => ?_, fun hdv => ?_⟩⟩
+      refine ⟨hlt, hst, fun k e hk => ⟨fun hsv => ?_, fun i hdv => ?_⟩⟩
       · have := h k (hi k e v hk (Or.inl hsv))
         rw [hk] at this
         simp only [Bool.and_eq_true, Bool.or_eq_true, bne_iff_ne, ne_eq, hsv, not_true_eq_false,
           false_or, hs] at this
         exact sentB_iff.mp this.1
-      · have := h k (hi k e v hk (Or.inr hdv))
+      · have hmem : some v ∈ e.dsts := List.mem_of_getElem? hdv
+        have := h k (hi k e v hk (Or.inr hmem))
         rw [hk] at this
-        simp only [Bool.and_eq_true, Bool.or_eq_true, bne_iff_ne, ne_eq, hdv, not_true_eq_false,
-          false_or, hg] at this
-        exact gotB_iff.mp this.2
+        simp only [Bool.and_eq_true, hga] at this
+        exact gotAtB_iff.mp this.2 _ hdv
     · rintro ⟨hlt, hst, h⟩
       refine ⟨⟨hlt, hst⟩, fun k _ => ?_⟩
       cases hk : p.elems[k]? with
       | none => rfl
       | some e =>
         have := h k e hk
-        simp only [Bool.and_eq_true, Bool.or_eq_true, bne_iff_ne, ne_eq, hs, hg]
-        refine ⟨?_, ?_⟩
-        · by_cases hsv : e.src = some v
-          · exact Or.inr (sentB_iff.mpr (this.1 hsv))
-          · exact Or.inl hsv
-        · by_cases hdv : e.dst = some v
-          · exact Or.inr (gotB_iff.mpr (this.2 hdv))
-          · exact Or.inl hdv
+        simp only [Bool.and_eq_true, Bool.or_eq_true, bne_iff_ne, ne_eq, hs, hga]
+        refine ⟨?_, gotAtB_iff.mpr this.2⟩
+        by_cases hsv : e.src = some v
+        · exact Or.inr (sentB_iff.mpr (this.1 hsv))
+        · exact Or.inl hsv
   | start v =>
     rw [← enB_iff]; simp [enH, enB, hc]
   | read k =>
@@ -154,22 +164,21 @@ theorem enH_iff {idx : Array (List Nat)} {S : LSet} {F : List Label} {l : Label}
     rw [← enB_iff]
     have hs' : sentH S = sentB F := funext hs
     cases hk : p.elems[k]? <;> simp [enH, enB, hk, hc, hs']
-  | pull k =>
+  | pull k i =>
     rw [← enB_iff]
-    have hg' : gotH S = gotB F := funext hg
+    have hg' : (fun j => gotH S j i) = (fun j => gotB F j i) := funext fun j => hg j i
     cases hk : p.elems[k]? with
     | none => simp [enH, enB, hk]
     | some e =>
       simp only [enH, enB, hk, hg']
-      cases e.dst <;> simp [hc]
+      rcases e.dsts[i]? with _ | _ | d <;> simp [hc]
   | xfer k =>
     rw [← enB_iff]
-    have hg' : gotH S = gotB F := funext hg
+    have hg' : gotH S = gotB F := funext fun j => funext fun i => hg j i
     cases hk : p.elems[k]? with
     | none => simp [enH, enB, hk]
     | some e =>
-      simp only [enH, enB, hk, hg']
-      cases e.dst <;> simp [hc]
+      simp only [enH, enB, hk, hg', has, hc]
 
 /-! ### Checking a proposed execution -/
 
@@ -328,7 +337,8 @@ def hbPredsI (p : Prog) (idx : Array (List Nat)) : Label → List Label
       match p.elems[k]? with
       | none => []
       | some e => (if e.src = some v then [sentLabel p k] else []) ++
-          (if e.dst = some v then [gotLabel p k] else [])
+          (List.range e.dsts.length).filterMap fun i =>
+            if e.dsts[i]? = some (some v) then some (gotLabel p k i) else none
   | l => hbPreds p l
 
 theorem hbPredsI_sub {idx : Array (List Nat)} {l z : Label} (h : z ∈ hbPredsI p idx l) :
@@ -600,10 +610,12 @@ def possible (p : Prog) : Label → Bool
   | .start v | .finish v => decide (v < p.graph.size)
   | .read k => match p.elems[k]? with | some e => e.src.isSome | none => false
   | .push k => match p.elems[k]? with | some e => e.buffered && e.src.isSome | none => false
-  | .pull k => match p.elems[k]? with
-    | some e => e.buffered && e.src.isSome && e.dst.isSome | none => false
+  | .pull k i => match p.elems[k]? with
+    | some e => e.buffered && e.src.isSome && (match e.dsts[i]? with | some (some _) => true | _ => false)
+    | none => false
   | .xfer k => match p.elems[k]? with
-    | some e => !e.buffered && e.src.isSome && e.dst.isSome | none => false
+    | some e => !e.buffered && e.src.isSome && !e.dsts.isEmpty && e.dsts.all (·.isSome)
+    | none => false
 
 /-- Kahn's algorithm on `hbPredsI`: fire each possible label once all it needs has fired. -/
 def genTrace (p : Prog) (idx : Array (List Nat)) : List Label := Id.run do
@@ -632,8 +644,9 @@ def buildIndex (p : Prog) : Array (List Nat) := Id.run do
   let mut idx : Array (List Nat) := Array.replicate p.graph.size []
   for e in p.elems, k in [0:p.elems.size] do
     if let some v := e.src then idx := idx.modify v (k :: ·)
-    if let some v := e.dst then
-      if e.src != some v then idx := idx.modify v (k :: ·)
+    for o in e.dsts.eraseDups do
+      if let some v := o then
+        if e.src != some v then idx := idx.modify v (k :: ·)
   return idx
 
 /-- Positions of the labels of `t`. -/

@@ -14,12 +14,14 @@ checker, and the theorems that make a checker for it trustworthy.
 ## The model
 
 A program has events `0, …, n-1` with a dependency graph, as in `Veir.Air.Events`, and stream
-*elements* `0, …, m-1`. Each element belongs to one subchannel's stream (D28, D34):
+*elements* `0, …, m-1`. Each element belongs to one stream (D28, D34), which is delivered to one
+or more *slots*: one for a point-to-point subchannel, one per destination of a broadcast (D29):
 - `src`: the put event that sends it, if any put does;
-- `dst`: the get event that receives it, if any get does;
-- `prev`: the element before it in the same subchannel, if any;
+- `dsts`: per slot, the get event that receives it there, if any get does;
+- `prev`: the element before it in the same stream, if any;
 - `buffered`: whether its transfer is buffered. D51: an element is buffered iff its put or its
   get is synchronous (a missing end counts as asynchronous); otherwise put and get meet (D30).
+  An unbuffered broadcast element reaches every slot at once (D29).
 
 Which put and get an element belongs to follows from D33 and D34 (the i-th element put is the
 i-th element got); computing it from IR is `Veir.Air.Channels`' job, not this file's.
@@ -29,10 +31,12 @@ An execution fires labels, each at most once:
   finishes once all its elements have left (a put) or arrived (a get);
 - `read k`: the put reads element `k`'s source, in stream order, at any time after it started
   (D36(a): reads may run ahead of the stream);
-- `push k` / `pull k`: a buffered element enters, then leaves, the subchannel's buffer;
-- `xfer k`: an unbuffered element passes from a running put to a running get in one step.
+- `push k` / `pull k i`: a buffered element enters the stream's buffer, then leaves it at slot `i`;
+- `xfer k`: an unbuffered element passes from a running put to the running gets of all its slots in
+  one step.
 
-The stream is FIFO: an element enters after the one before it entered, and leaves after it left.
+The stream is FIFO: an element enters after the one before it entered, and leaves at each slot
+after the one before it left there.
 
 ## What is proven
 
@@ -51,7 +55,7 @@ namespace Chan
 
 structure Elem where
   src : Option Nat
-  dst : Option Nat
+  dsts : List (Option Nat)
   prev : Option Nat
   buffered : Bool
 deriving Repr, Inhabited, DecidableEq
@@ -66,30 +70,35 @@ inductive Label where
   | finish (v : Nat)
   | read (k : Nat)
   | push (k : Nat)
-  | pull (k : Nat)
+  | pull (k i : Nat)
   | xfer (k : Nat)
 deriving DecidableEq, Repr, Inhabited
 
 /-- Element `k` has entered the stream. -/
 def Sent (F : List Label) (k : Nat) : Prop := Label.push k ∈ F ∨ Label.xfer k ∈ F
 
-/-- Element `k` has been received. -/
-def Got (F : List Label) (k : Nat) : Prop := Label.pull k ∈ F ∨ Label.xfer k ∈ F
+/-- Element `k` has been received at slot `i`. -/
+def Got (F : List Label) (k i : Nat) : Prop := Label.pull k i ∈ F ∨ Label.xfer k ∈ F
+
+/-- Every slot of an element has a get, and every one has started. -/
+def AllStarted (F : List Label) (e : Elem) : Prop :=
+  e.dsts ≠ [] ∧ ∀ o ∈ e.dsts, ∃ d, o = some d ∧ Label.start d ∈ F
 
 /-- Label `l` may fire once the labels `F` have. -/
 def En (p : Prog) (F : List Label) : Label → Prop
   | .start v => v < p.graph.size ∧ ∀ u ∈ p.graph.predsOf v, Label.finish u ∈ F
   | .finish v => v < p.graph.size ∧ Label.start v ∈ F ∧
-      ∀ k e, p.elems[k]? = some e → (e.src = some v → Sent F k) ∧ (e.dst = some v → Got F k)
+      ∀ k e, p.elems[k]? = some e → (e.src = some v → Sent F k) ∧
+        (∀ i, e.dsts[i]? = some (some v) → Got F k i)
   | .read k => ∃ e, p.elems[k]? = some e ∧ (∃ s, e.src = some s ∧ Label.start s ∈ F) ∧
       ∀ j, e.prev = some j → Label.read j ∈ F
   | .push k => ∃ e, p.elems[k]? = some e ∧ e.buffered = true ∧ Label.read k ∈ F ∧
       ∀ j, e.prev = some j → Sent F j
-  | .pull k => ∃ e, p.elems[k]? = some e ∧ e.buffered = true ∧
-      (∃ d, e.dst = some d ∧ Label.start d ∈ F) ∧ Label.push k ∈ F ∧
-      ∀ j, e.prev = some j → Got F j
+  | .pull k i => ∃ e, p.elems[k]? = some e ∧ e.buffered = true ∧
+      (∃ d, e.dsts[i]? = some (some d) ∧ Label.start d ∈ F) ∧ Label.push k ∈ F ∧
+      ∀ j, e.prev = some j → Got F j i
   | .xfer k => ∃ e, p.elems[k]? = some e ∧ e.buffered = false ∧ Label.read k ∈ F ∧
-      (∃ d, e.dst = some d ∧ Label.start d ∈ F) ∧ ∀ j, e.prev = some j → Got F j
+      AllStarted F e ∧ ∀ j, e.prev = some j → ∀ i, i < e.dsts.length → Got F j i
 
 /-- `Run p F t G`: from the fired labels `F`, the labels `t` fire in order, each once, and `G`
 have fired at the end. -/
@@ -113,10 +122,14 @@ theorem Sent.mono {F G : List Label} {k : Nat} (h : Sent F k) (s : Sub F G) : Se
   · exact Or.inl (s _ h)
   · exact Or.inr (s _ h)
 
-theorem Got.mono {F G : List Label} {k : Nat} (h : Got F k) (s : Sub F G) : Got G k := by
+theorem Got.mono {F G : List Label} {k i : Nat} (h : Got F k i) (s : Sub F G) : Got G k i := by
   rcases h with h | h
   · exact Or.inl (s _ h)
   · exact Or.inr (s _ h)
+
+theorem AllStarted.mono {F G : List Label} {e : Elem} (h : AllStarted F e) (s : Sub F G) :
+    AllStarted G e :=
+  ⟨h.1, fun o ho => let ⟨d, hd, hds⟩ := h.2 o ho; ⟨d, hd, s _ hds⟩⟩
 
 /-- **Enabled labels stay enabled** as more labels fire. -/
 theorem En.mono {F G : List Label} {l : Label} (h : En p F l) (s : Sub F G) : En p G l := by
@@ -125,19 +138,19 @@ theorem En.mono {F G : List Label} {l : Label} (h : En p F l) (s : Sub F G) : En
   | finish v =>
     obtain ⟨hlt, hst, he⟩ := h
     exact ⟨hlt, s _ hst, fun k e hk =>
-      ⟨fun hs => ((he k e hk).1 hs).mono s, fun hd => ((he k e hk).2 hd).mono s⟩⟩
+      ⟨fun hs => ((he k e hk).1 hs).mono s, fun i hd => ((he k e hk).2 i hd).mono s⟩⟩
   | read k =>
     obtain ⟨e, hk, ⟨x, hx, hxs⟩, hprev⟩ := h
     exact ⟨e, hk, ⟨x, hx, s _ hxs⟩, fun j hj => s _ (hprev j hj)⟩
   | push k =>
     obtain ⟨e, hk, hb, hr, hprev⟩ := h
     exact ⟨e, hk, hb, s _ hr, fun j hj => (hprev j hj).mono s⟩
-  | pull k =>
+  | pull k i =>
     obtain ⟨e, hk, hb, ⟨d, hd, hds⟩, hpu, hprev⟩ := h
     exact ⟨e, hk, hb, ⟨d, hd, s _ hds⟩, s _ hpu, fun j hj => (hprev j hj).mono s⟩
   | xfer k =>
-    obtain ⟨e, hk, hb, hr, ⟨d, hd, hds⟩, hprev⟩ := h
-    exact ⟨e, hk, hb, s _ hr, ⟨d, hd, s _ hds⟩, fun j hj => (hprev j hj).mono s⟩
+    obtain ⟨e, hk, hb, hr, hall, hprev⟩ := h
+    exact ⟨e, hk, hb, s _ hr, hall.mono s, fun j hj i hi => (hprev j hj i hi).mono s⟩
 
 namespace Run
 
@@ -224,13 +237,56 @@ theorem no_completion_of_stuck {s F : List Label} (hs : Run p [] s F) (hst : Stu
 /-! ### Deciding it -/
 
 def sentB (F : List Label) (k : Nat) : Bool := F.contains (.push k) || F.contains (.xfer k)
-def gotB (F : List Label) (k : Nat) : Bool := F.contains (.pull k) || F.contains (.xfer k)
+def gotB (F : List Label) (k i : Nat) : Bool := F.contains (.pull k i) || F.contains (.xfer k)
 
 theorem sentB_iff {F : List Label} {k : Nat} : sentB F k = true ↔ Sent F k := by
   simp [sentB, Sent]
 
-theorem gotB_iff {F : List Label} {k : Nat} : gotB F k = true ↔ Got F k := by
+theorem gotB_iff {F : List Label} {k i : Nat} : gotB F k i = true ↔ Got F k i := by
   simp [gotB, Got]
+
+def allStartedB (F : List Label) (e : Elem) : Bool :=
+  !e.dsts.isEmpty && e.dsts.all fun o => match o with | none => false | some d => F.contains (.start d)
+
+theorem allStartedB_iff {F : List Label} {e : Elem} : allStartedB F e = true ↔ AllStarted F e := by
+  simp only [allStartedB, AllStarted, Bool.and_eq_true, Bool.not_eq_true', List.isEmpty_eq_false_iff,
+    List.all_eq_true, ne_eq]
+  refine and_congr Iff.rfl (forall_congr' fun o => imp_congr_right fun _ => ?_)
+  cases o <;> simp
+
+/-- Whether element `k` reached every slot `i` with get `v`. -/
+def gotAtB (F : List Label) (e : Elem) (k v : Nat) : Bool :=
+  (List.range e.dsts.length).all fun i => e.dsts[i]? != some (some v) || gotB F k i
+
+theorem gotAtB_iff {F : List Label} {e : Elem} {k v : Nat} :
+    gotAtB F e k v = true ↔ ∀ i, e.dsts[i]? = some (some v) → Got F k i := by
+  simp only [gotAtB, List.all_eq_true, List.mem_range, Bool.or_eq_true, bne_iff_ne, ne_eq]
+  constructor
+  · intro h i hi
+    have hlt : i < e.dsts.length := by
+      rcases Nat.lt_or_ge i e.dsts.length with h' | h'
+      · exact h'
+      · simp [List.getElem?_eq_none h'] at hi
+    rcases h i hlt with h | h
+    · exact absurd hi h
+    · exact gotB_iff.mp h
+  · intro h i _
+    by_cases hi : e.dsts[i]? = some (some v)
+    · exact Or.inr (gotB_iff.mpr (h i hi))
+    · exact Or.inl hi
+
+def prevAllB (e : Elem) (f : Nat → Nat → Bool) : Bool :=
+  match e.prev with
+  | none => true
+  | some j => (List.range e.dsts.length).all fun i => f j i
+
+theorem prevAllB_iff {e : Elem} {f : Nat → Nat → Bool} {P : Nat → Nat → Prop}
+    (hf : ∀ j i, f j i = true ↔ P j i) :
+    prevAllB e f = true ↔ ∀ j, e.prev = some j → ∀ i, i < e.dsts.length → P j i := by
+  unfold prevAllB
+  cases e.prev with
+  | none => simp
+  | some j => simp [hf]
 
 def prevB (e : Elem) (f : Nat → Bool) : Bool :=
   match e.prev with
@@ -250,7 +306,7 @@ def enB (p : Prog) (F : List Label) : Label → Bool
       (List.range p.elems.size).all fun k =>
         match p.elems[k]? with
         | none => true
-        | some e => (e.src != some v || sentB F k) && (e.dst != some v || gotB F k)
+        | some e => (e.src != some v || sentB F k) && gotAtB F e k v
   | .read k =>
     match p.elems[k]? with
     | none => false
@@ -261,23 +317,26 @@ def enB (p : Prog) (F : List Label) : Label → Bool
     match p.elems[k]? with
     | none => false
     | some e => e.buffered && F.contains (.read k) && prevB e (sentB F)
-  | .pull k =>
+  | .pull k i =>
     match p.elems[k]? with
     | none => false
     | some e => e.buffered &&
-        (match e.dst with | none => false | some d => F.contains (.start d)) &&
-        F.contains (.push k) && prevB e (gotB F)
+        (match e.dsts[i]? with | some (some d) => F.contains (.start d) | _ => false) &&
+        F.contains (.push k) && prevB e (fun j => gotB F j i)
   | .xfer k =>
     match p.elems[k]? with
     | none => false
-    | some e => !e.buffered && F.contains (.read k) &&
-        (match e.dst with | none => false | some d => F.contains (.start d)) &&
-        prevB e (gotB F)
+    | some e => !e.buffered && F.contains (.read k) && allStartedB F e && prevAllB e (gotB F)
 
 theorem optB_iff {o : Option Nat} {F : List Label} :
     (match o with | none => false | some s => F.contains (.start s)) = true ↔
       ∃ s, o = some s ∧ Label.start s ∈ F := by
   cases o <;> simp
+
+theorem optB2_iff {o : Option (Option Nat)} {F : List Label} :
+    (match o with | some (some d) => F.contains (.start d) | _ => false) = true ↔
+      ∃ d, o = some (some d) ∧ Label.start d ∈ F := by
+  rcases o with _ | _ | d <;> simp
 
 theorem enB_iff {F : List Label} {l : Label} : enB p F l = true ↔ En p F l := by
   cases l with
@@ -296,13 +355,10 @@ theorem enB_iff {F : List Label} {l : Label} : enB p F l = true ↔ En p F l := 
       rw [hk] at this
       simp only [Bool.and_eq_true, Bool.or_eq_true, bne_iff_ne, ne_eq] at this
       obtain ⟨h1, h2⟩ := this
-      refine ⟨fun hs => ?_, fun hd => ?_⟩
-      · rcases h1 with h1 | h1
-        · exact absurd hs h1
-        · exact sentB_iff.mp h1
-      · rcases h2 with h2 | h2
-        · exact absurd hd h2
-        · exact gotB_iff.mp h2
+      refine ⟨fun hs => ?_, gotAtB_iff.mp h2⟩
+      rcases h1 with h1 | h1
+      · exact absurd hs h1
+      · exact sentB_iff.mp h1
     · rintro ⟨hlt, hst, h⟩
       refine ⟨⟨hlt, hst⟩, fun k _ => ?_⟩
       cases hk : p.elems[k]? with
@@ -310,13 +366,10 @@ theorem enB_iff {F : List Label} {l : Label} : enB p F l = true ↔ En p F l := 
       | some e =>
         have := h k e hk
         simp only [Bool.and_eq_true, Bool.or_eq_true, bne_iff_ne, ne_eq]
-        refine ⟨?_, ?_⟩
-        · by_cases hs : e.src = some v
-          · exact Or.inr (sentB_iff.mpr (this.1 hs))
-          · exact Or.inl hs
-        · by_cases hd : e.dst = some v
-          · exact Or.inr (gotB_iff.mpr (this.2 hd))
-          · exact Or.inl hd
+        refine ⟨?_, gotAtB_iff.mpr this.2⟩
+        by_cases hs : e.src = some v
+        · exact Or.inr (sentB_iff.mpr (this.1 hs))
+        · exact Or.inl hs
   | read k =>
     simp only [enB, En]
     cases hk : p.elems[k]? with
@@ -334,14 +387,14 @@ theorem enB_iff {F : List Label} {l : Label} : enB p F l = true ↔ En p F l := 
       constructor
       · rintro ⟨⟨h1, h2⟩, h3⟩; exact ⟨h1, h2, h3⟩
       · rintro ⟨h1, h2, h3⟩; exact ⟨⟨h1, h2⟩, h3⟩
-  | pull k =>
+  | pull k i =>
     simp only [enB, En]
     cases hk : p.elems[k]? with
     | none => simp
     | some e =>
       simp only [Bool.and_eq_true, Option.some.injEq, exists_eq_left', List.contains_iff_mem,
-        optB_iff]
-      rw [prevB_iff (fun j => gotB_iff)]
+        optB2_iff]
+      rw [prevB_iff (P := fun j => Got F j i) (fun j => gotB_iff)]
       constructor
       · rintro ⟨⟨⟨h1, h2⟩, h3⟩, h4⟩; exact ⟨h1, h2, h3, h4⟩
       · rintro ⟨h1, h2, h3, h4⟩; exact ⟨⟨⟨h1, h2⟩, h3⟩, h4⟩
@@ -351,8 +404,8 @@ theorem enB_iff {F : List Label} {l : Label} : enB p F l = true ↔ En p F l := 
     | none => simp
     | some e =>
       simp only [Bool.and_eq_true, Bool.not_eq_true', Option.some.injEq, exists_eq_left',
-        List.contains_iff_mem, optB_iff]
-      rw [prevB_iff (fun j => gotB_iff)]
+        List.contains_iff_mem, allStartedB_iff]
+      rw [prevAllB_iff (fun j i => gotB_iff)]
       constructor
       · rintro ⟨⟨⟨h1, h2⟩, h3⟩, h4⟩; exact ⟨h1, h2, h3, h4⟩
       · rintro ⟨h1, h2, h3, h4⟩; exact ⟨⟨⟨h1, h2⟩, h3⟩, h4⟩
@@ -360,7 +413,9 @@ theorem enB_iff {F : List Label} {l : Label} : enB p F l = true ↔ En p F l := 
 /-- Every label that can ever fire. -/
 def cands (p : Prog) : List Label :=
   (List.range p.graph.size).flatMap (fun v => [.start v, .finish v]) ++
-    (List.range p.elems.size).flatMap fun k => [.read k, .push k, .pull k, .xfer k]
+    (List.range p.elems.size).flatMap fun k =>
+      [.read k, .push k, .xfer k] ++
+        (List.range ((p.elems[k]?.map (·.dsts.length)).getD 0)).map (.pull k)
 
 theorem elem_lt {k : Nat} {e : Elem} (h : p.elems[k]? = some e) : k < p.elems.size := by
   rcases Nat.lt_or_ge k p.elems.size with h' | h'
@@ -375,8 +430,14 @@ theorem mem_cands {F : List Label} {l : Label} (h : En p F l) : l ∈ cands p :=
   | finish v => exact Or.inl ⟨v, h.1, by simp⟩
   | read k => obtain ⟨e, hk, _⟩ := h; exact Or.inr ⟨k, elem_lt hk, by simp⟩
   | push k => obtain ⟨e, hk, _⟩ := h; exact Or.inr ⟨k, elem_lt hk, by simp⟩
-  | pull k => obtain ⟨e, hk, _⟩ := h; exact Or.inr ⟨k, elem_lt hk, by simp⟩
   | xfer k => obtain ⟨e, hk, _⟩ := h; exact Or.inr ⟨k, elem_lt hk, by simp⟩
+  | pull k i =>
+    obtain ⟨e, hk, _, ⟨d, hd, _⟩, _⟩ := h
+    have hi : i < e.dsts.length := by
+      rcases Nat.lt_or_ge i e.dsts.length with h' | h'
+      · exact h'
+      · simp [List.getElem?_eq_none h'] at hd
+    exact Or.inr ⟨k, elem_lt hk, by simp [hk, hi]⟩
 
 /-- A label that can fire next, if any. -/
 def next? (p : Prog) (F : List Label) : Option Label :=

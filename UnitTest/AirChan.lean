@@ -10,8 +10,8 @@ async get after it in program order takes elements 2-3. Elements 0-1 are buffere
 sync), 2-3 meet. It completes. -/
 private def d51 : Prog where
   graph := ⟨#[[], [], [1]]⟩
-  elems := #[⟨some 0, some 1, none, true⟩, ⟨some 0, some 1, some 0, true⟩,
-             ⟨some 0, some 2, some 1, false⟩, ⟨some 0, some 2, some 2, false⟩]
+  elems := #[⟨some 0, [some 1], none, true⟩, ⟨some 0, [some 1], some 0, true⟩,
+             ⟨some 0, [some 2], some 1, false⟩, ⟨some 0, [some 2], some 2, false⟩]
 
 #guard check d51 == some true
 
@@ -19,23 +19,23 @@ private def d51 : Prog where
 wait for the put. Unbuffered (D30): the put cannot finish before the get starts. -/
 private def air011 : Prog where
   graph := ⟨#[[], [0]]⟩
-  elems := #[⟨some 0, some 1, none, false⟩]
+  elems := #[⟨some 0, [some 1], none, false⟩]
 
 #guard check air011 == some false
 
 -- The same with the get sync: buffered (D30), so it completes.
-#guard check { air011 with elems := #[⟨some 0, some 1, none, true⟩] } == some true
+#guard check { air011 with elems := #[⟨some 0, [some 1], none, true⟩] } == some true
 
 /-- D34: an async put with an element no get takes cannot finish; a sync one can. -/
 private def orphan (b : Bool) : Prog where
   graph := ⟨#[[]]⟩
-  elems := #[⟨some 0, none, none, b⟩]
+  elems := #[⟨some 0, [none], none, b⟩]
 
 #guard check (orphan false) == some false
 #guard check (orphan true) == some true
 
 -- A get waiting for an element no put provides never finishes.
-#guard check { graph := ⟨#[[]]⟩, elems := #[⟨none, some 0, none, true⟩] } == some false
+#guard check { graph := ⟨#[[]]⟩, elems := #[⟨none, [some 0], none, true⟩] } == some false
 
 /-! ### Axioms
 
@@ -101,3 +101,14 @@ private def fastCheck (p : Prog) : Option Bool := checkH p (buildIndex p) (genTr
 #guard fastCheck air011 == some false
 #guard fastCheck (orphan false) == some false
 #guard fastCheck (orphan true) == some true
+
+/-- D29: an async put broadcast to two async gets. Unbuffered: one transfer reaches both at once,
+so if one get waits for the other to finish, nothing moves. -/
+private def bcast (dep : Bool) : Prog where
+  graph := ⟨#[[], [], if dep then [1] else []]⟩
+  elems := #[⟨some 0, [some 1, some 2], none, false⟩]
+
+#guard check (bcast false) == some true
+#guard check (bcast true) == some false
+#guard fastCheck (bcast false) == some true
+#guard fastCheck (bcast true) == some false

@@ -12,7 +12,8 @@ namespace Veir.Air
 The labels of `Veir.Air.ChanSem` act on memory:
 - `read k` copies element `k`'s source location (or zero, for put padding, D31) into a slot of
   its own: the value in flight;
-- `pull k` and `xfer k` copy the slot to element `k`'s destination location;
+- `pull k i` copies the value in flight to element `k`'s destination at slot `i`; `xfer k` to its
+  destinations at every slot at once (a broadcast, D29);
 - `finish v` applies event `v`'s effect, as in `Veir.Air.Determinism` (D7): an `air.execute`
   body, a DMA, or a get's padding zeros (D31);
 - `start v` and `push k` change nothing.
@@ -87,7 +88,10 @@ def upd (m : Mem V) (x : Loc) (a : V) : Mem V := fun y => if y = x then a else m
 structure MemSpec (V : Type) where
   /-- Element `k`'s source location; `none` for put padding, which reads as `zero`. -/
   srcLoc : Nat → Option Loc
-  dstLoc : Nat → Loc
+  /-- Element `k`'s destination location at slot `i`. -/
+  dstLoc : Nat → Nat → Loc
+  /-- How many slots element `k` has. -/
+  nDst : Nat → Nat
   /-- Where element `k` is held in flight; not a location of any buffer. -/
   slot : Nat → Loc
   zero : V
@@ -102,16 +106,17 @@ def MemSpec.eff (ms : MemSpec V) : Label → Mem V → Mem V
   | .finish v => ms.evEff v
   | .read k => fun m => upd m (ms.slot k) (match ms.srcLoc k with | some x => m x | none => ms.zero)
   | .push _ => id
-  | .pull k => fun m => upd m (ms.dstLoc k) (m (ms.slot k))
-  | .xfer k => fun m => upd m (ms.dstLoc k) (m (ms.slot k))
+  | .pull k i => fun m => upd m (ms.dstLoc k i) (m (ms.slot k))
+  | .xfer k => fun m y =>
+    if (List.range (ms.nDst k)).any (fun i => decide (ms.dstLoc k i = y)) then m (ms.slot k) else m y
 
 def MemSpec.fp (ms : MemSpec V) : LFp
   | .start _ => []
   | .finish v => ms.evFp v
   | .read k => acc (ms.slot k) .write :: (match ms.srcLoc k with | some x => [acc x .read] | none => [])
   | .push _ => []
-  | .pull k => [acc (ms.slot k) .read, acc (ms.dstLoc k) .write]
-  | .xfer k => [acc (ms.slot k) .read, acc (ms.dstLoc k) .write]
+  | .pull k i => [acc (ms.slot k) .read, acc (ms.dstLoc k i) .write]
+  | .xfer k => acc (ms.slot k) .read :: (List.range (ms.nDst k)).map fun i => acc (ms.dstLoc k i) .write
 
 theorem acc_loc {a : Access} {x y : Loc} {k : AccessKind} (ha : a = acc y k) (hab : a.buf = x.1)
     (hax : x.2 ∈ a.elems) : x = y := by
@@ -138,11 +143,23 @@ theorem MemSpec.framed (ms : MemSpec V)
         by simp [acc, h], by simp [acc, h]⟩
       simp [this]
     | push => rfl
-    | pull k | xfer k =>
+    | pull k i =>
       simp only [MemSpec.eff, upd]
-      have : x ≠ ms.dstLoc k := fun h => hw ⟨acc (ms.dstLoc k) .write, by simp [MemSpec.fp], rfl,
+      have : x ≠ ms.dstLoc k i := fun h => hw ⟨acc (ms.dstLoc k i) .write, by simp [MemSpec.fp], rfl,
         by simp [acc, h], by simp [acc, h]⟩
       simp [this]
+    | xfer k =>
+      simp only [MemSpec.eff]
+      split
+      · next hany =>
+        exfalso
+        simp only [List.any_eq_true, List.mem_range, decide_eq_true_eq] at hany
+        obtain ⟨i, hi, rfl⟩ := hany
+        have hmem : acc (ms.dstLoc k i) .write ∈ ms.fp (.xfer k) := by
+          simp only [MemSpec.fp, List.mem_cons, List.mem_map, List.mem_range]
+          exact Or.inr ⟨i, hi, rfl⟩
+        exact hw ⟨acc (ms.dstLoc k i) .write, hmem, rfl, by simp [acc], by simp [acc]⟩
+      · rfl
   · intro l m m' hr x hw
     cases l with
     | start => simp [LWrites, MemSpec.fp] at hw
@@ -164,7 +181,7 @@ theorem MemSpec.framed (ms : MemSpec V)
           | none => simp [hs] at ha
           | some y => simp [hs, acc] at ha; subst ha; cases hak
     | push => simp [LWrites, MemSpec.fp] at hw
-    | pull k | xfer k =>
+    | pull k i =>
       simp only [MemSpec.eff, upd]
       split
       · exact hr (ms.slot k) ⟨acc (ms.slot k) .read, by simp [MemSpec.fp], rfl, rfl, by simp [acc]⟩
@@ -175,6 +192,21 @@ theorem MemSpec.framed (ms : MemSpec V)
         rcases ha with ha | ha
         · subst ha; cases hak
         · exact hne (acc_loc ha hab hax)
+    | xfer k =>
+      simp only [MemSpec.eff]
+      by_cases hc : ((List.range (ms.nDst k)).any fun i => decide (ms.dstLoc k i = x)) = true
+      · rw [if_pos hc, if_pos hc]
+        exact hr (ms.slot k) ⟨acc (ms.slot k) .read, by simp [MemSpec.fp], rfl, rfl, by simp [acc]⟩
+      · next =>
+        have hnone := hc
+        exfalso
+        obtain ⟨a, ha, hak, hab, hax⟩ := hw
+        simp only [MemSpec.fp, List.mem_cons, List.mem_map, List.mem_range] at ha
+        rcases ha with ha | ⟨i, hi, ha⟩
+        · subst ha; cases hak
+        · apply hnone
+          simp only [List.any_eq_true, List.mem_range, decide_eq_true_eq]
+          exact ⟨i, hi, (acc_loc ha.symm hab hax).symm⟩
 
 /-! ### The order every execution respects -/
 
@@ -184,11 +216,11 @@ def sentLabel (p : Prog) (j : Nat) : Label :=
   | some e => if e.buffered then .push j else .xfer j
   | none => .push j
 
-/-- The label that takes element `j` out of the stream. -/
-def gotLabel (p : Prog) (j : Nat) : Label :=
+/-- The label that takes element `j` out of the stream at slot `i`. -/
+def gotLabel (p : Prog) (j i : Nat) : Label :=
   match p.elems[j]? with
-  | some e => if e.buffered then .pull j else .xfer j
-  | none => .pull j
+  | some e => if e.buffered then .pull j i else .xfer j
+  | none => .pull j i
 
 def optL (o : Option Nat) (f : Nat → Label) : List Label :=
   match o with
@@ -202,7 +234,8 @@ def hbPreds (p : Prog) : Label → List Label
       match p.elems[k]? with
       | none => []
       | some e => (if e.src = some v then [sentLabel p k] else []) ++
-          (if e.dst = some v then [gotLabel p k] else [])
+          (List.range e.dsts.length).filterMap fun i =>
+            if e.dsts[i]? = some (some v) then some (gotLabel p k i) else none
   | .read k =>
     match p.elems[k]? with
     | none => []
@@ -211,14 +244,16 @@ def hbPreds (p : Prog) : Label → List Label
     match p.elems[k]? with
     | none => []
     | some e => .read k :: optL e.prev (sentLabel p)
-  | .pull k =>
+  | .pull k i =>
     match p.elems[k]? with
     | none => []
-    | some e => .push k :: optL e.dst .start ++ optL e.prev (gotLabel p)
+    | some e => .push k :: (match e.dsts[i]? with | some (some d) => [.start d] | _ => []) ++
+        optL e.prev (fun j => gotLabel p j i)
   | .xfer k =>
     match p.elems[k]? with
     | none => []
-    | some e => .read k :: optL e.dst .start ++ optL e.prev (gotLabel p)
+    | some e => .read k :: (e.dsts.filterMap id).map .start ++
+        (match e.prev with | some j => (List.range e.dsts.length).map (gotLabel p j) | none => [])
 
 /-- Every fired label was enabled; by `En.mono`, it still is. -/
 def Inv (p : Prog) (F : List Label) : Prop := ∀ x ∈ F, En p F x
@@ -248,7 +283,7 @@ theorem sent_label {F : List Label} {j : Nat} (hi : Inv p F) (h : Sent F j) : se
   · obtain ⟨e, hj, hb, _⟩ := hi _ h
     simp [sentLabel, hj, hb, h]
 
-theorem got_label {F : List Label} {j : Nat} (hi : Inv p F) (h : Got F j) : gotLabel p j ∈ F := by
+theorem got_label {F : List Label} {j i : Nat} (hi : Inv p F) (h : Got F j i) : gotLabel p j i ∈ F := by
   rcases h with h | h
   · obtain ⟨e, hj, hb, _⟩ := hi _ h
     simp [gotLabel, hj, hb, h]
@@ -283,9 +318,11 @@ theorem hb_sound {F : List Label} {l : Label} (hi : Inv p F) (he : En p F l) :
           · next hs => simp only [List.mem_singleton] at hz; subst hz
                        exact sent_label hi ((hel k e hk).1 hs)
           · simp at hz
-        · split at hz
-          · next hd => simp only [List.mem_singleton] at hz; subst hz
-                       exact got_label hi ((hel k e hk).2 hd)
+        · simp only [List.mem_filterMap, List.mem_range] at hz
+          obtain ⟨i, _, hz⟩ := hz
+          split at hz
+          · next hd => simp only [Option.some.injEq] at hz; subst hz
+                       exact got_label hi ((hel k e hk).2 i hd)
           · simp at hz
   | read k =>
     obtain ⟨e, hk, ⟨s, hs, hss⟩, hprev⟩ := he
@@ -302,24 +339,29 @@ theorem hb_sound {F : List Label} {l : Label} (hi : Inv p F) (he : En p F l) :
     · exact hr
     · obtain ⟨j, hj, rfl⟩ := mem_optL hz
       exact sent_label hi (hprev j hj)
-  | pull k =>
+  | pull k i =>
     obtain ⟨e, hk, _, ⟨d, hd, hds⟩, hpu, hprev⟩ := he
-    simp only [hbPreds, hk, List.mem_cons, List.mem_append] at hz
-    rcases hz with (rfl | hz) | hz
+    simp only [hbPreds, hk, hd, List.mem_cons, List.mem_append, List.not_mem_nil, or_false] at hz
+    rcases hz with (rfl | rfl) | hz
     · exact hpu
-    · obtain ⟨j, hj, rfl⟩ := mem_optL hz
-      rw [hd] at hj; cases hj; exact hds
+    · exact hds
     · obtain ⟨j, hj, rfl⟩ := mem_optL hz
       exact got_label hi (hprev j hj)
   | xfer k =>
-    obtain ⟨e, hk, _, hr, ⟨d, hd, hds⟩, hprev⟩ := he
-    simp only [hbPreds, hk, List.mem_cons, List.mem_append] at hz
-    rcases hz with (rfl | hz) | hz
+    obtain ⟨e, hk, _, hr, ⟨_, hall⟩, hprev⟩ := he
+    simp only [hbPreds, hk, List.mem_cons, List.mem_append, List.mem_map, List.mem_filterMap,
+      id_eq] at hz
+    rcases hz with (rfl | ⟨d, hd, rfl⟩) | hz
     · exact hr
-    · obtain ⟨j, hj, rfl⟩ := mem_optL hz
-      rw [hd] at hj; cases hj; exact hds
-    · obtain ⟨j, hj, rfl⟩ := mem_optL hz
-      exact got_label hi (hprev j hj)
+    · obtain ⟨o, ho, hod⟩ := hd
+      obtain ⟨d', hd', hds⟩ := hall o ho
+      rw [hod] at hd'; cases hd'; exact hds
+    · cases hp : e.prev with
+      | none => simp [hp] at hz
+      | some j =>
+        simp only [hp, List.mem_map, List.mem_range] at hz
+        obtain ⟨i, hi', rfl⟩ := hz
+        exact got_label hi (hprev j hp i hi')
 
 /-- `HB p x y`: `x` has fired whenever `y` has, in every execution. -/
 inductive HB (p : Prog) : Label → Label → Prop
@@ -480,8 +522,10 @@ def Needed (p : Prog) : Label → Prop
   | .start v | .finish v => v < p.graph.size
   | .read k => ∃ e, p.elems[k]? = some e ∧ e.src.isSome
   | .push k => ∃ e, p.elems[k]? = some e ∧ e.buffered = true ∧ e.src.isSome
-  | .pull k => ∃ e, p.elems[k]? = some e ∧ e.buffered = true ∧ e.src.isSome ∧ e.dst.isSome
-  | .xfer k => ∃ e, p.elems[k]? = some e ∧ e.buffered = false ∧ e.src.isSome ∧ e.dst.isSome
+  | .pull k i => ∃ e, p.elems[k]? = some e ∧ e.buffered = true ∧ e.src.isSome ∧
+      ∃ d, e.dsts[i]? = some (some d)
+  | .xfer k => ∃ e, p.elems[k]? = some e ∧ e.buffered = false ∧ e.src.isSome ∧ e.dsts ≠ [] ∧
+      ∀ o ∈ e.dsts, o.isSome
 
 theorem needed_of_en {F : List Label} {l : Label} (hi : Inv p F) (he : En p F l) : Needed p l := by
   cases l with
@@ -495,22 +539,24 @@ theorem needed_of_en {F : List Label} {l : Label} (hi : Inv p F) (he : En p F l)
     obtain ⟨e', hk', ⟨s, hs, _⟩, _⟩ := hi _ hr
     rw [hk] at hk'; cases hk'
     exact ⟨e, hk, hb, by simp [hs]⟩
-  | pull k =>
+  | pull k i =>
     obtain ⟨e, hk, hb, ⟨d, hd, _⟩, hpu, _⟩ := he
     obtain ⟨e', hk', _, hr, _⟩ := hi _ hpu
     obtain ⟨e'', hk'', ⟨s, hs, _⟩, _⟩ := hi _ hr
     rw [hk] at hk' hk''; cases hk'; cases hk''
-    exact ⟨e, hk, hb, by simp [hs], by simp [hd]⟩
+    exact ⟨e, hk, hb, by simp [hs], d, hd⟩
   | xfer k =>
-    obtain ⟨e, hk, hb, hr, ⟨d, hd, _⟩, _⟩ := he
+    obtain ⟨e, hk, hb, hr, ⟨hne, hall⟩, _⟩ := he
     obtain ⟨e', hk', ⟨s, hs, _⟩, _⟩ := hi _ hr
     rw [hk] at hk'; cases hk'
-    exact ⟨e, hk, hb, by simp [hs], by simp [hd]⟩
+    refine ⟨e, hk, hb, by simp [hs], hne, fun o ho => ?_⟩
+    obtain ⟨d, rfl, _⟩ := hall o ho
+    rfl
 
 /-- Every element's put and get are events of the program. -/
 def WF (p : Prog) : Prop :=
   ∀ (k : Nat) (e : Elem), p.elems[k]? = some e → (∀ s, e.src = some s → s < p.graph.size) ∧
-    (∀ d, e.dst = some d → d < p.graph.size)
+    (∀ (i d : Nat), e.dsts[i]? = some (some d) → d < p.graph.size)
 
 theorem fired_of_needed {F : List Label} {l : Label} (hw : WF p) (hi : Inv p F) (hd : Done p F)
     (hn : Needed p l) : l ∈ F := by
@@ -518,10 +564,9 @@ theorem fired_of_needed {F : List Label} {l : Label} (hw : WF p) (hi : Inv p F) 
     intro k e hk hs
     obtain ⟨s, hs⟩ := Option.isSome_iff_exists.mp hs
     exact ((hi _ (hd s ((hw k e hk).1 s hs))).2.2 k e hk).1 hs
-  have got : ∀ k e, p.elems[k]? = some e → e.dst.isSome → Got F k := by
-    intro k e hk hd'
-    obtain ⟨d, hd'⟩ := Option.isSome_iff_exists.mp hd'
-    exact ((hi _ (hd d ((hw k e hk).2 d hd'))).2.2 k e hk).2 hd'
+  have got : ∀ (k : Nat) (e : Elem) (i d : Nat), p.elems[k]? = some e → e.dsts[i]? = some (some d) → Got F k i := by
+    intro k e i d hk hd'
+    exact ((hi _ (hd d ((hw k e hk).2 i d hd'))).2.2 k e hk).2 i hd'
   cases l with
   | start v => exact (hi _ (hd v hn)).2.1
   | finish v => exact hd v hn
@@ -536,9 +581,9 @@ theorem fired_of_needed {F : List Label} {l : Label} (hw : WF p) (hi : Inv p F) 
     · exact h
     · obtain ⟨e', hk', hb', _⟩ := hi _ h
       rw [hk] at hk'; cases hk'; rw [hb] at hb'; cases hb'
-  | pull k =>
-    obtain ⟨e, hk, hb, _, hd'⟩ := hn
-    rcases got k e hk hd' with h | h
+  | pull k i =>
+    obtain ⟨e, hk, hb, _, d, hd'⟩ := hn
+    rcases got k e i d hk hd' with h | h
     · exact h
     · obtain ⟨e', hk', hb', _⟩ := hi _ h
       rw [hk] at hk'; cases hk'; rw [hb] at hb'; cases hb'

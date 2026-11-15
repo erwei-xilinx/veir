@@ -307,7 +307,8 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
           let unfinished := (List.range p.events.size).filter fun v => !fired.contains (.finish v)
           let waiting := (List.range cp.elems.size).filter fun k =>
             match cp.elems[k]? with
-            | some e => e.dst.isSome && !Chan.gotH fired k || e.src.isSome && !Chan.sentH fired k
+            | some e => (List.range e.dsts.length).any (fun i => e.dsts[i]?.join.isSome && !Chan.gotH fired k i) ||
+                e.src.isSome && !Chan.sentH fired k
             | none => false
           chanLines := chanLines ++ [s!"  DEADLOCK (proven, Chan.checkH_false): no execution completes; these events never finish: {", ".intercalate (unfinished.map eventAt)}"]
           if let some k := waiting.head? then

@@ -16,11 +16,12 @@
 // RACES-NEXT:  no deadlock
 // RACES-LABEL: @order_race:
 // RACES-NEXT:  error: channel order race (D33): two puts on @C[] (events 0 and 1) with no token path between them
-// Broadcast is not in the proven model yet (README, open work).
 // RACES-LABEL: @broadcast:
-// RACES-NEXT:  error: not covered: event 0: a put feeding 2 subchannels (broadcast)
+// RACES-NEXT:  no deadlock (proven, Chan.checkH_true)
+// D29: a broadcast element reaches every destination at once, so with one destination missing the
+// stream does not move: neither the put nor the other destination's get finishes.
 // RACES-LABEL: @broadcast_missing:
-// RACES-NEXT:  error: not covered: event 0: a put feeding 2 subchannels (broadcast)
+// RACES-NEXT:  DEADLOCK (proven, Chan.checkH_false): no execution completes; these events never finish: event 0 (air.channel.put), event 1 (air.channel.get)
 // RACES-LABEL: @starved_get:
 // RACES-NEXT:  DEADLOCK (proven, Chan.checkH_false): no execution completes; these events never finish: event 1 (air.channel.get)
 // RACES-LABEL: @padding:
@@ -30,7 +31,8 @@
 // INTERP-LABEL: @rendezvous_deadlock: deadlocks
 // INTERP-LABEL: @stream_split: {{.*}}%arg1 = [0 : i32, 1 : i32, 2 : i32, 3 : i32], %arg2 = [4 : i32, 5 : i32, 6 : i32, 7 : i32]
 // INTERP-LABEL: @order_race: not covered
-// INTERP-LABEL: @broadcast: not covered
+// INTERP-LABEL: @broadcast: {{.*}}%arg1 = [0 : i32, 1 : i32, 2 : i32, 3 : i32], %arg2 = [0 : i32, 1 : i32, 2 : i32, 3 : i32]
+// INTERP-NEXT:  race-free: every execution ends with this memory
 // INTERP-LABEL: @padding: %arg0 = [0 : i32, 1 : i32], %arg1 = [0 : i32, 0 : i32, 0 : i32, 1 : i32, 0 : i32]
 
 // Decision D50 -- on a [1, 1] channel, @C[] is subchannel [0, 0].

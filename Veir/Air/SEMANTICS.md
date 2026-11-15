@@ -59,9 +59,9 @@ is wrong; the replacement is pending or recorded).
 | D49 | (1) `air.custom` is an event (async with a result, blocking without), reading and writing each memref operand whole, opaque values. (2) `memref.alloc {air.symmetric}` belongs in an `air.rank` body: one buffer per rank, a family. (3) A cross-rank DMA side (`src_rank`/`dst_rank` = R) addresses rank R's buffer of the family; ranks are ordered only through channels. (4) `air.translate %src, %from, %to` is rank `%to`'s buffer of `%src`'s family, `%src` must be rank `%from`'s; heap bases play no part | ✅ 2026-11-14 ("1 2 3 4 都对") | `Instance.lean`: `symmetricBuffer`, `peerBuffer`, `translateInstance`, `customInstance` | AIR-021 |
 | D50 | On a channel whose every dimension has size 1 (e.g. `[1, 1]`), an endpoint with no indices (`@C[]`) names subchannel `[0, ..., 0]`, as `aircc` connects them | ✅ 2026-11-14 ("D50 对") | `channelInstance` | — |
 | D51 | Whether a transfer is buffered (D30) is decided per element: an element is buffered iff its put or its get is sync (a missing end counts as async). Within one subchannel elements are FIFO: none enters before, or leaves before, the one ahead of it | ✅ 2026-11-14 ("好") | `Veir.Air.ChanSem` (`Elem.buffered`, `En`) | `Chan.completes_from_anywhere`, `Chan.check_true`, `Chan.check_false`, `Chan.deterministic` |
-| D52 | Puts from different subchannels routed (`dest`, packet flows) to one destination with no token order between them: (a) an error, as D33; or (b) each put's elements arrive contiguously, the puts in any order (T8 at the AIE level) | ❓ pending | refused (`ChanGlue`: "packet fan-in") | — |
+| D52 | Puts from different subchannels routed (`dest`, packet flows) to one destination with no token order between them: each put's elements arrive contiguously, the puts in any order (T8 at the AIE level). Not an error: the order can be dynamic and unknowable at compile time | ✅ 2026-11-15 ("B 因为顺序可能是dynamic的无法compile time 提前得知") | not yet encoded (refused by `ChanGlue`) | — |
 | D53 | A broadcast from an async put to some sync and some async gets: is each element buffered (D51 with "any get sync") or a rendezvous with the async gets? | ❓ pending | refused (`ChanGlue`) | — |
-| D54 | `air.channel.issue` (#2261) with the channel op tagged `air.device_issue`: see the proposal below | ❓ pending | not modelled | — |
+| D54 | `air.channel.issue` (#2261) with the channel op tagged `air.device_issue`: points 1-5 below | ✅ 2026-11-15 ("对") | not yet encoded | — |
 | D22a | Refinement of D22 (2026-11-14): `memref.copy` between whole buffers (no view, no strided layout, equal sizes) copies element by element, as upstream MLIR defines it. Its footprint is unchanged (reads the source, writes the destination); other uninterpreted ops stay opaque | upstream semantics; no AIR decision involved | `finishExecute` | — |
 
 ## D1. Blocking `air.wait_all` ✅
@@ -408,10 +408,10 @@ Confirmed 2026-11-13:
 `docs/AIRComputeModel.md`'s `depth` attribute (default 1) does not exist, and contradicts D30
 (AIR-010).
 
-## D54 (pending). `air.channel.issue`
+## D54. `air.channel.issue` (✅ 2026-11-15)
 
 Read from mlir-air `9848a566f` (the op's description in `AIR.td`, its verifier, `air-dma-to-channel`,
-`eraseIssue` and `air.device_issue_count` in `AIRToAIEPass.cpp`). Proposed reading, not encoded:
+`eraseIssue` and `air.device_issue_count` in `AIRToAIEPass.cpp`), and confirmed:
 1. A channel op tagged `air.device_issue = i` (with `air.device_issue_count = N`, default 1) and the
    `air.channel.issue` ops with `issue_id = i` together make N transfers of that channel op. The
    k-th issue starts the k-th transfer.

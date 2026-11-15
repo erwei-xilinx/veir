@@ -14,3 +14,8 @@
 
 // Two tiles issue for one transfer (D54.5).
 // COUNT: issue_id 0: 2 air.channel.issue(s) for 1 transfer(s) tagged air.device_issue in one launch instance (D54)
+
+// Decision D58: air.device_issue_count = 2 is two transfers in order, each shifted by its issue's
+// offset (0, then 8).
+// RUN: air-veir outcome --allow-unregistered-dialect %S/Inputs/d58_count.mlir 2>/dev/null | filecheck %s --check-prefix=COUNTED
+// COUNTED: @counted: %arg0 = [0..15], %arg1 = [0..3, 8..11]

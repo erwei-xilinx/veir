@@ -681,22 +681,36 @@ partial def channelInstance (ctx : IRContext OpCode) (op : OperationPtr)
   let kind : EventKind :=
     if isPut then (if blocking then .putBlocking else .put)
     else (if blocking then .getBlocking else .get)
-  let ev : Event := { op := op, kind := kind, operandEvents := deps.toArray, implicitDeps := [],
-                      dataDeps := dataDeps, body := #[], yields := #[] }
-  let id ← pushEvent ev { env := captured, path := path }
-  -- D54: a transfer an `air.channel.issue` starts. One transfer per issue; more
-  -- (`air.device_issue_count`) are not modelled yet.
+  -- D54: a transfer an `air.channel.issue` starts; D58: `air.device_issue_count = N` makes it N
+  -- transfers, the k-th started by the k-th issue, and its token waits for all N.
   let attrOf (n : String) : Option Int :=
     match (((op.getAttributes! ctx).entries.find? (·.1 == n.toUTF8)).map (·.2) : Option Attribute) with
     | some (.integerAttr i) => some i.value
     | _ => none
   let issueId := (attrOf "air.device_issue").map Int.toNat
-  if let some cnt := attrOf "air.device_issue_count" then
-    if cnt != 1 then
-      throw s!"{what}: air.device_issue_count = {cnt}: several transfers started by issues are not modelled yet (D54)"
+  let count := ((attrOf "air.device_issue_count").getD 1).toNat
+  if count == 0 then throw s!"{what}: air.device_issue_count = 0"
   let info : ChanInfo := { chan := chan, isPut := isPut, indices := indices, side := side,
                            padBefore := padBefore, padAfter := padAfter, dest := dest, issueId }
-  modify fun st => { st with chans := st.chans.insert id info }
+  if count == 1 then
+    let ev : Event := { op := op, kind := kind, operandEvents := deps.toArray, implicitDeps := [],
+                        dataDeps := dataDeps, body := #[], yields := #[] }
+    let id ← pushEvent ev { env := captured, path := path }
+    modify fun st => { st with chans := st.chans.insert id info }
+    if !blocking then return env.insert (.opResult ⟨op, 0⟩) (.tok id)
+    return env
+  -- The N transfers come from one op in a loop: in order, each after the one before.
+  let mut ids : Array Nat := #[]
+  for _ in [0:count] do
+    let ev : Event := { op := op, kind := if isPut then .put else .get,
+                        operandEvents := deps.toArray ++ ids.back?.toArray,
+                        implicitDeps := [], dataDeps := dataDeps, body := #[], yields := #[] }
+    let id ← pushEvent ev { env := captured, path := path }
+    modify fun st => { st with chans := st.chans.insert id info }
+    ids := ids.push id
+  let join : Event := { op := op, kind := if blocking then .waitAllBlocking else .waitAll,
+                        operandEvents := ids, implicitDeps := [], dataDeps := [], body := #[], yields := #[] }
+  let id ← pushEvent join { path := path }
   if !blocking then return env.insert (.opResult ⟨op, 0⟩) (.tok id)
   return env
 

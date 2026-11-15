@@ -1,0 +1,31 @@
+module {
+  air.channel @cin [1, 1]
+  // D58: air.device_issue_count = 2: two transfers of src[0..4) shifted by each issue's offset
+  // (0, then 8), in order; the put's token waits for both.
+  func.func @counted(%src: memref<16xi32>, %out: memref<8xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%l) in (%ls=%c1) args(%a=%src, %o=%out) : memref<16xi32>, memref<8xi32> {
+      %c0 = arith.constant 0 : index
+      %c4 = arith.constant 4 : index
+      %u1 = arith.constant 1 : index
+      %p = air.channel.put async @cin[%c0, %c0] (%a[%c0] [%c4] [%u1]) {air.device_issue = 0 : i64, air.device_issue_count = 2 : i64} : (memref<16xi32>)
+      air.segment @seg args(%so=%o) : memref<8xi32> {
+        %s1 = arith.constant 1 : index
+        air.herd @router tile (%x, %y) in (%sx=%s1, %sy=%s1) {
+          %z = arith.constant 0 : i64
+          %e = arith.constant 8 : i64
+          air.channel.issue @cin[%x, %y] offset(%z : i64) {issue_id = 0 : i64}
+          air.channel.issue @cin[%x, %y] offset(%e : i64) {issue_id = 0 : i64}
+        }
+        air.herd @mvm tile (%x, %y) in (%sx=%s1, %sy=%s1) args(%oo=%so) : memref<8xi32> {
+          %buf = memref.alloc() : memref<8xi32, 2 : i32>
+          air.channel.get @cin[%x, %y] (%buf[] [] []) : (memref<8xi32, 2 : i32>)
+          air.dma_memcpy_nd (%oo[] [] [], %buf[] [] []) : (memref<8xi32>, memref<8xi32, 2 : i32>)
+          memref.dealloc %buf : memref<8xi32, 2 : i32>
+        }
+      }
+      %w = air.wait_all async [%p]
+    }
+    return
+  }
+}

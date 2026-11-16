@@ -20,7 +20,9 @@ Scalar (index, integer) arguments: a chunk whose functions take any is analysed 
 in 0, 1, 2, 3 and the `scf.index_switch` case values in it, every scalar argument getting that
 value (`--args`). Each verdict holds for its input (D59). A function's verdict is the worst over
 the values (introduced > output only > inherited > fragment > ok), listed per value when they
-differ. Chunks without scalar arguments are analysed once. After each function with branch ops
+differ. Chunks without scalar arguments are analysed once. While some branch region is unreached, vectors
+whose arguments differ (one of the first 4 positions changed) are tried as well. After each
+function with branch ops
 (`scf.if`, `affine.if`, `scf.index_switch`), the regions no value reached on the input are listed:
 those parts of the program were not checked. Coverage is reported by the instantiation (glue), not
 proven.
@@ -42,8 +44,10 @@ ASYNC_RANK = ["async bad", "async fragment", "async ok"]
 
 def analyse(path, value):
     """{function: [deadlock, races, errors, fragment, branches]}, or a refusal string. `branches`
-    is a list of (name, regions, taken regions)."""
-    args = ["--args=" + ",".join([str(value)] * 16)]
+    is a list of (name, regions, taken regions). `value` is one integer for every scalar argument,
+    or a tuple of them in order."""
+    vec = list(value) if isinstance(value, tuple) else [value]
+    args = ["--args=" + ",".join(str(x) for x in (vec + [vec[-1]] * 16)[:16])]
     try:
         v = subprocess.run([AIR_VEIR, "races", "--allow-unregistered-dialect"] + args + [path],
                            capture_output=True, text=True, timeout=300)
@@ -169,6 +173,50 @@ def main():
                             v = "ok"
                         per.setdefault(fn, []).append((val, v, show(t) + why))
                         cov.setdefault(fn, []).append(i[fn][4] if not isinstance(i, str) and fn in i else t[4])
+                # Branch regions still unreached: try arguments that differ, one position at a
+                # time (up to 4 positions), until every region is reached.
+                def unreached():
+                    left = 0
+                    for fn in cov:
+                        runs = [c for c in cov[fn] if c]
+                        if not runs:
+                            continue
+                        for j, (_, n, _) in enumerate(runs[0]):
+                            took = set().union(*[set(c[j][2]) for c in runs if j < len(c)])
+                            left += n - len(took & set(range(n)))
+                    return left
+                if len(values) > 1 and per and unreached():
+                    extra = [tuple(u if q != p else w for q in range(4))
+                             for p in range(4) for u in values for w in values if w != u]
+                    for vec in extra:
+                        if not unreached():
+                            break
+                        t_in = analyse(pi if is_async or same else po, vec)
+                        if isinstance(t_in, str):
+                            continue
+                        for fn, t in t_in.items():
+                            if fn in cov:
+                                cov[fn].append(t[4])
+                                if is_async:
+                                    v = "async fragment" if t[3] else ("async bad" if bad(t) else "async ok")
+                                    per[fn].append((vec, v, show(t)))
+                        if not is_async:
+                            o = analyse(po, vec)
+                            if isinstance(o, str) or not same:
+                                continue
+                            for fn, t in o.items():
+                                if fn not in per or fn not in t_in:
+                                    continue
+                                i_t = t_in[fn]
+                                if bad(t) and i_t[3]:
+                                    v = "fragment"
+                                elif bad(t) and not bad(i_t):
+                                    v = "introduced"
+                                elif bad(i_t):
+                                    v = "inherited"
+                                else:
+                                    v = "ok"
+                                per[fn].append((vec, v, show(t)))
                 if not per:
                     val, why = refusals[0]
                     print(f"{tag}: REFUSED: {why}")
@@ -202,7 +250,7 @@ def main():
                         if left:
                             missing.append(f"#{j} {name} regions {left} of {n}")
                     if missing:
-                        print(f"{tag} @{fn}: not reached by {values}: " + "; ".join(missing))
+                        print(f"{tag} @{fn}: not reached by {values} (and mixed vectors): " + "; ".join(missing))
     print("totals:", totals)
     print(f"branch regions reached on the inputs: {arms[0]} of {arms[1]}")
 

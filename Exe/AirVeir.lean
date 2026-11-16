@@ -476,6 +476,10 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
         {eventAt r.second}, with no token path between them"
     for i in issues do
       IO.println s!"  event {i.event}{pathStr ip.ctxs[i.event]!.path}: {i.msg}"
+    unless ip.branches.isEmpty do
+      let parts := ip.branches.toList.zipIdx.map fun ((n, k, rs), i) =>
+        s!"#{i} {n} took {rs} of {k} region(s)"
+      IO.println s!"  branches reached by this input (coverage, not a verdict): {"; ".intercalate parts}"
     let chanBad := chanLines.any fun l => l.startsWith "  error" || l.startsWith "  DEADLOCK" ||
       l.startsWith "  internal" || l.startsWith "  races not" || l.startsWith "  race"
     if !reports.isEmpty || !issues.isEmpty || chanBad || !ip.complete then clean := false

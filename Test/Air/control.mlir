@@ -6,6 +6,11 @@
 // RUN: air-veir run --allow-unregistered-dialect %S/Inputs/control.mlir 2>/dev/null | filecheck %s --check-prefix=INTERP
 // RUN: not air-veir races --allow-unregistered-dialect %S/Inputs/refuse_runtime_branch.mlir 2>&1 | filecheck %s --check-prefix=RUNTIME
 
+// RUN: not air-veir races --allow-unregistered-dialect %S/Inputs/control.mlir 2>/dev/null | filecheck %s --check-prefix=COV
+// Which branch regions the input reached (coverage, from the instantiation): one tile per region.
+// COV-LABEL: @if_on_tile:
+// COV: branches reached by this input (coverage, not a verdict): #0 scf.if took [0, 1] of 2 region(s)
+
 // RACES-LABEL: @if_on_tile: 4 event(s), 2 buffer(s), 0 race(s)
 // RACES-LABEL: @apply_offset: 4 event(s), 2 buffer(s), 0 race(s)
 // RACES-LABEL: @affine_if: 3 event(s), 2 buffer(s), 0 race(s)

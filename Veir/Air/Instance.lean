@@ -120,6 +120,10 @@ structure IProgram where
   /-- The contents the user gave for memref arguments, by argument position among the memrefs
   (D59: verdicts hold for that input). -/
   argData : Std.HashMap Nat (Array Int) := {}
+  /-- Every branch op of the function in program order (`scf.if`, `affine.if`,
+  `scf.index_switch`): its name, how many regions it has, and the regions that ran. Not a verdict:
+  it says which parts of the program the input reached. -/
+  branches : Array (String × Nat × List Nat) := #[]
 deriving Inhabited
 
 /-- Whether every decision's value was known, so the whole program was instantiated. -/
@@ -158,6 +162,8 @@ structure IState where
   decisions : Std.HashMap ResultKey Int := {}
   decides : Array Decision := #[]
   resultKeys : Std.HashMap (Nat × Nat) ResultKey := {}
+  /-- The regions each branch op ran, over all its instances (for coverage reports). -/
+  taken : Std.HashMap OperationPtr (List Nat) := {}
   /-- Set when a decision's value is not known: the rest of the hierarchy instance (or function)
   is not walked. All of it would wait for the decision, which blocks (D60). -/
   cut : Bool := false
@@ -1047,6 +1053,9 @@ partial def branchInstance (ctx : IRContext OpCode) (op : OperationPtr)
   let what := s!"'{opName ctx op}'{pathStr path}"
   let some cenv ← controlEnv ctx op (op.getOperands! ctx).toList env path | return env
   let some r ← chosenRegion ctx op cenv what | return env
+  let rs := (← get).taken.getD op []
+  let rs := if rs.contains r then rs else (rs ++ [r]).mergeSort
+  modify fun st => { st with taken := st.taken.insert op rs }
   if r ≥ op.getNumRegions! ctx then
     if op.getNumResults! ctx = 0 then return env
     throw s!"{what}: the chosen region does not exist"
@@ -1157,6 +1166,19 @@ partial def parallelLoop (ctx : IRContext OpCode) (op : OperationPtr)
 
 end
 
+/-- The ops nested in an op's regions, in program order. -/
+partial def nestedOps (ctx : IRContext OpCode) (op : OperationPtr) : Array OperationPtr := Id.run do
+  let mut out := #[]
+  for r in [0:op.getNumRegions! ctx] do
+    -- AIR's regions have one block.
+    let some b := (op.getRegion! ctx r).getFirstBlock! ctx | continue
+    for o in blockOps ctx b do
+      out := out.push o
+      out := out ++ nestedOps ctx o
+  return out
+
+def branchOpNames : List String := ["scf.if", "affine.if", "scf.index_switch"]
+
 /-- Instantiate a function, with the given scalar arguments (others are unknown) and the values
 of event results decided so far (D59). -/
 def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : List Int)
@@ -1219,7 +1241,11 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
            resultBufs := st.resultBufs, viewResults := st.viewResults, viewPos := st.viewPos,
            argBufs, loops := st.loops,
            chanDecls := st.chanDecls, chans := st.chans, issues := st.issues, inits := st.inits,
-           decides := st.decides, resultKeys := st.resultKeys }
+           decides := st.decides, resultKeys := st.resultKeys,
+           branches := (nestedOps ctx func).filterMap fun o =>
+             let n := opName ctx o
+             if branchOpNames.contains n then some (n, o.getNumRegions! ctx, st.taken.getD o [])
+             else none }
 
 /-! ### Running -/
 

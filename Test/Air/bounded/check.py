@@ -5,10 +5,10 @@ For every program gen.py produces up to the given size, check:
 
   import  air-opt accepts it; VeIR reads and prints it, and the result is identical to the input
           once both are normalised by air-opt.
-  C2      progress: the dependencies allow at least one complete finishing order.
-  C3      (--data only) race detection is exact: `air-veir graph` warns about an unordered read
-          exactly when some allowed order computes something different (a fault); without a
-          warning, every allowed order computes the same values.
+  C2      progress: some execution completes (`air-veir run`, proven model: Chan.checkH).
+  C3      (--data only) `air-veir graph` warns about a read of an event's result not ordered
+          after the event exactly when `air-veir run` reports a race (Chan.racesOk); without
+          data, no program races.
   C5      the model's reduction, re-verified by air-opt, passes `air-veir check`; and so does the
           output of AIR's own air-dependency-canonicalize.
 
@@ -87,21 +87,23 @@ def check_file(air_opt, path, data, tmp, report):
     if data:
         g = run([AIR_VEIR, "graph", path])
         warns = {f: any("warning:" in l for l in ls) for f, ls in per_func(g.stdout).items()}
+    # `run` answers from the proven channel model: "deadlocks" (Chan.checkH_false), or the outcome
+    # with "race-free" (Chan.outcome_uniqueH) or "races".
     for f, lines in runs.items():
-        m = next((re.search(r"(\d+) finishing order\(s\) allowed.*?(\d+) distinct outcome", l)
-                  for l in lines if "finishing order" in l), None)
-        if not m:
+        text = "\n".join(lines)
+        if "deadlocks" in text:
+            fail(f"@{f}: C2 no complete execution")
+            continue
+        raced = any(l.startswith("  races") for l in lines)
+        if not raced and not any(l.startswith("  race-free") for l in lines):
             fail(f"@{f}: no run summary")
             continue
-        orders, outcomes = int(m.group(1)), int(m.group(2))
-        if orders < 1:
-            fail(f"@{f}: C2 no complete finishing order")
         if data:
             racy = warns.get(f, False)
-            if racy != (outcomes > 1):
-                fail(f"@{f}: C3 warning={racy} but {outcomes} distinct outcome(s)")
-        elif outcomes != 1:
-            fail(f"@{f}: {outcomes} distinct outcomes without data")
+            if racy != raced:
+                fail(f"@{f}: C3 warning={racy} but run reports races={raced}")
+        elif raced:
+            fail(f"@{f}: races without data")
 
     # C5: the model's reduction.
     red = os.path.join(tmp, "r.mlir")

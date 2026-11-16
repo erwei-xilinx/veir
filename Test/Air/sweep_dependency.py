@@ -73,6 +73,8 @@ def analyse(path, value):
             out[cur][2] += line.startswith("  error")
         elif cur and line.startswith("  error"):
             out[cur][2] += 1
+    if not out and v.returncode not in (0, 1):
+        return f"air-veir exited with {v.returncode} and no output"
     return out
 
 

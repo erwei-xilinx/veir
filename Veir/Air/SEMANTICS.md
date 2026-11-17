@@ -35,7 +35,7 @@ is wrong; the replacement is pending or recorded).
 | D24 | `air.dma_memcpy_nd` without `async` is synchronous: it runs in program order, and the host waits for it | ✅ 2026-11-13 | `EventKind.dmaBlocking`, `Event.implicitDeps` | `steps_between_iff` (implicit edges) |
 | D25 | A synchronous op waits only for its own dependencies, not for earlier async ops it does not name | ✅ 2026-11-13 | `extractMem` | — |
 | D26 | `scf.for` iterations are issued in program order; only the tokens `iter_args` carry order iteration N+1 after N | from `docs/AIRComputeModel.md` ("an op that does not depend on `%t_prev` may begin before iteration N's `scf.yield` fires"); consistent with D3, D25 | `Veir.Air.Instance.forLoop` | — |
-| D27 | `scf.parallel` iterations are all concurrent; the result is the reduction of their values (`air.wait_all` joins) | from `docs/AIRComputeModel.md` ("all instances concurrent, tokens reduced") | `Veir.Air.Instance.parallelLoop` | — |
+| D27 | `scf.parallel` iterations are all concurrent; the result is the reduction of their values (`air.wait_all` joins). A blocking op (D45) inside an iteration orders only the rest of that iteration; after the loop the host waits for every iteration's blocking ops. `scf.forall` (without `shared_outs`) and `affine.parallel` (without reductions) are the same | from `docs/AIRComputeModel.md` ("all instances concurrent, tokens reduced"); blocking per iteration and `scf.forall`/`affine.parallel` ✅ 2026-11-17 ("only block this iteration"; "same as scf.parallel") | `Veir.Air.Instance.parallelIterations`, `parallelLoop`, `forallLoop`, `affineParallelLoop` | — |
 | D28 | A channel's `size` is a bundle of independent subchannels (any rank); each subchannel (one index) is its own FIFO | ✅ 2026-11-13 | layer 4 | — |
 | D29 | A channel is a spatial hardware stream between tiles. Without `broadcast_shape` it is one-to-one; with it, every put is consumed by N gets at different tiles, simultaneously. With `dest`, a packet flow routes each put to one destination chosen at run time | ✅ 2026-11-13 | layer 4 | — |
 | D30 | A transfer is buffered (unbounded) if either of its ends is sync, and a rendezvous (no buffer, so backpressure deadlock is possible) if both are async | ✅ 2026-11-13 | layer 4 | — |
@@ -362,6 +362,14 @@ iterations is added.
 - the result is the fold of the `scf.reduce` regions over the iterations' values, in iteration
   order. For the `air.wait_all` joins AIR uses, the order does not matter: the result waits for
   every iteration either way.
+- a blocking op inside an iteration (D45) orders only the rest of that iteration, as a sync op in
+  a hierarchy instance (D39); once the loop is done, the host waits for every iteration's blocking
+  ops. Before 2026-11-17 a blocking op held back every later iteration, which hid races between
+  iterations (`Test/Air/parallel_loops.mlir`).
+- `scf.forall` and `affine.parallel` mean the same (confirmed 2026-11-17). `affine.parallel`'s
+  dimension i runs from the largest of its group of `lowerBoundsMap` results to the smallest of its
+  group of `upperBoundsMap` results. `scf.forall`'s `mapping` does not change the meaning;
+  `shared_outs` and `affine.parallel` reductions are refused.
 
 ## D28–D32. Channels (layer 4)
 

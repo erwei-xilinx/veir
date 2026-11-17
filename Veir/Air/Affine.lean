@@ -155,6 +155,16 @@ def numDims (keyword s : String) : Nat :=
     | .error _ => 0
   | .error _ => 0
 
+/-- How many symbols `keyword<(d0, ...)[s0, ...]...>` declares. -/
+def numSyms (keyword s : String) : Nat :=
+  match body keyword s with
+  | .ok b => match idList "(" ")" (tokenize b) with
+    | .ok (_, r@(.sym "[" :: _)) => match idList "[" "]" r with
+      | .ok (ss, _) => ss.length
+      | .error _ => 0
+    | _ => 0
+  | .error _ => 0
+
 /-- Evaluate `affine_map<(dims)[syms] -> (e1, ..., en)>`. -/
 def evalMap (s : String) (dims syms : List Int) : Except String (List Int) := do
   let (env, r) ← bind (tokenize (← body "affine_map" s)) dims syms

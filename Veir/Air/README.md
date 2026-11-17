@@ -40,6 +40,7 @@ What the proven checks give, for any program the glue accepts:
 | AIE: "exactly the reachable states" | `Aie.Cert.exact` | the listed verdicts are all of the model's |
 
 Covered: `air.execute`, `air.wait_all`, tokens, `scf.for`/`scf.parallel`, `affine.for`,
+`scf.forall`/`affine.parallel`,
 `affine.load`/`affine.store`, `scf.if`/`affine.if`/
 `scf.index_switch`, `air.dma_memcpy_nd` (element by element when its pattern is known, D20/D21),
 channels (D28-D36, D51), broadcast (D29, D53), unordered puts into one stream (D52, one model per
@@ -189,6 +190,7 @@ open, and the ninth of a stack. Its own diff adds `Veir/Interpreter/Netlist.lean
 | `memref.copy`, `linalg.*` and any other op in `air.execute` | unregistered; round-trips | — | opaque values; read/write of whole operand buffers (D22) | footprints |
 | `affine_map<…>`, `affine_set<…>` | verbatim, no meaning | — | — | — |
 | `scf.for`, `scf.parallel` (host level) | unregistered; round-trips | — | instantiated iteration by iteration (D26, D27); bounds must be known (`--args`) | graph and race theorems apply to the instances |
+| `scf.forall` (no `shared_outs`), `affine.parallel` (no reductions) (host level) | round-trips | — | as `scf.parallel` (D27): every point concurrent, a blocking op orders only its iteration; `affine.parallel` bounds are max/min per dimension group | graph and race theorems apply to the instances |
 | `affine.for` (host level) | round-trips | — | as `scf.for` (D26), with upstream bounds: the largest result of `lowerBoundMap`, the smallest of `upperBoundMap`, a constant `step` | as `scf.for` |
 | `affine.load`, `affine.store` | round-trips | — | as `memref.load`/`store`, at the element their `map` computes (at host level a blocking event, D45) | footprints |
 | `air.channel` declarations | `--allow-unregistered-dialect`; round-trips (after the VEIR-002 fix) | — | bundles of subchannels (D28); `broadcast_shape` (D29) | — |

@@ -655,6 +655,16 @@ def iterationPoints (sizes : List Int) : List (List Int) :=
   sizes.foldr (init := [[]]) fun n acc =>
     (List.range n.toNat).flatMap fun (k : Nat) => acc.map fun rest => (k : Int) :: rest
 
+/-- The integers of a `dense<...>` attribute with `n` elements: a list, or a splat. -/
+def denseIntList (a : Option Attribute) (n : Nat) : Option (List Int) := do
+  let txt := Attribute.toString (← a)
+  let inner := ((txt.splitOn "dense<").getD 1 "").takeWhile (· != '>') |>.toString
+  if inner.startsWith "[" then
+    ((inner.drop 1).takeWhile (· != ']') |>.toString.splitOn ",").mapM fun t => t.trimAscii.toString.toInt?
+  else
+    let v ← inner.trimAscii.toString.toInt?
+    pure (List.replicate n v)
+
 mutual
 
 /-- Walk a block's operations (without its terminator) as the host does. -/
@@ -723,6 +733,8 @@ partial def walkOps (ctx : IRContext OpCode) (ops : Array OperationPtr)
       else if name == "scf.for" then env ← forLoop ctx op env path
       else if name == "affine.for" then env ← affineForLoop ctx op env path
       else if name == "scf.parallel" then env ← parallelLoop ctx op env path
+      else if name == "scf.forall" then env ← forallLoop ctx op env path
+      else if name == "affine.parallel" then env ← affineParallelLoop ctx op env path
       else if hierarchyOps.contains name then env ← hierarchyInstance ctx op env path
       else if name == "air.translate" then env ← translateInstance ctx op env path
       else if name == "air.custom" then env ← customInstance ctx op env path
@@ -1210,6 +1222,38 @@ partial def affineForLoop (ctx : IRContext OpCode) (op : OperationPtr)
     | _ => throw s!"{what}: missing step"
   forIterations ctx op what "affine.yield" lb ub step (operands.extract (nl + nu) operands.size) env path
 
+/-- The iterations of a parallel loop (D27): every point of the iteration space, outermost
+dimension first, with no order between them. A blocking op inside an iteration orders only the
+rest of that iteration; once the loop is done, the host waits for every iteration's blocking ops.
+Returns the values `yields` take in each iteration, or `none` when the instance is cut (D59). -/
+partial def parallelIterations (ctx : IRContext OpCode) (op : OperationPtr) (what : String)
+    (yields : Array ValuePtr) (lbs ubs steps : List Int) (env : Std.HashMap ValuePtr HVal)
+    (path : List Int) : IM (Option (List (List HVal))) := do
+  if steps.any (· ≤ 0) then throw s!"{what}: a non-positive step is not supported"
+  let block ← liftE (singleBlock ctx op what)
+  let args := block.getArguments! ctx
+  let ops := blockOps ctx block
+  modify fun st => { st with loops := st.loops + 1 }
+  let points : List (List Int) :=
+    (lbs.zip (ubs.zip steps)).foldr (init := [[]]) fun (lb, ub, st) acc =>
+      let trips := if ub > lb then ((ub - lb + st - 1) / st).toNat else 0
+      (List.range trips).flatMap fun (k : Nat) => acc.map fun rest => (lb + (k : Int) * st) :: rest
+  let outer := (← get).blocking
+  let mut after : List Nat := []
+  let mut out : List (List HVal) := []
+  for pt in points do
+    modify fun st => { st with blocking := outer }
+    let mut env' := env
+    for a in args, iv in pt do
+      env' := env'.insert a (.val (intVal ctx a iv))
+    env' ← walkOps ctx ops.pop env' (path ++ pt)
+    if (← get).cut then return none
+    for b in (← get).blocking do
+      if !after.contains b then after := after ++ [b]
+    out := out ++ [← yields.toList.mapM fun v => liftE (lookupH env' ctx v what)]
+  modify fun st => { st with blocking := if points.isEmpty then outer else after }
+  return some out
+
 /-- `scf.parallel`: every iteration concurrent; the result is the reduction of the iterations'
 values, folded in iteration order (D27). -/
 partial def parallelLoop (ctx : IRContext OpCode) (op : OperationPtr)
@@ -1230,25 +1274,11 @@ partial def parallelLoop (ctx : IRContext OpCode) (op : OperationPtr)
   let inits ← (operands.extract (3 * n) operands.size).toList.mapM fun v =>
     liftE (lookupH env ctx v what)
   let block ← liftE (singleBlock ctx op what)
-  let args := block.getArguments! ctx
   let ops := blockOps ctx block
   let some term := ops.back? | throw s!"{what}: expected a terminator"
   if opName ctx term != "scf.reduce" then throw s!"{what}: expected the body to end in scf.reduce"
-  modify fun st => { st with loops := st.loops + 1 }
-  -- Every point of the iteration space, outermost dimension first.
-  let points : List (List Int) :=
-    (lbs.zip (ubs.zip steps)).foldr (init := [[]]) fun (lb, ub, st) acc =>
-      let trips := if ub > lb then ((ub - lb + st - 1) / st).toNat else 0
-      (List.range trips).flatMap fun (k : Nat) => acc.map fun rest => (lb + (k : Int) * st) :: rest
-  let mut reduced : List (List HVal) := []
-  for pt in points do
-    let mut env' := env
-    for a in args, iv in pt do
-      env' := env'.insert a (.val (intVal ctx a iv))
-    env' ← walkOps ctx ops.pop env' (path ++ pt)
-    if (← get).cut then return env
-    let vs ← (term.getOperands! ctx).toList.mapM fun v => liftE (lookupH env' ctx v what)
-    reduced := reduced ++ [vs]
+  let some reduced ← parallelIterations ctx op what (term.getOperands! ctx) lbs ubs steps env path
+    | return env
   -- Fold each reduction region over the iterations' values.
   let mut acc := inits
   for vs in reduced do
@@ -1269,6 +1299,85 @@ partial def parallelLoop (ctx : IRContext OpCode) (op : OperationPtr)
   for i in [0:op.getNumResults! ctx], h in acc do
     out := out.insert (.opResult ⟨op, i⟩) h
   return out
+
+/-- `scf.forall` without `shared_outs`: as `scf.parallel` (D27), over its static and dynamic
+bounds. The `mapping` attribute does not change the meaning. -/
+partial def forallLoop (ctx : IRContext OpCode) (op : OperationPtr)
+    (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
+  let what := s!"scf.forall{pathStr path}"
+  let props := unregProps ctx op
+  let some seg := denseInts (findProp props "operandSegmentSizes")
+    | throw s!"{what}: missing operandSegmentSizes"
+  if seg.size != 4 then throw s!"{what}: expected 4 operand segments"
+  if seg[3]! != 0 then throw s!"{what}: shared_outs (tensors) are not supported"
+  let operands := op.getOperands! ctx
+  let nl := seg[0]!.toNat
+  let nu := seg[1]!.toNat
+  let ns := seg[2]!.toNat
+  let some cenv ← controlEnv ctx op (operands.extract 0 (nl + nu + ns)).toList env path | return env
+  let side (key : String) (dyn : Array ValuePtr) : IM (List Int) := do
+    let some stat := denseInts (findProp props key) | throw s!"{what}: missing {key}"
+    let entries ← liftE (decodeList stat dyn)
+    entries.toList.mapM fun
+      | .inl n => pure n
+      | .inr v => liftE (knownInt cenv ctx what v)
+  let lbs ← side "staticLowerBound" (operands.extract 0 nl)
+  let ubs ← side "staticUpperBound" (operands.extract nl (nl + nu))
+  let steps ← side "staticStep" (operands.extract (nl + nu) (nl + nu + ns))
+  let block ← liftE (singleBlock ctx op what)
+  let some term := (blockOps ctx block).back? | throw s!"{what}: expected a terminator"
+  if opName ctx term != "scf.forall.in_parallel" then
+    throw s!"{what}: expected the body to end in scf.forall.in_parallel"
+  let some _ ← parallelIterations ctx op what #[] lbs ubs steps env path | return env
+  return env
+
+/-- `affine.parallel` without reductions, as upstream MLIR defines it: dimension i's lower bound
+is the largest of its group of `lowerBoundsMap` results, its upper bound the smallest of its group
+of `upperBoundsMap` results; then as `scf.parallel` (D27). -/
+partial def affineParallelLoop (ctx : IRContext OpCode) (op : OperationPtr)
+    (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
+  let what := s!"affine.parallel{pathStr path}"
+  let props := unregProps ctx op
+  if op.getNumResults! ctx != 0 then throw s!"{what}: reductions are not supported"
+  let steps ← match findProp props "steps" with
+    | some (.arrayAttr arr) => arr.value.toList.mapM fun
+        | .integerAttr i => pure i.value
+        | _ => throw s!"{what}: a step is not an integer"
+    | _ => throw s!"{what}: missing steps"
+  let n := steps.length
+  let operands := op.getOperands! ctx
+  let some cenv ← controlEnv ctx op operands.toList env path | return env
+  let some lMap := affineText ctx op "lowerBoundsMap" | throw s!"{what}: missing lowerBoundsMap"
+  let some uMap := affineText ctx op "upperBoundsMap" | throw s!"{what}: missing upperBoundsMap"
+  let nl := Affine.numDims "affine_map" lMap + Affine.numSyms "affine_map" lMap
+  let ins ← operands.toList.mapM fun v => liftE (knownInt cenv ctx what v)
+  let eval (map : String) (vs : List Int) : IM (List Int) := do
+    let nDims := Affine.numDims "affine_map" map
+    match Affine.evalMap map (vs.take nDims) (vs.drop nDims) with
+    | .ok rs => pure rs
+    | .error e => throw s!"{what}: {e}"
+  let lrs ← eval lMap (ins.take nl)
+  let urs ← eval uMap (ins.drop nl)
+  let some lg := denseIntList (findProp props "lowerBoundsGroups") n
+    | throw s!"{what}: missing lowerBoundsGroups"
+  let some ug := denseIntList (findProp props "upperBoundsGroups") n
+    | throw s!"{what}: missing upperBoundsGroups"
+  let groups (rs : List Int) (gs : List Int) (pick : Int → Int → Int) : IM (List Int) := do
+    let mut out := []
+    let mut rest := rs
+    for g in gs do
+      let k := g.toNat
+      let some first := rest.head? | throw s!"{what}: a bound group has no result"
+      out := out ++ [(rest.take k).foldl pick first]
+      rest := rest.drop k
+    pure out
+  let lbs ← groups lrs lg max
+  let ubs ← groups urs ug min
+  let block ← liftE (singleBlock ctx op what)
+  let some term := (blockOps ctx block).back? | throw s!"{what}: expected a terminator"
+  if opName ctx term != "affine.yield" then throw s!"{what}: expected the body to end in affine.yield"
+  let some _ ← parallelIterations ctx op what #[] lbs ubs steps env path | return env
+  return env
 
 end
 

@@ -42,7 +42,7 @@ What the proven checks give, for any program the glue accepts:
 Covered: `air.execute`, `air.wait_all`, tokens, `scf.for`/`scf.parallel`, `scf.if`/`affine.if`/
 `scf.index_switch`, `air.dma_memcpy_nd` (element by element when its pattern is known, D20/D21),
 channels (D28-D36, D51), broadcast (D29, D53), unordered puts into one stream (D52, one model per
-order), `air.channel.issue` (D54, D58), per-launch streams (D56), run-time offsets (D23), event
+order), `air.channel.issue` (D54, D58), `air.refeed_count` (D61), per-launch streams (D56), run-time offsets (D23), event
 results as memory (D4, D57), `memref.global`, whole views as transfer ends, hierarchy ops and ranks
 (D37-D49).
 
@@ -197,6 +197,7 @@ open, and the ninth of a stack. Its own diff adds `Veir/Interpreter/Netlist.lean
 | `affine.apply` | round-trips | — | evaluated from the verbatim map (`Affine.lean`: `floordiv`, `ceildiv`, `mod`) when its operands are known, `undef` otherwise | — |
 | non-integer `arith.constant` (float, dense) | refused by VeIR (VEIR-004); `air-veir` renames them to `veir.opaque_constant` | — | opaque values (D22) | — |
 | `air.custom` | round-trips | — | an event (async with a result, blocking without); reads and writes each memref operand whole, opaque values (D49) | footprints |
+| `air.refeed_count` on a put, its channel or the `memref.alloc` of the buffer it sends | round-trips | — | N sends of the put's pattern, in order (D61); a get is unaffected; a counted buffer sent by more than one put is refused | via the instantiated graph |
 | `memref.alloc {air.symmetric}`, cross-rank DMA (`src_rank`/`dst_rank`), `air.translate` | round-trips | — | one buffer per rank as a family; a cross-rank side or a translate addresses rank R's buffer (D49); one-dimensional `air.rank` only | races across ranks through the instantiated graph |
 | `affinity`/`concurrency` lists | `--allow-unregistered-dialect`; round-trips | none | **refused with a diagnostic** (D44) | — |
 

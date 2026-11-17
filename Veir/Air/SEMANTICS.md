@@ -69,6 +69,7 @@ is wrong; the replacement is pending or recorded).
 | D58 | `air.device_issue_count = N`: the tagged op is N transfers, the k-th started by the k-th issue; its token fires once all N have finished. The N transfers are in order, each after the one before (as the loop of puts they come from) | ✅ 2026-11-15 ("the count means all of them complete"; chaining "(a)") | `Instance.channelInstance` | `Chan.*` theorems |
 | D59 | Control flow decided by values events compute (loop bounds, branch conditions read from data on the device) is checked per concrete input: the user gives the host arguments' contents; the model runs the program and instantiates each such loop or branch once the value deciding it is computed. That value is well defined only if the part before it is race-free (then it is unique, `Chan.outcome_uniqueH`); a race there is reported and stops. Verdicts hold for that input | ✅ 2026-11-15 ("OK, agreed") | `Instance.controlEnv` (decision events, cut), `Running.instantiateRunning` (rounds), `--mem` for memref contents | `Chan.decision_reads`, `Chan.value_after_writer` (every execution reads the values used, when the whole program completes race-free) |
 | D60 | A loop bound or branch condition (`scf.for`, `scf.parallel`, `scf.if`, `affine.if`, `scf.index_switch`) that is an `air.execute` result (or computed from one) is read by the control op when the host reaches it: a blocking event, ordered after the execute only by tokens or earlier blocking ops, as D45 and D57. With no such path, the read is a race | ✅ 2026-11-15 ("(a), same as D45/D57") | `EventKind.decide`, `Instance.controlEnv` | `Chan.raceFree_of_racesOk`, `Chan.decision_reads` |
+| D61 | `air.refeed_count = N` on a put is N sends of its pattern, in order, its token firing after the last: the loop of N puts `air-annotate-refeed` collapsed. The count is the put's own, else its channel declaration's, or the one on the `memref.alloc` of the buffer it sends (an L2 producer). A get is unaffected. A counted buffer sent by more than one put is refused (the count is their sum, and each put's share is unknown) | ✅ 2026-11-17 (derived from the compiled IR, as asked: "can you figure this out from the actual ir stack compiled from llms that use this pattern?"); see the D61 section | `Instance.channelInstance`, `Instance.recordRefeed` | `Chan.*` theorems (the sends are ordinary transfers) |
 | D22a | Refinement of D22 (2026-11-14): `memref.copy` between whole buffers (no view, no strided layout, equal sizes) copies element by element, as upstream MLIR defines it. Its footprint is unchanged (reads the source, writes the destination); other uninterpreted ops stay opaque | upstream semantics; no AIR decision involved | `finishExecute` | — |
 
 ## D1. Blocking `air.wait_all` ✅
@@ -429,4 +430,27 @@ Read from mlir-air `9848a566f` (the op's description in `AIR.td`, its verifier, 
 4. An async issue's token fires once the transfer is started, not finished (`eraseIssue`: what waited
    on the token waits on what the issue waited on).
 5. A count of issues other than N per execution of the tagged op is an error.
+
+## D61. `air.refeed_count` (✅ 2026-11-17, derived from the compiled IR)
+
+Read from mlir-air `251927e6c` (`air-annotate-refeed` in `AIRMiscPasses.cpp`, `getRefeedCount`,
+its uses in `AIRToAIEPass.cpp` and `AIRToAIESchedulingUtils.cpp`, the front end's `refeed` helper in
+`programming_examples/fused_decode_ple`) and from the IR `aircc` compiles for dflash `qwen3_4b`
+(target decode):
+1. The front end writes a re-send of one unchanged buffer as an N-trip loop around one put; its
+   docstring: "the consumer still sees n puts". `air-annotate-refeed` erases the loop and records N,
+   on the put for a core (L1) producer, on the source `memref.alloc` for a memtile (L2) one.
+2. In the dflash IR both counts (5 and 5) sit on L2 allocs, each sent by exactly one put
+   (`@xnorm`, 32768 and 77824 elements a send). The consumers get 4096 elements at a time, so
+   only N sends balance the stream (D34).
+3. Lowered, the memtile's fill BD acquires and releases 5 on the buffer's locks and each MM2S send
+   releases 1: one fill enables N sends of the whole pattern.
+4. `air-to-aie` reads a count on the channel declaration for the puts (`getRefeedCount` on a
+   channel op falls back to it), and leaves the consumer unchanged ("inbound release stays 1",
+   `air_channel_producer_refeed.mlir`).
+5. Counts of several loops over one buffer add on its alloc; the lowering then cannot split them
+   per put (`sendsPerFill` gives up) and neither can VeIR: refused.
+
+Before D61, VeIR read such a put as one send and reported a deadlock for every balanced
+re-feed program (`Test/Air/d61.mlir`).
 

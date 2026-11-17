@@ -57,6 +57,9 @@ structure ChanDecl where
   size : List Nat
   broadcast : Option (List Nat)
   type : String
+  /-- D61: `air.refeed_count` on the declaration, the count of every put on the channel that
+  carries none of its own. -/
+  refeed : Option Nat := none
 deriving Inhabited
 
 /-- One channel endpoint: which subchannel, what it moves, and (for a put) the destination a
@@ -167,6 +170,10 @@ structure IState where
   /-- Set when a decision's value is not known: the rest of the hierarchy instance (or function)
   is not walked. All of it would wait for the decision, which blocks (D60). -/
   cut : Bool := false
+  /-- D61: the `air.refeed_count` of each buffer whose `memref.alloc` carries one. -/
+  refeedBufs : Std.HashMap Nat Nat := {}
+  /-- D61: the put that sends each such buffer; a second put on it is refused. -/
+  refeedPut : Std.HashMap Nat OperationPtr := {}
 
 abbrev IM := StateT IState (Except String)
 
@@ -202,6 +209,19 @@ def denseValues (txt : String) (n w : Nat) (b : Nat) : Array Val :=
 /-- Whether an op carries a discardable unit attribute such as `air.symmetric`. -/
 def hasAttrNamed (ctx : IRContext OpCode) (op : OperationPtr) (name : String) : Bool :=
   (op.getAttributes! ctx).entries.any (·.1 == name.toUTF8)
+
+/-- The integer value of a discardable attribute, if it is one. -/
+def intAttrNamed (ctx : IRContext OpCode) (op : OperationPtr) (name : String) : Option Int :=
+  match (((op.getAttributes! ctx).entries.find? (·.1 == name.toUTF8)).map (·.2) : Option Attribute) with
+  | some (.integerAttr i) => some i.value
+  | _ => none
+
+/-- D61: record the `air.refeed_count` a `memref.alloc` carries for the buffer it made. -/
+def recordRefeed (ctx : IRContext OpCode) (alloc : OperationPtr) (b : Nat) (what : String) :
+    IM Unit := do
+  if let some n := intAttrNamed ctx alloc "air.refeed_count" then
+    if n < 1 then throw s!"{what}: air.refeed_count = {n} (D61: it must be at least 1)"
+    modify fun st => { st with refeedBufs := st.refeedBufs.insert b n.toNat }
 
 /-- The single rank index of the rank instance being walked (D49). Cross-rank addressing names a
 rank by one integer, so only a one-dimensional `air.rank` is supported. -/
@@ -429,6 +449,7 @@ def captureBody (ctx : IRContext OpCode) (what : String) (ops : Array OperationP
       let nb ← if hasAttrNamed ctx inner "air.symmetric" then
           symmetricBuffer inner s!"alloc in event {id}{pathStr path}" ty path
         else newBufferI s!"alloc in event {id}{pathStr path}" ty
+      recordRefeed ctx inner nb s!"alloc in event {id}{pathStr path}"
       allocBufs := allocBufs.insert inner nb
       localBuf := localBuf.insert (.opResult ⟨inner, 0⟩) nb
     else if viewOps.contains iname then
@@ -663,6 +684,7 @@ partial def walkOps (ctx : IRContext OpCode) (ops : Array OperationPtr)
         let b ← if hasAttrNamed ctx op "air.symmetric" then
             symmetricBuffer op s!"host alloc{pathStr path}" ty path
           else newBufferI s!"host alloc{pathStr path}" ty
+        recordRefeed ctx op b s!"memref.alloc{pathStr path}"
         env := env.insert (.opResult ⟨op, 0⟩) (.val (.buf b))
       else if name == "memref.get_global" then
         -- Upstream memref.global: one buffer per global, holding its initial value.
@@ -902,6 +924,40 @@ partial def channelInstance (ctx : IRContext OpCode) (op : OperationPtr)
   if count == 0 then throw s!"{what}: air.device_issue_count = 0"
   let info : ChanInfo := { chan := chan, isPut := isPut, indices := indices, side := side,
                            padBefore := padBefore, padAfter := padAfter, dest := dest, issueId }
+  -- D61: `air.refeed_count = N` on a put is N sends of its pattern, in order, as the loop
+  -- air-annotate-refeed collapsed; a get is unaffected. The count is the put's own, else its
+  -- channel's, or the one on the `memref.alloc` of the buffer it sends (an L2 producer).
+  let refeed ← if !isPut then pure 1 else do
+    let own ← match attrOf "air.refeed_count" with
+      | some n => if n < 1 then throw s!"{what}: air.refeed_count = {n} (D61: it must be at least 1)"
+                  else pure (some n.toNat)
+      | none => pure ((← get).chanDecls[chan]? >>= (·.refeed))
+    let some b := staticBuf st captured[memref]! | pure (own.getD 1)
+    let some onBuf := (← get).refeedBufs[b]? | pure (own.getD 1)
+    if let some other := (← get).refeedPut[b]? then
+      if other != op then
+        throw s!"{what}: {(← get).buffers[b]!.name} carries air.refeed_count = {onBuf} and is sent by more than one put; the count is their sum, and each put's share is unknown (D61)"
+    modify fun st => { st with refeedPut := st.refeedPut.insert b op }
+    if let some n := own then
+      if n != onBuf then
+        throw s!"{what}: air.refeed_count {n} on the put differs from {onBuf} on the buffer it sends (D61)"
+    pure onBuf
+  if refeed > 1 && count > 1 then
+    throw s!"{what}: air.refeed_count and air.device_issue_count on one put are not supported (D61)"
+  if refeed > 1 then
+    -- N sends, each of the op's own kind (sync stays buffered, D51), each after the one before.
+    let mut ids : Array Nat := #[]
+    for _ in [0:refeed] do
+      let ev : Event := { op := op, kind := kind, operandEvents := deps.toArray ++ ids.back?.toArray,
+                          implicitDeps := [], dataDeps := dataDeps, body := #[], yields := #[] }
+      let id ← pushEvent ev { env := captured, path := path }
+      modify fun st => { st with chans := st.chans.insert id info }
+      ids := ids.push id
+    if blocking then return env
+    let join : Event := { op := op, kind := .waitAll, operandEvents := ids, implicitDeps := [],
+                          dataDeps := [], body := #[], yields := #[] }
+    let id ← pushEvent join { path := path }
+    return env.insert (.opResult ⟨op, 0⟩) (.tok id)
   if count == 1 then
     let ev : Event := { op := op, kind := kind, operandEvents := deps.toArray, implicitDeps := [],
                         dataDeps := dataDeps, body := #[], yields := #[] }
@@ -1214,7 +1270,11 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
             | some (.stringAttr t) => String.fromUTF8! t.value
             | _ => "npu_dma_stream"
           let name := String.fromUTF8! nm.value
-          decls := decls.insert name { name, size, broadcast, type }
+          let refeed ← match intAttrNamed ctx d "air.refeed_count" with
+            | some n => if n < 1 then throw s!"air.channel @{name}: air.refeed_count = {n} (D61: it must be at least 1)"
+                        else pure (some n.toNat)
+            | none => pure none
+          decls := decls.insert name { name, size, broadcast, type, refeed }
   let go : IM (Std.HashMap ValuePtr HVal × Array Nat) := do
     modify fun st => { st with chanDecls := decls, moduleOps := mops, decisions }
     let mut env : Std.HashMap ValuePtr HVal := {}

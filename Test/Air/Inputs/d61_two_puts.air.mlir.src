@@ -1,0 +1,28 @@
+module {
+  air.channel @in [1, 1]
+  air.channel @mid [1, 2]
+  // D61: the count on a buffer two puts send is their sum; each put's share is unknown: refused.
+  func.func @two_puts(%src: memref<4xi32>, %out: memref<8xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%l) in (%ls=%c1) args(%a=%src, %o=%out) : memref<4xi32>, memref<8xi32> {
+      %c0 = arith.constant 0 : index
+      air.channel.put @in[%c0, %c0] (%a[] [] []) : (memref<4xi32>)
+      air.segment @seg args(%so=%o) : memref<8xi32> {
+        %s0 = arith.constant 0 : index
+        %s1 = arith.constant 1 : index
+        %s2 = arith.constant 2 : index
+        %l2 = memref.alloc() {air.refeed_count = 2 : i32} : memref<4xi32, 1 : i32>
+        air.channel.get @in[%s0, %s0] (%l2[] [] []) : (memref<4xi32, 1 : i32>)
+        air.channel.put @mid[%s0, %s0] (%l2[] [] []) : (memref<4xi32, 1 : i32>)
+        air.channel.put @mid[%s0, %s1] (%l2[] [] []) : (memref<4xi32, 1 : i32>)
+        air.herd @h tile (%x, %y) in (%sx=%s1, %sy=%s2) args(%oo=%so) : memref<8xi32> {
+          %buf = memref.alloc() : memref<4xi32, 2 : i32>
+          air.channel.get @mid[%x, %y] (%buf[] [] []) : (memref<4xi32, 2 : i32>)
+          memref.dealloc %buf : memref<4xi32, 2 : i32>
+        }
+        memref.dealloc %l2 : memref<4xi32, 1 : i32>
+      }
+    }
+    return
+  }
+}

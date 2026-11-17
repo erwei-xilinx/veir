@@ -1,0 +1,32 @@
+module {
+  // affine.for: lower bound max(0, 3 - 5) = 0, upper bound min(7, 3 + 10) = 7, step 2: i = 0, 2,
+  // 4, 6. affine.load reads src[i + 1] through its map.
+  func.func @bounds(%src: memref<8xi32>, %out: memref<8xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%l) in (%ls=%c1) args(%a=%src, %o=%out) : memref<8xi32>, memref<8xi32> {
+      %n = arith.constant 3 : index
+      affine.for %i = max affine_map<()[s0] -> (0, s0 - 5)>()[%n] to min affine_map<()[s0] -> (7, s0 + 10)>()[%n] step 2 {
+        %v = affine.load %a[%i + 1] : memref<8xi32>
+        affine.store %v, %o[%i] : memref<8xi32>
+      }
+    }
+    return
+  }
+  // An affine.for carrying a token: the iterations' executes are ordered by it, so the reads of
+  // %o see each earlier write.
+  func.func @carried(%src: memref<4xi32>, %out: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%l) in (%ls=%c1) args(%a=%src, %o=%out) : memref<4xi32>, memref<4xi32> {
+      %t0 = air.wait_all async
+      %t = affine.for %i = 0 to 4 iter_args(%tk = %t0) -> (!air.async.token) {
+        %e = air.execute [%tk] {
+          %v = affine.load %a[%i] : memref<4xi32>
+          affine.store %v, %o[3 - %i] : memref<4xi32>
+        }
+        affine.yield %e : !air.async.token
+      }
+      air.wait_all [%t]
+    }
+    return
+  }
+}

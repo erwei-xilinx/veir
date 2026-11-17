@@ -477,8 +477,9 @@ def captureBody (ctx : IRContext OpCode) (what : String) (ops : Array OperationP
       if let some sp := srcPos then
         if let some vp := viewPositions ctx inner sp srcShape intOf then
           localViewPos := localViewPos.insert (.opResult ⟨inner, 0⟩) vp
-    else if iname == "memref.load" || iname == "memref.store" then
-      let m := (inner.getOperands! ctx)[if iname == "memref.load" then 0 else 1]!
+    else if iname == "memref.load" || iname == "memref.store" ||
+        iname == "affine.load" || iname == "affine.store" then
+      let m := (inner.getOperands! ctx)[if iname == "memref.load" || iname == "affine.load" then 0 else 1]!
       if localView.contains m then throw s!"{what}: '{iname}' through a view is not supported"
     inBody := inBody.insert inner
   return { captured, dataDeps, allocBufs, localBuf, localView, localViewPos }
@@ -597,7 +598,16 @@ def castOps : List String :=
 
 /-- Ops that are control flow or address arithmetic, not effects: never a synchronous op. -/
 def notSyncOp (name : String) : Bool :=
-  ["scf.", "affine.", "air.", "cf."].any fun (p : String) => name.startsWith p
+  !["affine.load", "affine.store"].contains name &&
+    ["scf.", "affine.", "air.", "cf."].any fun (p : String) => name.startsWith p
+
+/-- `affine.load`/`affine.store`'s indices: its `map` applied to its index operands (dimensions,
+then symbols), as upstream MLIR defines them. -/
+def affineIndices (ctx : IRContext OpCode) (op : OperationPtr) (ns : List Int) :
+    Except String (List Int) := do
+  let some map := affineText ctx op "map" | throw "missing map"
+  let nDims := Affine.numDims "affine_map" map
+  Affine.evalMap map (ns.take nDims) (ns.drop nDims)
 
 /-- `air.translate %src, %from, %to, %bases`: rank `%to`'s buffer of `%src`'s family; `%src` must
 be rank `%from`'s (D49). The heap bases are a runtime detail and play no part. -/
@@ -711,6 +721,7 @@ partial def walkOps (ctx : IRContext OpCode) (ops : Array OperationPtr)
             pure b
         env := env.insert (.opResult ⟨op, 0⟩) (.val (.buf b))
       else if name == "scf.for" then env ← forLoop ctx op env path
+      else if name == "affine.for" then env ← affineForLoop ctx op env path
       else if name == "scf.parallel" then env ← parallelLoop ctx op env path
       else if hierarchyOps.contains name then env ← hierarchyInstance ctx op env path
       else if name == "air.translate" then env ← translateInstance ctx op env path
@@ -1127,24 +1138,18 @@ partial def branchInstance (ctx : IRContext OpCode) (op : OperationPtr)
     out := out.insert (.opResult ⟨op, i⟩) h
   return out
 
-/-- `scf.for`: iterations in order; only the tokens `iter_args` carry order them (D26). -/
-partial def forLoop (ctx : IRContext OpCode) (op : OperationPtr)
-    (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
-  let what := s!"scf.for{pathStr path}"
-  let operands := op.getOperands! ctx
-  if operands.size < 3 then throw s!"{what}: expected bounds and a step"
-  let some cenv ← controlEnv ctx op (operands.extract 0 3).toList env path | return env
-  let lb ← liftE (knownInt cenv ctx what operands[0]!)
-  let ub ← liftE (knownInt cenv ctx what operands[1]!)
-  let step ← liftE (knownInt cenv ctx what operands[2]!)
+/-- The iterations of a counted loop, in order: `lb`, `lb + step`, ... below `ub`, each running
+the body with the induction variable and the values the previous iteration yielded (D26). -/
+partial def forIterations (ctx : IRContext OpCode) (op : OperationPtr) (what yieldName : String)
+    (lb ub step : Int) (inits : Array ValuePtr) (env : Std.HashMap ValuePtr HVal)
+    (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
   if step ≤ 0 then throw s!"{what}: a step of {step} is not supported"
   let block ← liftE (singleBlock ctx op what)
   let args := block.getArguments! ctx
   let ops := blockOps ctx block
   let some term := ops.back? | throw s!"{what}: expected a terminator"
-  if opName ctx term != "scf.yield" then throw s!"{what}: expected the body to end in scf.yield"
-  let mut iter ← (operands.extract 3 operands.size).toList.mapM fun v =>
-    liftE (lookupH env ctx v what)
+  if opName ctx term != yieldName then throw s!"{what}: expected the body to end in {yieldName}"
+  let mut iter ← inits.toList.mapM fun v => liftE (lookupH env ctx v what)
   modify fun st => { st with loops := st.loops + 1 }
   let trips := if ub > lb then ((ub - lb + step - 1) / step).toNat else 0
   for k in [0:trips] do
@@ -1159,6 +1164,51 @@ partial def forLoop (ctx : IRContext OpCode) (op : OperationPtr)
   for i in [0:op.getNumResults! ctx], h in iter do
     out := out.insert (.opResult ⟨op, i⟩) h
   return out
+
+/-- `scf.for`: iterations in order; only the tokens `iter_args` carry order them (D26). -/
+partial def forLoop (ctx : IRContext OpCode) (op : OperationPtr)
+    (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
+  let what := s!"scf.for{pathStr path}"
+  let operands := op.getOperands! ctx
+  if operands.size < 3 then throw s!"{what}: expected bounds and a step"
+  let some cenv ← controlEnv ctx op (operands.extract 0 3).toList env path | return env
+  let lb ← liftE (knownInt cenv ctx what operands[0]!)
+  let ub ← liftE (knownInt cenv ctx what operands[1]!)
+  let step ← liftE (knownInt cenv ctx what operands[2]!)
+  forIterations ctx op what "scf.yield" lb ub step (operands.extract 3 operands.size) env path
+
+/-- `affine.for`, as upstream MLIR defines it: the lower bound is the largest result of
+`lowerBoundMap`, the upper bound the smallest result of `upperBoundMap`, both applied to their
+operands (dimensions, then symbols); `step` is a positive constant. Then as `scf.for` (D26). -/
+partial def affineForLoop (ctx : IRContext OpCode) (op : OperationPtr)
+    (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
+  let what := s!"affine.for{pathStr path}"
+  let props := unregProps ctx op
+  let some seg := denseInts (findProp props "operandSegmentSizes")
+    | throw s!"{what}: missing operandSegmentSizes"
+  if seg.size != 3 then throw s!"{what}: expected 3 operand segments"
+  let operands := op.getOperands! ctx
+  let nl := seg[0]!.toNat
+  let nu := seg[1]!.toNat
+  let lbOps := operands.extract 0 nl
+  let ubOps := operands.extract nl (nl + nu)
+  let some cenv ← controlEnv ctx op (lbOps ++ ubOps).toList env path | return env
+  let bound (key : String) (ops : Array ValuePtr) (pick : List Int → Option Int) : IM Int := do
+    let some map := affineText ctx op key | throw s!"{what}: missing {key}"
+    let ns ← ops.toList.mapM fun v => liftE (knownInt cenv ctx what v)
+    let nDims := Affine.numDims "affine_map" map
+    match Affine.evalMap map (ns.take nDims) (ns.drop nDims) with
+    | .ok rs => match pick rs with
+      | some b => pure b
+      | none => throw s!"{what}: {key} has no result"
+    | .error e => throw s!"{what}: {key}: {e}"
+  let lb ← bound "lowerBoundMap" lbOps fun rs => rs.foldl (fun m r => some (match m with | some x => max x r | none => r)) none
+  let ub ← bound "upperBoundMap" ubOps fun rs => rs.foldl (fun m r => some (match m with | some x => min x r | none => r)) none
+  let step ← match findProp props "step" with
+    | some (.integerAttr i) => pure i.value
+    | some (.indexAttr i) => pure i.value.toInt
+    | _ => throw s!"{what}: missing step"
+  forIterations ctx op what "affine.yield" lb ub step (operands.extract (nl + nu) operands.size) env path
 
 /-- `scf.parallel`: every iteration concurrent; the result is the reduction of the iterations'
 values, folded in iteration order (D27). -/
@@ -1451,6 +1501,24 @@ def IProgram.finishExecute (ctx : IRContext OpCode) (ip : IProgram) (v : Nat) (s
       match position b (ins.extract 2 ins.size) with
       | .error m => return fail s!"memref.store: {m}"
       | .ok q => mem := mem.insert (b, q) ins[0]!
+    else if iname == "affine.load" || iname == "affine.store" then
+      let isLoad := iname == "affine.load"
+      let some b := ins[if isLoad then 0 else 1]? >>= bufOfVal
+        | return fail s!"{iname} of an unknown buffer"
+      if freed.contains b then return fail s!"{iname} after {ip.buffers[b]!.name} was deallocated"
+      let some ns := (ins.extract (if isLoad then 1 else 2) ins.size).toList.mapM Val.toInt?
+        | return fail s!"{iname}: an index is not a known integer"
+      match affineIndices ctx inner ns with
+      | .error m => return fail s!"{iname}: {m}"
+      | .ok idx =>
+        let t := ip.buffers[b]!.type
+        if idx.length != t.shape.length then return fail s!"{iname}: wrong number of indices"
+        let mut q : Int := 0
+        for n in idx, d in t.shape, stv in t.strides do
+          if n < 0 || n ≥ d then return fail s!"{iname}: index {n} is outside a dimension of size {d}"
+          q := q + n * stv
+        if isLoad then vals := vals.insert (.opResult ⟨inner, 0⟩) (mem[(b, q)]?.getD .undef)
+        else mem := mem.insert (b, q) ins[0]!
     else if iname.startsWith "arith." then
       match ins.toList.mapM toRuntime? with
       | some rs =>
@@ -1672,6 +1740,21 @@ def IProgram.footprints (ctx : IRContext OpCode) (ip : IProgram) :
         else if iname == "memref.store" then
           if let some b := operands[1]? >>= bufOf then
             acc := acc ++ [⟨b, .write, match index b (operands.extract 2 operands.size) with
+              | some q => [q] | none => whole b⟩]
+        else if iname == "affine.load" || iname == "affine.store" then
+          let isLoad := iname == "affine.load"
+          if let some b := operands[if isLoad then 0 else 1]? >>= bufOf then
+            let q : Option Int := do
+              let ns ← (operands.extract (if isLoad then 1 else 2) operands.size).toList.mapM
+                fun o => valOf o >>= Val.toInt?
+              let idx ← (affineIndices ctx inner ns).toOption
+              let t := ip.buffers[b]!.type
+              if idx.length != t.shape.length then none
+              let mut q : Int := 0
+              for n in idx, stv in t.strides do
+                q := q + n * stv
+              return q
+            acc := acc ++ [⟨b, if isLoad then .read else .write, match q with
               | some q => [q] | none => whole b⟩]
         else
           for b in (memrefOperands ctx inner).filterMap bufOf do

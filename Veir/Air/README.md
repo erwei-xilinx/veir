@@ -39,7 +39,8 @@ What the proven checks give, for any program the glue accepts:
 | AIE: outcomes, deadlock, fault | `Aie.Cert.parents_sound` | each is reached by an execution of the model |
 | AIE: "exactly the reachable states" | `Aie.Cert.exact` | the listed verdicts are all of the model's |
 
-Covered: `air.execute`, `air.wait_all`, tokens, `scf.for`/`scf.parallel`, `scf.if`/`affine.if`/
+Covered: `air.execute`, `air.wait_all`, tokens, `scf.for`/`scf.parallel`, `affine.for`,
+`affine.load`/`affine.store`, `scf.if`/`affine.if`/
 `scf.index_switch`, `air.dma_memcpy_nd` (element by element when its pattern is known, D20/D21),
 channels (D28-D36, D51), broadcast (D29, D53), unordered puts into one stream (D52, one model per
 order), `air.channel.issue` (D54, D58), `air.refeed_count` (D61), per-launch streams (D56), run-time offsets (D23), event
@@ -188,6 +189,8 @@ open, and the ninth of a stack. Its own diff adds `Veir/Interpreter/Netlist.lean
 | `memref.copy`, `linalg.*` and any other op in `air.execute` | unregistered; round-trips | — | opaque values; read/write of whole operand buffers (D22) | footprints |
 | `affine_map<…>`, `affine_set<…>` | verbatim, no meaning | — | — | — |
 | `scf.for`, `scf.parallel` (host level) | unregistered; round-trips | — | instantiated iteration by iteration (D26, D27); bounds must be known (`--args`) | graph and race theorems apply to the instances |
+| `affine.for` (host level) | round-trips | — | as `scf.for` (D26), with upstream bounds: the largest result of `lowerBoundMap`, the smallest of `upperBoundMap`, a constant `step` | as `scf.for` |
+| `affine.load`, `affine.store` | round-trips | — | as `memref.load`/`store`, at the element their `map` computes (at host level a blocking event, D45) | footprints |
 | `air.channel` declarations | `--allow-unregistered-dialect`; round-trips (after the VEIR-002 fix) | — | bundles of subchannels (D28); `broadcast_shape` (D29) | — |
 | `air.channel.put`/`get`, async and sync | `--allow-unregistered-dialect`; round-trips | — | element streams per subchannel (D34); rendezvous when both ends are async, buffered otherwise (D30); padding (D31); D33 ordering checked; memory ordered by transfers (D36) | deadlock and schedule certificates (`Schedule.lean`); races through `raceFreeB_iff` on the graph with transfer nodes |
 | `air.launch`, `air.segment` (nested too), `air.herd`, `air.rank` | `--allow-unregistered-dialect`; round-trips | operand segments, block arguments | start event, body per instance (all concurrent; launch instances must not communicate, D37), end event = token (D38); dependencies gate every instance, no result = blocking, blocking inside is per instance (D39); allocs per instance, operands by reference (D40); token operands are the outer events (D42) | via the instantiated graph |

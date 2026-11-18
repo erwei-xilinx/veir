@@ -118,6 +118,10 @@ structure IProgram where
   inits : Std.HashMap Nat (Array Val) := {}
   /-- D59: the control-flow decisions on values events compute. -/
   decides : Array Decision := #[]
+  /-- D62: transfers whose offsets, sizes or strides events compute; each reads those results
+  at its start (`offsetReads`). -/
+  offsets : Array Decision := #[]
+  offsetReads : Std.HashMap Nat (List (Nat × Nat)) := {}
   /-- The key of each event result decisions read. -/
   resultKeys : Std.HashMap (Nat × Nat) ResultKey := {}
   /-- The contents the user gave for memref arguments, by argument position among the memrefs
@@ -174,6 +178,8 @@ structure IState where
   refeedBufs : Std.HashMap Nat Nat := {}
   /-- D61: the put that sends each such buffer; a second put on it is refused. -/
   refeedPut : Std.HashMap Nat OperationPtr := {}
+  /-- D62: transfers reading results for their offsets, sizes or strides. -/
+  offsets : Array Decision := #[]
 
 abbrev IM := StateT IState (Except String)
 
@@ -566,6 +572,35 @@ def controlEnv (ctx : IRContext OpCode) (op : OperationPtr) (operands : List Val
                                 cut := true }
     return none
 
+/-- D62: a transfer's integer operands (offsets, sizes, strides) that events compute. With values
+decided (`IState.decisions`), they replace the results, and the transfer records that it reads
+them at its start (`IState.offsets`, event `first`); otherwise the results stay, and the transfer
+is over-approximated (D23) until a later round proposes them. -/
+def transferValues (ctx : IRContext OpCode) (first : Nat) (operands : List ValuePtr)
+    (captured : Std.HashMap ValuePtr HVal) : IM (Std.HashMap ValuePtr HVal) := do
+  let mut reads : List (Nat × Nat) := []
+  for v in operands do
+    if isMemRefType (v.getType! ctx) then continue
+    if let some (.result e i) := captured[v]? then
+      if !reads.contains (e, i) then reads := reads ++ [(e, i)]
+  if reads.isEmpty then return captured
+  let st ← get
+  let keys : List ResultKey := reads.map fun (e, i) => (st.events[e]!.op, st.ctxs[e]!.path, i)
+  for r in reads, k in keys do
+    modify fun st => { st with resultKeys := st.resultKeys.insert r k }
+  match keys.mapM (st.decisions[·]?) with
+  | some ns =>
+    modify fun st => { st with offsets := st.offsets.push { event := first, reads, values := some ns } }
+    let mut out := captured
+    for v in operands do
+      if isMemRefType (v.getType! ctx) then continue
+      if let some (.result e i) := captured[v]? then
+        out := out.insert v (.val (intVal ctx v (ns[reads.idxOf (e, i)]!)))
+    return out
+  | none =>
+    modify fun st => { st with offsets := st.offsets.push { event := first, reads, values := none } }
+    return captured
+
 /-- Which region of `scf.if`, `affine.if` or `scf.index_switch` runs (`none`: no region, as in
 an `scf.if` without `else` whose condition is false). The choice must be known before running:
 a branch on a runtime value is refused. -/
@@ -857,6 +892,7 @@ partial def dmaInstance (ctx : IRContext OpCode) (op : OperationPtr)
     if let .result e _ := h then
       if !dataDeps.contains e then dataDeps := dataDeps ++ [e]
     captured := captured.insert v h
+  captured ← transferValues ctx (← get).events.size (operands.extract nDeps operands.size).toList captured
   -- A cross-rank side addresses that rank's buffer of the family (D49).
   if (srcRank.isSome || dstRank.isSome) && info.src.memref == info.dst.memref && srcRank != dstRank then
     throw s!"{what}: one memref on both sides with different ranks is not supported"
@@ -937,6 +973,7 @@ partial def channelInstance (ctx : IRContext OpCode) (op : OperationPtr)
     if let .result e _ := h then
       if !dataDeps.contains e then dataDeps := dataDeps ++ [e]
     captured := captured.insert v h
+  captured ← transferValues ctx (← get).events.size (#[memref] ++ groups[3]! ++ groups[4]! ++ groups[5]!).toList captured
   let st ← get
   if let .result e i := captured[memref]! then
     if st.viewResults.contains (e, i) then
@@ -1474,7 +1511,8 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
            resultBufs := st.resultBufs, viewResults := st.viewResults, viewPos := st.viewPos,
            argBufs, loops := st.loops,
            chanDecls := st.chanDecls, chans := st.chans, issues := st.issues, inits := st.inits,
-           decides := st.decides, resultKeys := st.resultKeys,
+           decides := st.decides, resultKeys := st.resultKeys, offsets := st.offsets,
+           offsetReads := st.offsets.foldl (fun m d => m.insert d.event (m.getD d.event [] ++ d.reads)) {},
            branches := (nestedOps ctx func).filterMap fun o =>
              let n := opName ctx o
              if branchOpNames.contains n then some (n, o.getNumRegions! ctx, st.taken.getD o [])

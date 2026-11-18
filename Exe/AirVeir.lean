@@ -242,8 +242,11 @@ def extractRunning (args : Args) (ctx : IRContext OpCode) (func : OperationPtr) 
       let ev := ip.prog.events[d.event]!
       let vs := (d.reads.zip (d.values.getD [])).map fun ((e, _), n) => s!"event {e} = {n}"
       s!"'{opName ctx ev.op}'{pathStr ip.ctxs[d.event]!.path} ({", ".intercalate vs})"
-    let shown := (ip.decides.toList.take 6).map values
-    let more := if ip.decides.size > 6 then s!", and {ip.decides.size - 6} more" else ""
+    let all := ip.decides ++ ip.offsets.filter (·.values.isSome)
+    let shown := (all.toList.take 6).map values
+    let more := if all.size > 6 then s!", and {all.size - 6} more" else ""
+    -- D59 decisions and D62 transfer values, counted apart.
+    let kinds := s!"{ip.decides.size} control-flow decision(s), {all.size - ip.decides.size} transfer value(s) (D62)"
     if let .undetermined what := status then
       if !partialOk then
         throw (IO.userError s!"@{name}: {what}: the value deciding it (D59) is not computed in the \
@@ -254,9 +257,9 @@ def extractRunning (args : Args) (ctx : IRContext OpCode) (func : OperationPtr) 
           {what} is not computed in the execution proposed for the part of the program before it. \
           Below, the verdicts for that part alone, instantiated up to the decisions not known; a \
           deadlock there may come from what those decisions control, which is left out"
-      | .proven n => some s!"  control flow on values events compute (D59), {n} decision(s): \
+      | .proven _ => some s!"  values events compute, read by control flow (D59) and transfers (D62): {kinds}: \
           {"; ".intercalate shown}{more}. Every execution reads these values (proven, Chan.decision_reads)"
-      | .notEstablished n why => some s!"  control flow on values events compute (D59), {n} decision(s): \
+      | .notEstablished _ why => some s!"  values events compute, read by control flow (D59) and transfers (D62): {kinds}: \
           {"; ".intercalate shown}{more}. These are the values one execution computes; that every \
           execution reads them is not established ({why}), so the verdicts below are for this control flow"
     return (ip, line)

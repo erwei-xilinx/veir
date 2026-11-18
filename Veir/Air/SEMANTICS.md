@@ -71,6 +71,7 @@ is wrong; the replacement is pending or recorded).
 | D59 | Control flow decided by values events compute (loop bounds, branch conditions read from data on the device) is checked per concrete input: the user gives the host arguments' contents; the model runs the program and instantiates each such loop or branch once the value deciding it is computed. That value is well defined only if the part before it is race-free (then it is unique, `Chan.outcome_uniqueH`); a race there is reported and stops. Verdicts hold for that input | ✅ 2026-11-15 ("OK, agreed") | `Instance.controlEnv` (decision events, cut), `Running.instantiateRunning` (rounds), `--mem` for memref contents | `Chan.decision_reads`, `Chan.value_after_writer` (every execution reads the values used, when the whole program completes race-free) |
 | D60 | A loop bound or branch condition (`scf.for`, `scf.parallel`, `scf.if`, `affine.if`, `scf.index_switch`) that is an `air.execute` result (or computed from one) is read by the control op when the host reaches it: a blocking event, ordered after the execute only by tokens or earlier blocking ops, as D45 and D57. With no such path, the read is a race | ✅ 2026-11-15 ("(a), same as D45/D57") | `EventKind.decide`, `Instance.controlEnv` | `Chan.raceFree_of_racesOk`, `Chan.decision_reads` |
 | D61 | `air.refeed_count = N` on a put is N sends of its pattern, in order, its token firing after the last: the loop of N puts `air-annotate-refeed` collapsed. The count is the put's own, else its channel declaration's, or the one on the `memref.alloc` of the buffer it sends (an L2 producer). A get is unaffected. A counted buffer sent by more than one put is refused (the count is their sum, and each put's share is unknown) | ✅ 2026-11-17 (derived from the compiled IR, as asked: "can you figure this out from the actual ir stack compiled from llms that use this pattern?"); see the D61 section | `Instance.channelInstance`, `Instance.recordRefeed` | `Chan.*` theorems (the sends are ordinary transfers) |
+| D62 | An offset, size or stride of a transfer (channel or DMA) that an event computes is checked per concrete input, as D59: the program is instantiated with the value the execution computes, and the transfer reads that result as it starts. `Chan.decision_reads` then proves every execution reads that value; otherwise the verdicts are for this input and this is said. A value no execution proposes (including when no channel model can be built, D33) stays over-approximated (D23: the transfer may touch its whole buffer) | ✅ 2026-11-18 ("use option A") | `Instance.transferValues`, `IProgram.offsets`, `ChanModel.decisionsOk` | `Chan.decision_reads` |
 | D22a | Refinement of D22 (2026-11-14): `memref.copy` between whole buffers (no view, no strided layout, equal sizes) copies element by element, as upstream MLIR defines it. Its footprint is unchanged (reads the source, writes the destination); other uninterpreted ops stay opaque | upstream semantics; no AIR decision involved | `finishExecute` | — |
 
 ## D1. Blocking `air.wait_all` ✅
@@ -462,4 +463,15 @@ its uses in `AIRToAIEPass.cpp` and `AIRToAIESchedulingUtils.cpp`, the front end'
 
 Before D61, VeIR read such a put as one send and reported a deadlock for every balanced
 re-feed program (`Test/Air/d61.mlir`).
+
+## D62. Transfer values events compute (✅ 2026-11-18)
+
+D23 lets a transfer's offset come from an event (after `air-dependency`, index arithmetic sits in
+`air.execute` regions). Over-approximating such a transfer as touching its whole buffer, per
+element, made `air_split_l2_memref_no_split.mlir` list 8.6e10 elements and report races between
+transfers that write disjoint parts. D62 treats these values as D59 treats loop bounds and branch
+conditions: rounds propose the values (`Running.proposeValues`), the program is instantiated with
+them (`Instance.transferValues`), each transfer's start reads the results (`labelFp`), and
+`decisionsOk` checks the hypotheses of `Chan.decision_reads`: the result is written only by its
+event, which finishes before the transfer starts, with the value used. `Test/Air/d62.mlir`.
 

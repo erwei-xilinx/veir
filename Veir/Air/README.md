@@ -44,7 +44,7 @@ Covered: `air.execute`, `air.wait_all`, tokens, `scf.for`/`scf.parallel`, `affin
 `affine.load`/`affine.store`, `scf.if`/`affine.if`/
 `scf.index_switch`, `air.dma_memcpy_nd` (element by element when its pattern is known, D20/D21),
 channels (D28-D36, D51), broadcast (D29, D53), unordered puts into one stream (D52, one model per
-order), `air.channel.issue` (D54, D58), `air.refeed_count` (D61), per-launch streams (D56), run-time offsets (D23), event
+order), `air.channel.issue` (D54, D58), `air.refeed_count` (D61), per-launch streams (D56), run-time offsets (D23; per input, D62), event
 results as memory (D4, D57), `memref.global`, whole views as transfer ends, hierarchy ops and ranks
 (D37-D49).
 

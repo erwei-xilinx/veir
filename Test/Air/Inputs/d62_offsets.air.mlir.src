@@ -1,0 +1,46 @@
+module {
+  air.channel @c [1, 1]
+  air.channel @lo [1, 1]
+  air.channel @hi [1, 1]
+  // D62: the put's offset is an air.execute result (4): it sends src[4..8).
+  func.func @offset_from_execute(%src: memref<8xi32>, %out: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%l) in (%ls=%c1) args(%a=%src, %o=%out) : memref<8xi32>, memref<4xi32> {
+      %c0 = arith.constant 0 : index
+      %c4 = arith.constant 4 : index
+      %u = arith.constant 1 : index
+      %t, %off = air.execute -> (index) {
+        %k = arith.constant 4 : index
+        air.execute_terminator %k : index
+      }
+      %p = air.channel.put async [%t] @c[%c0, %c0] (%a[%off] [%c4] [%u]) : (memref<8xi32>)
+      %g = air.channel.get async @c[%c0, %c0] (%o[] [] []) : (memref<4xi32>)
+      air.wait_all [%p, %g]
+    }
+    return
+  }
+  // Two gets write the two halves of one buffer, at offsets air.execute computes (0 and 4). With
+  // the offsets known the writes are disjoint: no race (over-approximated, both wrote it whole).
+  func.func @two_halves(%src: memref<8xi32>, %out: memref<8xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%l) in (%ls=%c1) args(%a=%src, %o=%out) : memref<8xi32>, memref<8xi32> {
+      %c0 = arith.constant 0 : index
+      %c4 = arith.constant 4 : index
+      %u = arith.constant 1 : index
+      %t0, %off0 = air.execute -> (index) {
+        %k = arith.constant 0 : index
+        air.execute_terminator %k : index
+      }
+      %t1, %off1 = air.execute -> (index) {
+        %k = arith.constant 4 : index
+        air.execute_terminator %k : index
+      }
+      %p0 = air.channel.put async @lo[%c0, %c0] (%a[%c0] [%c4] [%u]) : (memref<8xi32>)
+      %p1 = air.channel.put async @hi[%c0, %c0] (%a[%c4] [%c4] [%u]) : (memref<8xi32>)
+      %g0 = air.channel.get async [%t0] @lo[%c0, %c0] (%o[%off0] [%c4] [%u]) : (memref<8xi32>)
+      %g1 = air.channel.get async [%t1] @hi[%c0, %c0] (%o[%off1] [%c4] [%u]) : (memref<8xi32>)
+      air.wait_all [%p0, %p1, %g0, %g1]
+    }
+    return
+  }
+}

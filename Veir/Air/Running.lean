@@ -42,7 +42,7 @@ def IProgram.proposeValues (ctx : IRContext OpCode) (ip : IProgram) :
   let t := Chan.genTrace cp (Chan.buildIndex cp)
   let s := ip.runLabels ctx ca cm t
   let mut out : List (ResultKey × Int) := []
-  for d in ip.decides do
+  for d in ip.decides ++ ip.offsets do
     if d.values.isSome then continue
     let vals := d.reads.map fun r => (ip.resultKeys[r]?, s.results[r]? >>= Val.toInt?)
     if vals.all fun (k, n) => k.isSome && n.isSome then
@@ -59,7 +59,7 @@ def ChanModel.decisionsOk (cm : ChanModel) (ip : IProgram) (fp : Chan.LFp) (t : 
   let B := ip.resultBuf
   let pos := Chan.positions t
   Chan.soleWritersB fp (Chan.cands cm.prog) B &&
-  ip.decides.all fun d =>
+  (ip.decides.all fun d =>
     match d.values with
     | none => false
     | some ns => (d.reads.zip ns).all fun ((e, i), n) =>
@@ -68,6 +68,19 @@ def ChanModel.decisionsOk (cm : ChanModel) (ip : IProgram) (fp : Chan.LFp) (t : 
       (match pos[Chan.Label.finish e]?, pos[Chan.Label.finish d.event]? with
        | some a, some b => decide (a < b) && t[a]? == some (.finish e) &&
            t[b]? == some (.finish d.event)
+       | _, _ => false) &&
+      (s.results[(e, i)]? >>= Val.toInt?) == some n) &&
+  -- D62: a transfer reads its offsets' results as it starts. One still pending is
+  -- over-approximated (D23) and needs nothing here.
+  ip.offsets.all fun d =>
+    match d.values with
+    | none => true
+    | some ns => (d.reads.zip ns).all fun ((e, i), n) =>
+      Chan.lwritesB fp (.finish e) (B, Int.ofNat e) &&
+      Chan.lreadsB fp (.start d.event) (B, Int.ofNat e) &&
+      (match pos[Chan.Label.finish e]?, pos[Chan.Label.start d.event]? with
+       | some a, some b => decide (a < b) && t[a]? == some (.finish e) &&
+           t[b]? == some (.start d.event)
        | _, _ => false) &&
       (s.results[(e, i)]? >>= Val.toInt?) == some n
 
@@ -91,19 +104,29 @@ partial def instantiateRunning (ctx : IRContext OpCode) (func : OperationPtr) (s
       throw s!"more than {maxRounds} rounds of run-time control flow (D59)"
     let ip ← instantiate ctx func scalars decisions
     let ip := { ip with argData }
-    if ip.decides.isEmpty then return (ip, round, .none)
-    if !ip.complete then
-      let vals ← ip.proposeValues ctx
+    if ip.decides.isEmpty && ip.offsets.isEmpty then return (ip, round, .none)
+    let offsetsPending := ip.offsets.any (·.values.isNone)
+    if !ip.complete || offsetsPending then
+      -- Only offsets pending: a model that cannot be built (D33) leaves them over-approximated.
+      let vals ← if ip.complete then pure ((ip.proposeValues ctx).toOption.getD [])
+        else ip.proposeValues ctx
       let fresh := vals.filter fun (k, _) => !decisions.contains k
-      if fresh.isEmpty then
-        let d := (ip.decides.find? (·.values.isNone)).get!
+      if !fresh.isEmpty then
+        return ← go (fresh.foldl (fun m (k, n) => m.insert k n) decisions) (round + 1)
+      if let some d := ip.decides.find? (·.values.isNone) then
         let ev := ip.prog.events[d.event]!
         return (ip, round, .undetermined s!"'{opName ctx ev.op}'{pathStr ip.ctxs[d.event]!.path}")
-      return ← go (fresh.foldl (fun m (k, n) => m.insert k n) decisions) (round + 1)
+      -- Only offsets are pending and none can be proposed: they stay over-approximated (D23).
     -- The whole program: check the decisions on every model.
-    let n := ip.decides.size
-    let ca ← ip.analyzeChannels
-    let orders ← ip.putOrders ca
+    let n := ip.decides.size + (ip.offsets.filter (·.values.isSome)).size
+    -- No value instantiated (every offset stays over-approximated): nothing to check or report.
+    if n == 0 then return (ip, round, .none)
+    -- With transfer values only (D62), a model that cannot be built is reported by the verdicts
+    -- themselves; the values are then those of one execution.
+    let models := do let ca ← ip.analyzeChannels; return (ca, ← ip.putOrders ca)
+    let (ca, orders) ← match models with
+      | .ok r => pure r
+      | .error e => if ip.decides.isEmpty then return (ip, round, .notEstablished n e) else throw e
     let (fps0, _) := ip.footprints ctx
     let mut why : Option String := none
     for o in orders do
@@ -121,7 +144,7 @@ partial def instantiateRunning (ctx : IRContext OpCode) (func : OperationPtr) (s
       -- The values proposed were not those the execution computes: take those, and redo.
       let mut fixed := decisions
       let mut changed := false
-      for d in ip.decides do
+      for d in ip.decides ++ ip.offsets do
         for r in d.reads, used in d.values.getD [] do
           if let (some k, some x) := (ip.resultKeys[r]?, s.results[r]? >>= Val.toInt?) then
             if x != used then

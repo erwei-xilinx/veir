@@ -294,7 +294,8 @@ def dynValue (m : MState) (dyn : List (HVal × Int)) : Option Int :=
 /-- What each label reads and writes (`Chan.MemSpec.fp` on this program). -/
 def IProgram.labelFp (ip : IProgram) (ca : ChanAnalysis) (cm : ChanModel)
     (fps0 : Array (List Access)) : Chan.LFp
-  | .start _ => []
+  -- D62: a transfer reads, as it starts, the results its offsets, sizes or strides use.
+  | .start v => (ip.offsetReads.getD v []).map fun (e, _) => ⟨ip.resultBuf, .read, [Int.ofNat e]⟩
   | .finish v =>
     -- Results are memory too: written when the event finishes, read by the events using them.
     let results : List Access :=
@@ -331,11 +332,25 @@ structure LState where
   /-- D54: the offset each issue gave when it ran. -/
   shifts : Std.HashMap Nat Int := {}
 
+/-- The memory, taken out of the state, and the state without it: a later `insert` on the
+memory then updates it in place instead of copying it (it is no longer shared with the state). -/
+@[inline] def LState.takeMem (s : LState) : Std.HashMap (Nat × Int) Val × LState :=
+  (s.m.mem, { s with m := { s.m with mem := {} } })
+
+@[inline] def LState.putMem (s : LState) (mem : Std.HashMap (Nat × Int) Val) : LState :=
+  { s with m := { s.m with mem } }
+
+/-- The same for the slots of elements in flight. -/
+@[inline] def LState.takeSlots (s : LState) : Std.HashMap Nat Val × LState :=
+  (s.slots, { s with slots := {} })
+
 /-- One label on concrete memory (`Chan.MemSpec.eff` on this program). -/
 def IProgram.fireLabel (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalysis)
     (cm : ChanModel) (s : LState) (l : Chan.Label) : LState := Id.run do
   if s.m.fault.isSome then return s
-  let freed (who : String) : LState :=
+  -- A function of the state it is given (not a closure over `s`), so that `s` is not kept alive
+  -- and its memory can be updated in place.
+  let freed (s : LState) (who : String) : LState :=
     { s with m := { s.m with fault := some s!"{who}: a buffer it uses was deallocated" } }
   match l with
   | .start _ | .push _ => return s
@@ -351,16 +366,17 @@ def IProgram.fireLabel (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalys
     match ca.endpoints[v]? with
     | some ep =>
       if ep.isPut then return s
-      if s.m.freed.contains ep.buf then return freed s!"event {v}"
+      if s.m.freed.contains ep.buf then return freed s s!"event {v}"
       let zero := zeroOf ip.buffers[ep.buf]!.type
-      let mut mem := s.m.mem
+      let (mem₀, s) := s.takeMem
+      let mut mem := mem₀
       for (q, isPad) in ep.dst do
         if isPad then mem := mem.insert (ep.buf, q) zero
-      return { s with m := { s.m with mem } }
+      return s.putMem mem
     | none => return { s with m := ip.finish ctx v s.m }
   | .read k =>
     let b := cm.srcBuf[k]!
-    if s.m.freed.contains b then return freed s!"the read of element {k}"
+    if s.m.freed.contains b then return freed s s!"the read of element {k}"
     let some dshift := dynValue s.m ((cm.srcDyn[k]?).getD [])
       | return { s with m := { s.m with fault := some s!"the read of element {k}: an offset computed by an event is not known yet" } }
     let shift := dshift + match (cm.srcShift[k]?).join with
@@ -370,30 +386,43 @@ def IProgram.fireLabel (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalys
     | some (b', q) =>
       if q + shift < 0 || q + shift ≥ ip.buffers[b']!.type.numel then
         return { s with m := { s.m with fault := some s!"the read of element {k}: position {q + shift} is outside {ip.buffers[b']!.name}" } }
-      return { s with slots := s.slots.insert k (s.m.mem[(b', q + shift)]?.getD .undef) }
-    | none => return { s with slots := s.slots.insert k (zeroOf ip.buffers[b]!.type) }
+      let v := s.m.mem[(b', q + shift)]?.getD .undef
+      let (slots, s) := s.takeSlots
+      return { s with slots := slots.insert k v }
+    | none =>
+      let (slots, s) := s.takeSlots
+      return { s with slots := slots.insert k (zeroOf ip.buffers[b]!.type) }
   | .pull k i =>
     let some (b, q₀) := cm.dstAt k i | return s
     let some dshift := dynValue s.m ((cm.dstDyn[k]? >>= (·[i]?)).getD [])
       | return { s with m := { s.m with fault := some s!"element {k}'s write: an offset computed by an event is not known yet" } }
     let q := q₀ + dshift + ((cm.dstShiftAt k i).map (s.shifts.getD · 0)).getD 0
-    if s.m.freed.contains b then return freed s!"element {k}'s write"
+    if s.m.freed.contains b then return freed s s!"element {k}'s write"
     if q < 0 || q ≥ ip.buffers[b]!.type.numel then
       return { s with m := { s.m with fault := some s!"element {k}'s write: position {q} is outside {ip.buffers[b]!.name}" } }
-    return { s with m := { s.m with mem := s.m.mem.insert (b, q) (s.slots[k]?.getD .undef) } }
+    let v := s.slots[k]?.getD .undef
+    let (mem, s) := s.takeMem
+    return s.putMem (mem.insert (b, q) v)
   | .xfer k =>
     let n := (cm.dstLoc[k]?.map (·.length)).getD 0
-    let mut mem := s.m.mem
+    let v := s.slots[k]?.getD .undef
+    let shifts := s.shifts
+    -- What the offsets read, without the memory (so that the memory is not shared).
+    let m0 : MState := { s.m with mem := {} }
+    let (mem₀, s) := s.takeMem
+    let mut mem := mem₀
     for i in [0:n] do
       let some (b, q₀) := cm.dstAt k i | continue
-      let some dshift := dynValue s.m ((cm.dstDyn[k]? >>= (·[i]?)).getD [])
-        | return { s with m := { s.m with fault := some s!"element {k}'s write: an offset computed by an event is not known yet" } }
-      let q := q₀ + dshift + ((cm.dstShiftAt k i).map (s.shifts.getD · 0)).getD 0
-      if s.m.freed.contains b then return freed s!"element {k}'s write"
+      let some dshift := dynValue m0 ((cm.dstDyn[k]? >>= (·[i]?)).getD [])
+        | let s := s.putMem mem
+          return { s with m := { s.m with fault := some s!"element {k}'s write: an offset computed by an event is not known yet" } }
+      let q := q₀ + dshift + ((cm.dstShiftAt k i).map (shifts.getD · 0)).getD 0
+      if m0.freed.contains b then return freed s s!"element {k}'s write"
       if q < 0 || q ≥ ip.buffers[b]!.type.numel then
+        let s := s.putMem mem
         return { s with m := { s.m with fault := some s!"element {k}'s write: position {q} is outside {ip.buffers[b]!.name}" } }
-      mem := mem.insert (b, q) (s.slots[k]?.getD .undef)
-    return { s with m := { s.m with mem } }
+      mem := mem.insert (b, q) v
+    return s.putMem mem
 
 /-- The checked verdicts: an execution, whether it completes (`none`: internal error), whether it
 is race-free (`Chan.racesOkE`), and witnesses of races for messages. -/

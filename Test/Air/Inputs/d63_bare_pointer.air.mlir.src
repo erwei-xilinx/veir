@@ -1,0 +1,31 @@
+module {
+  // D63: an unranked memref is a bare pointer. Reading at offset 100 is not out of bounds.
+  func.func @offset_past_one(%src: memref<*xi32>, %out: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%l) in (%ls=%c1) args(%a=%src, %o=%out) : memref<*xi32>, memref<4xi32> {
+      %c0 = arith.constant 0 : index
+      %c4 = arith.constant 4 : index
+      %c100 = arith.constant 100 : index
+      %u = arith.constant 1 : index
+      air.dma_memcpy_nd (%o[] [] [], %a[%c100] [%c4] [%u]) : (memref<4xi32>, memref<*xi32>)
+    }
+    return
+  }
+  // A memref.cast of the pointer to a static shape: that shape's elements, from its start.
+  func.func @cast_to_shape(%src: memref<*xi32>, %out: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%l) in (%ls=%c1) args(%a=%src, %o=%out) : memref<*xi32>, memref<4xi32> {
+      %v = memref.cast %a : memref<*xi32> to memref<4xi32>
+      air.dma_memcpy_nd (%o[] [] [], %v[] [] []) : (memref<4xi32>, memref<4xi32>)
+    }
+    return
+  }
+  // The pointer itself as a whole transfer end has no length: refused.
+  func.func @whole_pointer(%src: memref<*xi32>, %out: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%l) in (%ls=%c1) args(%a=%src, %o=%out) : memref<*xi32>, memref<4xi32> {
+      air.dma_memcpy_nd (%o[] [] [], %a[] [] []) : (memref<4xi32>, memref<*xi32>)
+    }
+    return
+  }
+}

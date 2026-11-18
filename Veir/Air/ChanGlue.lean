@@ -384,7 +384,7 @@ def IProgram.fireLabel (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalys
       | none => 0
     match (cm.srcLoc[k]?).join with
     | some (b', q) =>
-      if q + shift < 0 || q + shift ≥ ip.buffers[b']!.type.numel then
+      if !ip.buffers[b']!.type.inBounds (q + shift) then
         return { s with m := { s.m with fault := some s!"the read of element {k}: position {q + shift} is outside {ip.buffers[b']!.name}" } }
       let v := s.m.mem[(b', q + shift)]?.getD .undef
       let (slots, s) := s.takeSlots
@@ -398,7 +398,7 @@ def IProgram.fireLabel (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalys
       | return { s with m := { s.m with fault := some s!"element {k}'s write: an offset computed by an event is not known yet" } }
     let q := q₀ + dshift + ((cm.dstShiftAt k i).map (s.shifts.getD · 0)).getD 0
     if s.m.freed.contains b then return freed s s!"element {k}'s write"
-    if q < 0 || q ≥ ip.buffers[b]!.type.numel then
+    if !ip.buffers[b]!.type.inBounds q then
       return { s with m := { s.m with fault := some s!"element {k}'s write: position {q} is outside {ip.buffers[b]!.name}" } }
     let v := s.slots[k]?.getD .undef
     let (mem, s) := s.takeMem
@@ -418,7 +418,7 @@ def IProgram.fireLabel (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalys
           return { s with m := { s.m with fault := some s!"element {k}'s write: an offset computed by an event is not known yet" } }
       let q := q₀ + dshift + ((cm.dstShiftAt k i).map (shifts.getD · 0)).getD 0
       if m0.freed.contains b then return freed s s!"element {k}'s write"
-      if q < 0 || q ≥ ip.buffers[b]!.type.numel then
+      if !ip.buffers[b]!.type.inBounds q then
         let s := s.putMem mem
         return { s with m := { s.m with fault := some s!"element {k}'s write: position {q} is outside {ip.buffers[b]!.name}" } }
       mem := mem.insert (b, q) v

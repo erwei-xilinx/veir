@@ -103,7 +103,7 @@ partial def instantiateRunning (ctx : IRContext OpCode) (func : OperationPtr) (s
     if round > maxRounds then
       throw s!"more than {maxRounds} rounds of run-time control flow (D59)"
     let ip ← instantiate ctx func scalars decisions
-    let ip := { ip with argData }
+    let ip := { ip.sizeBarePointers ctx with argData }
     if ip.decides.isEmpty && ip.offsets.isEmpty then return (ip, round, .none)
     let offsetsPending := ip.offsets.any (·.values.isNone)
     if !ip.complete || offsetsPending then

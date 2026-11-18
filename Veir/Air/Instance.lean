@@ -358,10 +358,19 @@ def pushEvent (e : Event) (c : EventCtx) : IM Nat := do
 /-- Where each element of a view lies in its buffer, in the view's row-major order, from where the
 source's elements lie (`src`) and the source's shape. `memref.subview` as upstream defines it (the
 same as `Pattern.subviewFrom`); reshapes and casts keep the order; `memref.reinterpret_cast`
-addresses the buffer itself. `none` for other views, or unknown operands. -/
+addresses the buffer itself. `none` for other views, or unknown operands. When the source is a
+bare pointer (`bare`, D63), a `memref.cast` takes the result type's elements from its start and a
+`memref.reinterpret_cast` has no upper bound. -/
 def viewPositions (ctx : IRContext OpCode) (op : OperationPtr) (src : Nat × Array Int)
-    (srcShape : List Nat) (intOf : ValuePtr → Option Int) : Option (Nat × Array Int) := do
+    (srcShape : List Nat) (intOf : ValuePtr → Option Int) (bare : Bool := false) :
+    Option (Nat × Array Int) := do
   let name := opName ctx op
+  -- The pointer itself, not a view of it.
+  let bare := bare && src.2 == (List.range src.2.size).toArray.map Int.ofNat
+  if bare && name == "memref.cast" then
+    let t ← (parseMemRefType (typeString ((ValuePtr.opResult ⟨op, 0⟩).getType! ctx))).toOption
+    return (src.1, (List.range t.numel).toArray.map Int.ofNat)
+  if bare && name != "memref.reinterpret_cast" then none
   if ["memref.collapse_shape", "memref.expand_shape", "memref.reshape", "memref.cast"].contains name then
     return src
   if name != "memref.subview" && name != "memref.reinterpret_cast" then none
@@ -388,7 +397,7 @@ def viewPositions (ctx : IRContext OpCode) (op : OperationPtr) (src : Nat × Arr
     if P != (List.range P.size).toArray.map Int.ofNat then none
     let off ← offs.head?
     let ps : List Int := idxs.map fun i => off + dot i strides
-    if ps.any (fun q => q < 0 || q ≥ (P.size : Int)) then none
+    if ps.any (fun q => q < 0 || (!bare && q ≥ (P.size : Int))) then none
     return (b, ps.toArray)
   -- subview: source index off + i * stride, row-major in the source's shape.
   let shape : List Int := srcShape.map Int.ofNat
@@ -481,7 +490,8 @@ def captureBody (ctx : IRContext OpCode) (what : String) (ops : Array OperationP
         | some (.val x) => x.toInt?
         | _ => none
       if let some sp := srcPos then
-        if let some vp := viewPositions ctx inner sp srcShape intOf then
+        let bare := st.buffers[sp.1]!.type.unranked
+        if let some vp := viewPositions ctx inner sp srcShape intOf bare then
           localViewPos := localViewPos.insert (.opResult ⟨inner, 0⟩) vp
     else if iname == "memref.load" || iname == "memref.store" ||
         iname == "affine.load" || iname == "affine.store" then

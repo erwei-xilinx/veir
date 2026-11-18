@@ -214,6 +214,7 @@ def extractOrThrow (ctx : IRContext OpCode) (func : OperationPtr) (scalars : Lis
     IO IProgram := do
   match instantiate ctx func scalars with
   | .ok ip =>
+    let ip := ip.sizeBarePointers ctx
     unless ip.prog.graph.forwardB do
       throw (IO.userError s!"@{funcName ctx func}: the event graph is not topologically numbered")
     unless ip.decides.isEmpty do
@@ -236,7 +237,8 @@ def extractRunning (args : Args) (ctx : IRContext OpCode) (func : OperationPtr) 
       let some b := ip.argBufs[j]? | throw (IO.userError s!"@{name}: --mem={j}: there are {ip.argBufs.size} memref argument(s)")
       let t := ip.buffers[b]!.type
       if t.bitwidth == 0 then throw (IO.userError s!"@{name}: --mem={j}: only integer buffers can be given")
-      if vs.size != t.numel then
+      -- A bare pointer (D63) takes any length; positions past the values given hold 0.
+      if !t.unranked && vs.size != t.numel then
         throw (IO.userError s!"@{name}: --mem={j}: {vs.size} value(s) for {t.numel} element(s)")
     let values (d : Decision) : String :=
       let ev := ip.prog.events[d.event]!

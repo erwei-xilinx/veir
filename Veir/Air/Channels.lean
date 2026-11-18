@@ -179,6 +179,29 @@ def IProgram.endpoint (ip : IProgram) (v : Nat) (issue : Option Nat := none) :
     return some { event := v, isPut := false, sync, chan := info.chan, slot := info.indices,
                   feeds := [info.indices], dst, buf, shiftBy, inst := c.launchInst, dynShift }
 
+/-- D63: a bare pointer's extent is how far its accesses reach: one past the largest position an
+access known before running touches, and at least 1. An access whose positions are not known
+(D23) is taken as that whole extent, which meets every access that is known; past it no access
+known before running reaches. -/
+def IProgram.sizeBarePointers (ctx : IRContext OpCode) (ip : IProgram) : IProgram := Id.run do
+  let bare := (List.range ip.buffers.size).filter (ip.buffers[·]!.type.unranked)
+  if bare.isEmpty then return ip
+  let mut top : Std.HashMap Nat Int := {}
+  let (fps, _) := ip.footprints ctx
+  for acc in fps do
+    for a in acc do
+      if bare.contains a.buf then
+        top := top.insert a.buf (a.elems.foldl max (top.getD a.buf 0))
+  for v in [0:ip.prog.events.size] do
+    let .ok (some ep) := ip.endpoint v | continue
+    if bare.contains ep.buf then
+      let qs := if ep.isPut then ep.stream.filterMap id else ep.dst.map (·.1)
+      top := top.insert ep.buf (qs.foldl max (top.getD ep.buf 0))
+  let buffers := ip.buffers.mapIdx fun b x =>
+    if x.type.unranked then { x with type := { x.type with shape := [(top.getD b 0).toNat + 1] } }
+    else x
+  return { ip with buffers }
+
 def IProgram.analyzeChannels (ip : IProgram) : Except String ChanAnalysis := do
   let p := ip.prog
   let g := p.graph

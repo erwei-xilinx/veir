@@ -72,6 +72,7 @@ is wrong; the replacement is pending or recorded).
 | D60 | A loop bound or branch condition (`scf.for`, `scf.parallel`, `scf.if`, `affine.if`, `scf.index_switch`) that is an `air.execute` result (or computed from one) is read by the control op when the host reaches it: a blocking event, ordered after the execute only by tokens or earlier blocking ops, as D45 and D57. With no such path, the read is a race | ✅ 2026-11-15 ("(a), same as D45/D57") | `EventKind.decide`, `Instance.controlEnv` | `Chan.raceFree_of_racesOk`, `Chan.decision_reads` |
 | D61 | `air.refeed_count = N` on a put is N sends of its pattern, in order, its token firing after the last: the loop of N puts `air-annotate-refeed` collapsed. The count is the put's own, else its channel declaration's, or the one on the `memref.alloc` of the buffer it sends (an L2 producer). A get is unaffected. A counted buffer sent by more than one put is refused (the count is their sum, and each put's share is unknown) | ✅ 2026-11-17 (derived from the compiled IR, as asked: "can you figure this out from the actual ir stack compiled from llms that use this pattern?"); see the D61 section | `Instance.channelInstance`, `Instance.recordRefeed` | `Chan.*` theorems (the sends are ordinary transfers) |
 | D62 | An offset, size or stride of a transfer (channel or DMA) that an event computes is checked per concrete input, as D59: the program is instantiated with the value the execution computes, and the transfer reads that result as it starts. `Chan.decision_reads` then proves every execution reads that value; otherwise the verdicts are for this input and this is said. A value no execution proposes (including when no channel model can be built, D33) stays over-approximated (D23: the transfer may touch its whole buffer) | ✅ 2026-11-18 ("use option A") | `Instance.transferValues`, `IProgram.offsets`, `ChanModel.decisionsOk` | `Chan.decision_reads` |
+| D63 | An unranked memref (`memref<*xT>`) is a bare pointer: positions from its start, with no upper bound. Its extent is one past the largest position an access known before running reaches (at least 1); an access whose positions are not known (D23) is that whole extent. A `memref.cast` of it to a static shape is that shape's elements from its start; a `memref.reinterpret_cast` of it addresses it with no upper bound. As a whole transfer end it has no length and is refused | ✅ 2026-11-18 ("this memref is a bare pointer") | `parseMemRefType` (`MemRefType.unranked`), `MemRefType.inBounds`, `IProgram.sizeBarePointers`, `viewPositions` | `Chan.*` theorems (positions are ordinary positions) |
 | D22a | Refinement of D22 (2026-11-14): `memref.copy` between whole buffers (no view, no strided layout, equal sizes) copies element by element, as upstream MLIR defines it. Its footprint is unchanged (reads the source, writes the destination); other uninterpreted ops stay opaque | upstream semantics; no AIR decision involved | `finishExecute` | — |
 
 ## D1. Blocking `air.wait_all` ✅
@@ -474,4 +475,19 @@ conditions: rounds propose the values (`Running.proposeValues`), the program is 
 them (`Instance.transferValues`), each transfer's start reads the results (`labelFp`), and
 `decisionsOk` checks the hypotheses of `Chan.decision_reads`: the result is written only by its
 event, which finishes before the transfer starts, with the value used. `Test/Air/d62.mlir`.
+
+## D63. Unranked memrefs are bare pointers (✅ 2026-11-18)
+
+`parseMemRefType` read `memref<*xT>` as a scalar: shape `[]`, one element, element type `*xT`.
+Every access past position 0 was then reported out of bounds (16 lit modules, for instance
+`dma_to_channel_l3_memory_order.mlir`); before D62, a transfer whose offset an event computes hid
+this behind D23's whole-buffer footprint (`air_shimcpy_to_npu.mlir` @func18, @func19).
+
+As a bare pointer it has no size, so only `p >= 0` is checked. The model still needs a finite
+extent, for the whole-buffer footprints of D22/D23 and for the initial contents of arguments:
+`IProgram.sizeBarePointers` takes one past the largest position any access known before running
+reaches. Races do not depend on that choice: every access known before running lies below the
+extent, so an access whose positions are not known, taken as the whole extent, meets each of them,
+and two such accesses meet at position 0. A position computed when running (D23, D54) past the
+extent reads an undefined value. `Test/Air/d63.mlir`.
 

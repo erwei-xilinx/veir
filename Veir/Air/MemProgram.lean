@@ -43,9 +43,16 @@ structure MemRefType where
   /-- The element's width when it is an integer (`index` is 64), else 0. -/
   bitwidth : Nat
   space : Nat
+  /-- `memref<*xT>`: a bare pointer (D63). No upper bound; its extent is how far its accesses
+  reach (`IProgram.sizeBarePointers` sets `shape` to it). -/
+  unranked : Bool := false
 deriving Repr, Inhabited, BEq
 
 def MemRefType.numel (t : MemRefType) : Nat := t.shape.foldl (· * ·) 1
+
+/-- Whether position `p` lies in a buffer of type `t`: a bare pointer (D63) only needs `p ≥ 0`. -/
+def MemRefType.inBounds (t : MemRefType) (p : Int) : Bool :=
+  p ≥ 0 && (t.unranked || p < t.numel)
 
 /-- Row-major linear strides. -/
 def MemRefType.strides (t : MemRefType) : List Int :=
@@ -68,6 +75,9 @@ def parseMemRefType (s : String) : Except String MemRefType := do
   let some shapePart := parts[0]? | throw s!"'{s}': no shape"
   -- Dimensions are `Nx` prefixes; what remains is the element type (which may contain an `x`).
   let mut rest := shapePart.trimAscii.toString.toList
+  -- `*x`: unranked, a bare pointer (D63).
+  let unranked := rest.take 2 == ['*', 'x']
+  if unranked then rest := rest.drop 2
   let mut shape : List Nat := []
   repeat
     if rest.head? == some '?' then throw s!"'{s}': a dynamic shape is not supported"
@@ -86,7 +96,7 @@ def parseMemRefType (s : String) : Except String MemRefType := do
       match leadingNat sp.trimAscii.toString.toList with
       | some (n, _) => pure n
       | none => throw s!"'{s}': unsupported memory space"
-  return { shape, elem, bitwidth, space }
+  return { shape, elem, bitwidth, space, unranked }
 
 /-! ### Values and memory -/
 
@@ -229,6 +239,7 @@ def zeroOf (t : MemRefType) : Val :=
 the pattern is empty. -/
 def sidePositions (t : MemRefType) (offs sizes strides : Array Int) : Except String (List Dim) := do
   if offs.isEmpty && sizes.isEmpty && strides.isEmpty then
+    if t.unranked then throw "a bare pointer (unranked memref, D63) as a whole transfer end has no length"
     return [⟨0, t.numel, 1⟩]
   -- No offsets with sizes and strides: every offset 0 (D14a, as AIR's `get1DOffset` reads it).
   let offs := if offs.isEmpty then Array.replicate sizes.size 0 else offs
@@ -256,8 +267,9 @@ def srcStream (dims : List Dim) (pb pa : Array Int) : Except String (List (Optio
 
 def checkBounds (t : MemRefType) (name : String) (ps : List Int) : Except String Unit := do
   for p in ps do
-    if p < 0 || p ≥ t.numel then
-      throw s!"position {p} is outside {name} ({t.numel} elements)"
+    if !t.inBounds p then
+      throw (if t.unranked then s!"position {p} is before the start of {name} (a bare pointer, D63)"
+        else s!"position {p} is outside {name} ({t.numel} elements)")
 
 /-! ### Footprints -/
 

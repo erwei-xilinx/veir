@@ -596,6 +596,17 @@ def chosenRegion (ctx : IRContext OpCode) (op : OperationPtr)
 def castOps : List String :=
   ["arith.index_cast", "arith.index_castui", "arith.extsi", "arith.extui", "arith.trunci"]
 
+/-- D14b: an explicit pattern (sizes and strides given) on a view whose element 0 lies at
+position 0 of its buffer. It then addresses the buffer as on the buffer itself: AIR's composition
+(`ComposeMemrefOp`) adds the view's offsets, all 0, to the pattern's, and keeps its strides. A view
+at another offset is refused: there the composition counts the view's offsets in units of the
+pattern's strides, which is open (D14). -/
+def patternOnZeroView (st : IState) (key : Nat × Nat) (noSizes noStrides : Bool) : Bool :=
+  !noSizes && !noStrides &&
+    match st.viewPos[key]? with
+    | some (_, ps) => ps[0]? == some 0
+    | none => false
+
 /-- Ops that are control flow or address arithmetic, not effects: never a synchronous op. -/
 def notSyncOp (name : String) : Bool :=
   !["affine.load", "affine.store"].contains name &&
@@ -859,8 +870,10 @@ partial def dmaInstance (ctx : IRContext OpCode) (op : OperationPtr)
     let st ← get
     if let .result e i := captured[m]! then
       if st.viewResults.contains (e, i) then
-        -- A whole view whose element positions are known; a pattern on a view is not (D14).
-        if !(st.viewPos.contains (e, i) && side.offsets.isEmpty && side.sizes.isEmpty && side.strides.isEmpty) then
+        -- A whole view whose element positions are known, or a pattern on a view at offset 0 (D14b).
+        let whole := side.offsets.isEmpty && side.sizes.isEmpty && side.strides.isEmpty
+        if !((whole && st.viewPos.contains (e, i)) ||
+             patternOnZeroView st (e, i) side.sizes.isEmpty side.strides.isEmpty) then
           throw s!"{what}: a DMA on a view with a pattern is not supported (D14, AIR-009); fold the view into the pattern first"
     if (staticBuf st captured[m]!).isNone then
       throw s!"{what}: the DMA's memref does not name a buffer the model knows"
@@ -927,8 +940,9 @@ partial def channelInstance (ctx : IRContext OpCode) (op : OperationPtr)
   let st ← get
   if let .result e i := captured[memref]! then
     if st.viewResults.contains (e, i) then
-      -- A whole view whose element positions are known; a pattern on a view is not (D14).
-      if !(st.viewPos.contains (e, i) && offs.isEmpty && szs.isEmpty && strs.isEmpty && padBefore.isEmpty) then
+      -- A whole view whose element positions are known, or a pattern on a view at offset 0 (D14b).
+      let whole := offs.isEmpty && szs.isEmpty && strs.isEmpty && padBefore.isEmpty
+      if !((whole && st.viewPos.contains (e, i)) || patternOnZeroView st (e, i) szs.isEmpty strs.isEmpty) then
         throw s!"{what}: a channel endpoint on a view with a pattern is not supported (D14, AIR-009); fold the view into the pattern first"
   if (staticBuf st captured[memref]!).isNone then
     throw s!"{what}: the memref does not name a buffer the model knows"

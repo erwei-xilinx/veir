@@ -98,8 +98,9 @@ def IProgram.endpoint (ip : IProgram) (v : Nat) (issue : Option Nat := none) :
     | .result e i => ip.resultBufs[(e, i)]?
     | _ => none
   -- A whole view: its elements, where they lie in the buffer (`IProgram.viewPos`).
+  let whole := info.side.offsets.isEmpty && info.side.sizes.isEmpty && info.side.strides.isEmpty
   let viewP : Option (Nat × Array Int) := match c.env[info.side.memref]? with
-    | some (.result e i) => ip.viewPos[(e, i)]?
+    | some (.result e i) => if whole then ip.viewPos[(e, i)]? else none
     | _ => none
   if let some (vb, P) := viewP then
     if issue.isSome then throw s!"{what}: an air.channel.issue on a view is not supported"

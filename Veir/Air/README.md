@@ -55,7 +55,7 @@ completes and is race-free, `Chan.decision_reads` proves every execution reads t
 otherwise the output says this is not established, and its verdicts are for that control flow.
 
 Refused, pending a decision or work:
-- an access pattern on a view (D14, AIR-009);
+- an access pattern on a view at a non-zero offset (D14; at offset 0 it is accepted, D14b);
 - a slot fed both by a broadcast put and by other puts;
 - programs over 20000 events; run-time offsets over big buffers may time out (the race scan treats
   such an access as the whole buffer, element by element).

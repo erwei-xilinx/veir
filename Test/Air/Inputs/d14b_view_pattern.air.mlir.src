@@ -1,0 +1,31 @@
+module {
+  air.channel @c [1, 1]
+  // D14b: an explicit pattern on a collapse_shape view (element 0 at position 0) addresses the
+  // buffer as on the buffer itself: [0] [4] [2] sends src[0], src[2], src[4], src[6].
+  func.func @collapsed(%src: memref<4x2xi32>, %out: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%l) in (%ls=%c1) args(%a=%src, %o=%out) : memref<4x2xi32>, memref<4xi32> {
+      %c0 = arith.constant 0 : index
+      %c2 = arith.constant 2 : index
+      %c4 = arith.constant 4 : index
+      %v = memref.collapse_shape %a [[0, 1]] : memref<4x2xi32> into memref<8xi32>
+      air.channel.put @c[%c0, %c0] (%v[%c0] [%c4] [%c2]) : (memref<8xi32>)
+      air.channel.get @c[%c0, %c0] (%o[] [] []) : (memref<4xi32>)
+    }
+    return
+  }
+  // A rank-reducing subview at offset 0 with a pattern whose strides are not the view's: the
+  // pattern addresses the buffer, [0, 1] [2, 2] [4, 1] reads src positions 1, 2, 5, 6.
+  func.func @rank_reduced(%src: memref<2x4x1xi32>, %out: memref<4xi32>) {
+    %c1 = arith.constant 1 : index
+    air.launch (%l) in (%ls=%c1) args(%a=%src, %o=%out) : memref<2x4x1xi32>, memref<4xi32> {
+      %c0 = arith.constant 0 : index
+      %c2 = arith.constant 2 : index
+      %c4 = arith.constant 4 : index
+      %u = arith.constant 1 : index
+      %v = memref.subview %a[0, 0, 0] [2, 4, 1] [1, 1, 1] : memref<2x4x1xi32> to memref<2x4xi32, strided<[4, 1]>>
+      air.dma_memcpy_nd (%o[] [] [], %v[%c0, %u] [%c2, %c2] [%c4, %u]) : (memref<4xi32>, memref<2x4xi32, strided<[4, 1]>>)
+    }
+    return
+  }
+}

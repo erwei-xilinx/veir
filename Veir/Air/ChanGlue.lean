@@ -1,7 +1,7 @@
 module
 
 public import Veir.Air.Channels
-public import Veir.Air.ChanFast
+public import Veir.Air.ChanEventReach
 
 namespace Veir.Air
 
@@ -17,7 +17,7 @@ so D20 and D21 follow from the model rather than being checked separately. A DMA
 are only known when running stays one event (D7, D23).
 - deadlock: `Chan.checkH` on the execution `Chan.genTrace` proposes (`checkH_true`,
   `checkH_false`);
-- races: `Chan.racesOk` on that execution (`raceFree_of_racesOk`), with the footprints below;
+- races: `Chan.racesOkE` on that execution (`raceFree_of_racesOkE`), with the footprints below;
 - the outcome: that execution, run on concrete memory. When it is race-free, every execution
   ends the same way (`Chan.outcome_uniqueH`).
 
@@ -111,6 +111,24 @@ def IProgram.putOrders (ip : IProgram) (ca : ChanAnalysis) (limit : Nat := 64) :
       throw s!"more than {limit} orders of puts across the program's streams (D52); too many to check one by one"
   return choices
 
+/-- The ends of one stream, in stream order: each end, the stream position of its first element,
+and its elements. From cursor `c`, the first end whose run reaches past position `m`. Ends cover
+consecutive runs, so for increasing `m` the cursor only moves forward. -/
+def endCursor {α : Type} (ends : Array (Endpoint × Nat × Array α)) (c m : Nat) : Nat := Id.run do
+  let mut c := c
+  while h : c < ends.size do
+    let (_, s, a) := ends[c]
+    if m < s + a.size then break
+    c := c + 1
+  return c
+
+/-- The end at cursor `c`, if it covers position `m`: the end `find?` on `s ≤ m < s + count` gives. -/
+def endAt? {α : Type} (ends : Array (Endpoint × Nat × Array α)) (c m : Nat) :
+    Option (Endpoint × Nat × Array α) :=
+  match ends[c]? with
+  | some e@(_, s, _) => if s ≤ m then some e else none
+  | none => none
+
 def IProgram.chanModel (ip : IProgram) (ca : ChanAnalysis)
     (putOrder : List (StreamKey × List Nat) := []) : Except String ChanModel := do
   let p := ip.prog
@@ -147,48 +165,58 @@ def IProgram.chanModel (ip : IProgram) (ca : ChanAnalysis)
     for (a, b) in puts.zip puts.tail do
       if !g.reachFast rows a.event b.event && (putOrder.lookup (chan, slots, inst)).isNone then
         throw s!"{name}: puts of events {a.event} and {b.event} feed it with no token path between them; choose an order (D52, putOrders)"
-    let mut pr : List (Endpoint × Nat) := []
+    -- Each end's elements as an array, its first position in the stream, and its count, once:
+    -- the element loop below then walks them with a cursor instead of searching.
+    let mut pr : Array (Endpoint × Nat × Array (Option Int)) := #[]
     let mut ps := 0
     for ep in puts do
-      pr := pr ++ [(ep, ps)]
-      ps := ps + ep.count
-    let mut grs : List (List (Endpoint × Nat) × Nat) := []
+      let arr := ep.stream.toArray
+      pr := pr.push (ep, ps, arr)
+      ps := ps + arr.size
+    let mut grs : Array (Array (Endpoint × Nat × Array Int) × Nat) := #[]
     for slot in slots do
       let gets := list.filter fun ep => !ep.isPut && ep.chan == chan && ep.slot == slot && ep.inst == inst
       for (a, b) in gets.zip gets.tail do
         if !g.reachFast rows a.event b.event then
           throw s!"@{chan}{slot}: gets of events {a.event} and {b.event} read it with no token path between them (D33)"
-      let mut gr : List (Endpoint × Nat) := []
+      let mut gr : Array (Endpoint × Nat × Array Int) := #[]
       let mut gs := 0
       for ep in gets do
-        gr := gr ++ [(ep, gs)]
-        gs := gs + ep.count
-      grs := grs ++ [(gr, gs)]
+        let arr := ((ep.dst.filter (!·.2)).map (·.1)).toArray
+        gr := gr.push (ep, gs, arr)
+        gs := gs + arr.size
+      grs := grs.push (gr, gs)
     let total := grs.foldl (fun acc (_, gs) => max acc gs) ps
     let first := elems.size
+    let mut pc := 0
+    let mut gcs : Array Nat := grs.map fun _ => 0
     for m in [0:total] do
-      let src := pr.find? fun (ep, s) => s ≤ m && m < s + ep.count
-      let dsts : List (Option (Endpoint × Nat)) :=
-        grs.map fun (gr, _) => gr.find? fun ((ep : Endpoint), s) => s ≤ m && m < s + ep.count
+      pc := endCursor pr pc m
+      let src := endAt? pr pc m
+      let mut dsts : List (Option (Endpoint × Nat × Array Int)) := []
+      for j in [0:grs.size] do
+        let gr := grs[j]!.1
+        let c := endCursor gr gcs[j]! m
+        gcs := gcs.set! j c
+        dsts := dsts ++ [endAt? gr c m]
       -- D51: point to point, buffered iff an end is sync. D53: a broadcast is buffered iff its
       -- put is sync; from an async put it meets every get at once, as the hardware does.
       let srcSync := (src.map (·.1.sync)).getD false
-      let dstSync := dsts.any fun d => (d.map fun ((ep : Endpoint), _) => ep.sync).getD false
+      let dstSync := dsts.any fun d => (d.map fun (ep, _, _) => ep.sync).getD false
       let buffered := if slots.length > 1 then srcSync else srcSync || dstSync
       let prev := if m == 0 then none else some (first + m - 1)
-      elems := elems.push ⟨src.map (·.1.event), dsts.map fun d => d.map fun ((ep : Endpoint), _) => ep.event, prev, buffered⟩
-      srcOf := srcOf.push (src.map fun (ep, s) => (ep.event, m - s))
-      dstOf := dstOf.push (dsts.map fun d => d.map fun ((ep : Endpoint), s) => (ep.event, m - s))
+      elems := elems.push ⟨src.map (·.1.event), dsts.map fun d => d.map fun (ep, _, _) => ep.event, prev, buffered⟩
+      srcOf := srcOf.push (src.map fun (ep, s, _) => (ep.event, m - s))
+      dstOf := dstOf.push (dsts.map fun d => d.map fun (ep, s, _) => (ep.event, m - s))
       slotName := slotName.push name
       pos := pos.push m
-      srcLoc := srcLoc.push (src.bind fun (ep, s) => (ep.stream[m - s]?).join.map (ep.buf, ·))
+      srcLoc := srcLoc.push (src.bind fun (ep, s, a) => (a[m - s]?).join.map (ep.buf, ·))
       srcBuf := srcBuf.push ((src.map (·.1.buf)).getD 0)
-      dstLoc := dstLoc.push (dsts.map fun d => d.bind fun ((ep : Endpoint), s) =>
-        ((ep.dst.filter (!·.2)).map (·.1))[m - s]?.map (ep.buf, ·))
+      dstLoc := dstLoc.push (dsts.map fun d => d.bind fun (ep, s, a) => a[m - s]?.map (ep.buf, ·))
       srcShift := srcShift.push (src.bind (·.1.shiftBy))
-      dstShift := dstShift.push (dsts.map fun d => d.bind fun ((ep : Endpoint), _) => ep.shiftBy)
+      dstShift := dstShift.push (dsts.map fun d => d.bind fun (ep, _, _) => ep.shiftBy)
       srcDyn := srcDyn.push ((src.map (·.1.dynShift)).getD [])
-      dstDyn := dstDyn.push (dsts.map fun d => (d.map fun ((ep : Endpoint), _) => ep.dynShift).getD [])
+      dstDyn := dstDyn.push (dsts.map fun d => (d.map fun (ep, _, _) => ep.dynShift).getD [])
   -- DMAs with known patterns: a stream from the event to itself, unbuffered (D20, D21).
   let mut dmaEvents : Std.HashSet Nat := {}
   for v in [0:n] do
@@ -368,7 +396,7 @@ def IProgram.fireLabel (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalys
     return { s with m := { s.m with mem } }
 
 /-- The checked verdicts: an execution, whether it completes (`none`: internal error), whether it
-is race-free (`Chan.racesOk`), and witnesses of races for messages. -/
+is race-free (`Chan.racesOkE`), and witnesses of races for messages. -/
 structure ChanVerdict where
   trace : List Chan.Label
   completes : Option Bool
@@ -385,9 +413,10 @@ def ChanModel.verdict (cm : ChanModel) (fp : Chan.LFp) (checkRaces := true) : Ch
   -- `outcome_uniqueH` needs `Chan.wfB`; a model that fails it is an internal error.
   let c := if Chan.wfB cp then Chan.checkH cp idx t else none
   if c == some true && checkRaces then
-    let g := Chan.posGraphH cp idx t (Chan.positions t)
-    let ok := Chan.racesOk g fp t
-    let ws := if ok then [] else Chan.raceWitnesses g fp t
+    -- Orders between positions come from the event graph (`Chan.racesOkE`): no matrix over
+    -- every label of the execution.
+    let ok := Chan.racesOkE cp idx fp t
+    let ws := if ok then [] else Chan.raceWitnessesE cp idx fp t
     let arr := t.toArray
     let alt := ws.head?.bind fun (i, j) =>
       let (x, y) := (arr[i]!, arr[j]!)

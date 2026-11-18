@@ -1,6 +1,6 @@
 module
 
-public import Veir.Air.ChanFast
+public import Veir.Air.ChanEventReach
 
 namespace Veir.Air
 
@@ -127,13 +127,13 @@ variable {fp : LFp} {eff : Label → Mem V → Mem V} {idx : Array (List Nat)}
 /-- **A result, once written, is the checked execution's.** In every execution, partial or
 complete, in which `finish v` has fired, location `(B, v)` holds what `t` ends with. -/
 theorem value_after_writer (hw : wfB p = true) (hfr : LFramed fp eff)
-    (hc : checkH p idx t = some true) (hr : racesOk (posGraphH p idx t ix) fp t = true)
+    (hc : checkH p idx t = some true) (hr : racesOkE p idx fp t = true)
     {B : Nat} (hB : soleWritersB fp (cands p) B = true) {v : Nat}
     {s F : List Label} (hs : Run p [] s F) (hx : Label.finish v ∈ s) (m : Mem V) :
     runL eff s m (B, Int.ofNat v) = runL eff t m (B, Int.ofNat v) := by
   obtain ⟨G₀, r₀, d₀⟩ := checkH_true hc
   obtain ⟨u, H, ru, dH⟩ := completes_from_anywhere r₀ d₀ hs
-  have whole := outcome_uniqueH (ix := ix) hw hfr hc hr (hs.trans ru) dH m
+  have whole := outcome_uniqueE hw hfr hc hr (hs.trans ru) dH m
   rw [runL_append] at whole
   have hxF : Label.finish v ∈ F := (hs.mem _).mpr (Or.inl hx)
   rw [← whole, runL_outside hfr u _ (fun z hz hwz => ?_)]
@@ -145,7 +145,7 @@ theorem value_after_writer (hw : wfB p = true) (hfr : LFramed fp eff)
 before a label `y` reading `(B, v)` (position `j`), then in every execution, when `y` fires,
 `(B, v)` holds what `t` ends with. -/
 theorem decision_reads (hw : wfB p = true) (hfr : LFramed fp eff)
-    (hc : checkH p idx t = some true) (hr : racesOk (posGraphH p idx t ix) fp t = true)
+    (hc : checkH p idx t = some true) (hr : racesOkE p idx fp t = true)
     {B : Nat} (hB : soleWritersB fp (cands p) B = true) {v : Nat} {y : Label}
     (hwx : lwritesB fp (.finish v) (B, Int.ofNat v) = true)
     (hry : lreadsB fp y (B, Int.ofNat v) = true)
@@ -167,7 +167,7 @@ theorem decision_reads (hw : wfB p = true) (hfr : LFramed fp eff)
     obtain ⟨a, ha, hk, hb, he⟩ := lwritesB_iff.mp hwx
     obtain ⟨b, hb', hk', hbb, he'⟩ := lreadsB_iff.mp hry
     exact ⟨a, ha, b, hb', hb.trans hbb.symm, Or.inl hk, _, he, he'⟩
-  have hrf := raceFree_of_racesOk (hbEdges_posGraphH (ix := ix) (idx := idx)) hr
+  have hrf := raceFree_of_racesOkE hr
   have hmx : Label.finish v ∈ t := hti ▸ List.getElem_mem hil
   have hmy : y ∈ t := htj ▸ List.getElem_mem hjl
   have hhb : HB p (.finish v) y := by

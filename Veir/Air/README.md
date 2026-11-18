@@ -33,7 +33,7 @@ What the proven checks give, for any program the glue accepts:
 | --- | --- | --- |
 | no deadlock | `Chan.checkH_true`, `Chan.completes_from_anywhere` | an execution completes, and from every state an execution reaches, one still can |
 | DEADLOCK | `Chan.checkH_false` | no execution completes |
-| race-free, outcome | `Chan.raceFree_of_racesOk`, `Chan.outcome_uniqueH` | every complete execution ends with the printed memory (given effects framed by footprints) |
+| race-free, outcome | `Chan.raceFree_of_racesOkE`, `Chan.outcome_uniqueE` | every complete execution ends with the printed memory (given effects framed by footprints) |
 | race, second execution | `Chan.checkH_true` on the second execution | both executions are valid; that they end differently is computed |
 | control flow on device values (D59) | `Chan.decision_reads` | every execution, at each decision, reads the value the program was instantiated with |
 | AIE: outcomes, deadlock, fault | `Aie.Cert.parents_sound` | each is reached by an execution of the model |
@@ -294,6 +294,7 @@ None uses `Lean.ofReduceBool` or an axiom of this development.
 | `Chan.MemSpec.framed` | the element labels' effects (read into flight, write at each destination) are framed by their footprints | events framed |
 | `Chan.checkH_true`, `Chan.checkH_false` (`ChanFast.lean`) | the fast checker on a proposed execution is right both ways | — |
 | `Chan.raceFree_of_racesOk` | the location-by-location race scan is sound | `HBEdges` (built in) |
+| `Chan.raceFree_of_racesOkE` | the same scan with orders from the event graph (`finishersL`, `startersL`, `hb_finish_start`) and short label paths (`localReach`): no matrix over every label | — |
 | `Chan.scanOk_sound` | one location's scan orders every conflicting pair, by transitivity | — |
 | `Chan.outcome_uniqueH` | the end-to-end statement of the fast checks | `WF`, `LFramed` |
 | `Aie.Cert.parents_sound`, `Cert.closed_complete`, `Cert.exact` (`AieCert.lean`) | an exploration's states are reachable; closed, they are all the reachable states | — |
@@ -319,7 +320,7 @@ checked exhaustively, not proven.
 
 **The model built from IR** (`analyzeChannels`, `chanModel`, `labelFp`, `fireLabel`: which put
 feeds which get, element locations, footprints, concrete effects) is trusted, and tested. The
-verdicts on the model are proven: `checkH`, `racesOk`, `outcome_uniqueH`. D36 is not assumed; it
+verdicts on the model are proven: `checkH`, `racesOkE`, `outcome_uniqueE`. D36 is not assumed; it
 follows from the element semantics.
 
 **The AIE model** (`Aie.extract`, `Model.steps`, `Model.settle`) is the definition of T1-T10;

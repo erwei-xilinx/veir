@@ -52,13 +52,66 @@ variable {p : Prog}
 def Indexed (p : Prog) (idx : Array (List Nat)) : Prop :=
   ∀ k e v, p.elems[k]? = some e → (e.src = some v ∨ some v ∈ e.dsts) → k ∈ idx.getD v []
 
+/-- `addMarks v ks m`: `v` is added to `m[k]` for each `k` of `ks` (where `m` has an entry). -/
+def addMarks (v : Nat) : List Nat → Array (List Nat) → Array (List Nat)
+  | [], m => m
+  | k :: ks, m => addMarks v ks (m.modify k (v :: ·))
+
+/-- `marksOf idx n`: for each of the `n` elements, the events whose index lists it. -/
+def marksOf (idx : Array (List Nat)) (n : Nat) : Array (List Nat) :=
+  (List.range idx.size).foldl (fun m v => addMarks v (idx.getD v []) m) (Array.replicate n [])
+
+/-- Every event a mark names lists the element in the index. -/
+def MarksOk (idx : Array (List Nat)) (m : Array (List Nat)) : Prop :=
+  ∀ k l v, m[k]? = some l → v ∈ l → k ∈ idx.getD v []
+
+theorem MarksOk.addMarks {idx : Array (List Nat)} {v : Nat} :
+    ∀ (ks : List Nat) (m : Array (List Nat)), MarksOk idx m → (∀ k ∈ ks, k ∈ idx.getD v []) →
+      MarksOk idx (Chan.addMarks v ks m)
+  | [], _, h, _ => h
+  | k :: ks, m, h, hks => by
+    apply MarksOk.addMarks ks
+    · intro k' l u hk' hu
+      rw [Array.getElem?_modify] at hk'
+      by_cases hkk : k = k'
+      · subst hkk
+        cases hm : m[k]? with
+        | none => simp [hm] at hk'
+        | some l₀ =>
+          simp only [hm, ite_true, Option.map_some, Option.some.injEq] at hk'
+          subst hk'
+          rcases List.mem_cons.mp hu with rfl | hu
+          · exact hks _ (List.mem_cons_self ..)
+          · exact h _ _ _ hm hu
+      · simp only [hkk, ite_false] at hk'
+        exact h _ _ _ hk' hu
+    · exact fun k' hk' => hks _ (List.mem_cons_of_mem _ hk')
+
+theorem marksOf_ok (idx : Array (List Nat)) (n : Nat) : MarksOk idx (marksOf idx n) := by
+  unfold marksOf
+  generalize hm : Array.replicate n ([] : List Nat) = m₀
+  have h₀ : MarksOk idx m₀ := by
+    intro k l v hk hv
+    subst hm
+    rw [Array.getElem?_replicate] at hk
+    split at hk <;> simp_all
+  suffices ∀ (vs : List Nat) (m : Array (List Nat)), MarksOk idx m →
+      MarksOk idx (vs.foldl (fun m v => Chan.addMarks v (idx.getD v []) m) m) from this _ _ h₀
+  intro vs
+  induction vs with
+  | nil => exact fun _ h => h
+  | cons v vs ih => exact fun m h => ih _ (MarksOk.addMarks _ _ h fun _ hk => hk)
+
+/-- `Indexed`, checked through the marks: each element's events are few, so this is linear. -/
 def indexedB (p : Prog) (idx : Array (List Nat)) : Bool :=
+  let marks := marksOf idx p.elems.size
   (List.range p.elems.size).all fun k =>
     match p.elems[k]? with
     | none => true
     | some e =>
-      (match e.src with | none => true | some v => (idx.getD v []).contains k) &&
-        e.dsts.all fun o => match o with | none => true | some v => (idx.getD v []).contains k
+      let ms := marks.getD k []
+      (match e.src with | none => true | some v => ms.contains v) &&
+        e.dsts.all fun o => match o with | none => true | some v => ms.contains v
 
 theorem indexed_of_indexedB {idx : Array (List Nat)} (h : indexedB p idx = true) : Indexed p idx := by
   intro k e v hk hv
@@ -66,11 +119,20 @@ theorem indexed_of_indexedB {idx : Array (List Nat)} (h : indexedB p idx = true)
   have := h k (elem_lt hk)
   rw [hk] at this
   simp only [Bool.and_eq_true] at this
-  rcases hv with hv | hv
-  · have := this.1; rw [hv] at this; simpa using this
-  · have := this.2
-    simp only [List.all_eq_true] at this
-    simpa using this _ hv
+  have hmem : v ∈ (marksOf idx p.elems.size).getD k [] := by
+    rcases hv with hv | hv
+    · have := this.1; rw [hv] at this; simpa using this
+    · have := this.2
+      simp only [List.all_eq_true] at this
+      simpa using this _ hv
+  have hok := marksOf_ok idx p.elems.size
+  cases hmk : (marksOf idx p.elems.size)[k]? with
+  | none =>
+    rw [Array.getD_eq_getD_getElem?, hmk] at hmem
+    simp at hmem
+  | some l =>
+    rw [Array.getD_eq_getD_getElem?, hmk] at hmem
+    exact hok k l v hmk hmem
 
 /-! ### Enabledness on a hash set -/
 
@@ -644,7 +706,15 @@ def genTraceWith (p : Prog) (idx : Array (List Nat)) (extra : Label → List Lab
   let mut cnt : Std.HashMap Label Nat := {}
   let mut succ : Std.HashMap Label (List Label) := {}
   for l in labels do
-    let ps := (hbPredsI p idx l ++ extra l).eraseDups
+    -- Distinct predecessors, in first-seen order (`eraseDups`, in linear time).
+    let ps := Id.run do
+      let mut seen : Std.HashSet Label := {}
+      let mut out : Array Label := #[]
+      for z in hbPredsI p idx l ++ extra l do
+        if !seen.contains z then
+          seen := seen.insert z
+          out := out.push z
+      return out.toList
     cnt := cnt.insert l ps.length
     for z in ps do
       succ := succ.insert z (l :: succ.getD z [])

@@ -1900,9 +1900,9 @@ def IProgram.staticDma (ip : IProgram) (v : Nat) :
 /-- What each event reads and writes, from what is known before running: constants, host
 arithmetic (loop induction variables included), the scalar arguments given. An access whose
 elements are not known is the whole buffer (D23). Also returns problems inside single DMAs. -/
-def IProgram.footprints (ctx : IRContext OpCode) (ip : IProgram) :
-    Array (List Access) × Array EventIssue := Id.run do
-  let whole (b : Nat) : List Int := (List.range ip.buffers[b]!.type.numel).map Int.ofNat
+def IProgram.footprintsR (ctx : IRContext OpCode) (ip : IProgram) :
+    Array (List RAcc) × Array EventIssue := Id.run do
+  let whole (b : Nat) : List (Int × Int) := [(0, (ip.buffers[b]!.type.numel : Int))]
   let staticOf (h : HVal) : Option Val := match h with | .val v => some v | _ => none
   let bufOfH (h : HVal) : Option Nat := match h with
     | .val (.buf b) => some b
@@ -1912,12 +1912,12 @@ def IProgram.footprints (ctx : IRContext OpCode) (ip : IProgram) :
   let mut issues := #[]
   for e in ip.prog.events, v in [0:ip.prog.events.size] do
     let c := ip.ctxs[v]!
-    let mut acc : List Access := []
+    let mut acc : List RAcc := []
     match e.kind with
     | .dma | .dmaBlocking =>
       -- Known patterns (whole views included): the streams themselves.
       if let some (sb, stream, db, dpos) := ip.staticDma v then
-        fps := fps.push [⟨sb, .read, stream.filterMap id⟩, ⟨db, .write, dpos⟩]
+        fps := fps.push [⟨sb, .read, runsOf (stream.filterMap id)⟩, ⟨db, .write, runsOf dpos⟩]
         continue
       let info := ip.dmas[v]!
       let some sb := c.env[info.src.memref]? >>= bufOfH | fps := fps.push acc; continue
@@ -1944,7 +1944,7 @@ def IProgram.footprints (ctx : IRContext OpCode) (ip : IProgram) :
           if stream.length != dpos.length then
             issues := issues.push ⟨v, s!"invalid air.dma_memcpy_nd: the source stream has {stream.length} element(s) but the destination pattern {dpos.length} (D20)"⟩
           let reads := stream.filterMap id
-          acc := [⟨sb, .read, reads⟩, ⟨db, .write, dpos⟩]
+          acc := [⟨sb, .read, runsOf reads⟩, ⟨db, .write, runsOf dpos⟩]
           if let .error m := checkBounds st ip.buffers[sb]!.name reads then
             issues := issues.push ⟨v, s!"air.dma_memcpy_nd reads out of bounds: {m}"⟩
           if let .error m := checkBounds dt ip.buffers[db]!.name dpos then
@@ -1983,11 +1983,11 @@ def IProgram.footprints (ctx : IRContext OpCode) (ip : IProgram) :
         else if iname == "memref.load" then
           if let some b := operands[0]? >>= bufOf then
             acc := acc ++ [⟨b, .read, match index b (operands.extract 1 operands.size) with
-              | some q => [q] | none => whole b⟩]
+              | some q => [(q, q + 1)] | none => whole b⟩]
         else if iname == "memref.store" then
           if let some b := operands[1]? >>= bufOf then
             acc := acc ++ [⟨b, .write, match index b (operands.extract 2 operands.size) with
-              | some q => [q] | none => whole b⟩]
+              | some q => [(q, q + 1)] | none => whole b⟩]
         else if iname == "affine.load" || iname == "affine.store" then
           let isLoad := iname == "affine.load"
           if let some b := operands[if isLoad then 0 else 1]? >>= bufOf then
@@ -2002,7 +2002,7 @@ def IProgram.footprints (ctx : IRContext OpCode) (ip : IProgram) :
                 q := q + n * stv
               return q
             acc := acc ++ [⟨b, if isLoad then .read else .write, match q with
-              | some q => [q] | none => whole b⟩]
+              | some q => [(q, q + 1)] | none => whole b⟩]
         else
           for b in (memrefOperands ctx inner).filterMap bufOf do
             acc := acc ++ [⟨b, .read, whole b⟩]
@@ -2011,6 +2011,12 @@ def IProgram.footprints (ctx : IRContext OpCode) (ip : IProgram) :
     | _ => pure ()
     fps := fps.push acc
   return (fps, issues)
+
+/-- The footprints as positions (`footprintsR`'s ranges listed). -/
+def IProgram.footprints (ctx : IRContext OpCode) (ip : IProgram) :
+    Array (List Access) × Array EventIssue :=
+  let (r, i) := ip.footprintsR ctx
+  (r.map (·.map RAcc.toAccess), i)
 
 /-- The races, with a witness each: exactly `races` (proven exact by `raceFreeB_iff`). -/
 def IProgram.raceReports (ip : IProgram) (fps : Array (List Access)) : List RaceReport :=

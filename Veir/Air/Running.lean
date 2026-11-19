@@ -18,7 +18,7 @@ program is instantiated in rounds:
 3. repeat until nothing is pending.
 
 The rounds only *propose* values; nothing about them is proven. The whole program they end with
-is then checked: if it completes and is race-free, `Chan.decision_reads` proves that every
+is then checked: if it completes and is race-free, `Chan.decision_readsRF` proves that every
 execution, at each decision, reads the value the instantiation used (`decisionsOk` checks its
 hypotheses). If not, the verdicts are those of the program with these values, and whether every
 execution takes this control flow is not established.
@@ -49,21 +49,21 @@ def IProgram.proposeValues (ctx : IRContext OpCode) (ip : IProgram) :
         out := out ++ [(k.get!, n.get!)]
   return out
 
-/-- The hypotheses of `Chan.decision_reads` for every decision, on a complete execution `t` and
+/-- The hypotheses of `Chan.decision_readsRF` for every decision, on a complete execution `t` and
 the state `s` it ends with: results are written only by their events (`soleWritersB`), each
 decision fires after the events it reads and reads their results, and those results are the
 values the instantiation used. -/
-def ChanModel.decisionsOk (cm : ChanModel) (ip : IProgram) (fp : Chan.LFp) (t : List Chan.Label)
+def ChanModel.decisionsOk (cm : ChanModel) (ip : IProgram) (fp : Chan.RFp) (t : List Chan.Label)
     (s : MState) : Bool :=
   let B := ip.resultBuf
   let pos := Chan.positions t
-  Chan.soleWritersB fp (Chan.cands cm.prog) B &&
+  Chan.soleWritersBR fp (Chan.cands cm.prog) B &&
   (ip.decides.all fun d =>
     match d.values with
     | none => false
     | some ns => (d.reads.zip ns).all fun ((e, i), n) =>
-      Chan.lwritesB fp (.finish e) (B, Int.ofNat e) &&
-      Chan.lreadsB fp (.finish d.event) (B, Int.ofNat e) &&
+      Chan.lwritesBR fp (.finish e) (B, Int.ofNat e) &&
+      Chan.lreadsBR fp (.finish d.event) (B, Int.ofNat e) &&
       (match pos[Chan.Label.finish e]?, pos[Chan.Label.finish d.event]? with
        | some a, some b => decide (a < b) && t[a]? == some (.finish e) &&
            t[b]? == some (.finish d.event)
@@ -75,8 +75,8 @@ def ChanModel.decisionsOk (cm : ChanModel) (ip : IProgram) (fp : Chan.LFp) (t : 
     match d.values with
     | none => true
     | some ns => (d.reads.zip ns).all fun ((e, i), n) =>
-      Chan.lwritesB fp (.finish e) (B, Int.ofNat e) &&
-      Chan.lreadsB fp (.start d.event) (B, Int.ofNat e) &&
+      Chan.lwritesBR fp (.finish e) (B, Int.ofNat e) &&
+      Chan.lreadsBR fp (.start d.event) (B, Int.ofNat e) &&
       (match pos[Chan.Label.finish e]?, pos[Chan.Label.start d.event]? with
        | some a, some b => decide (a < b) && t[a]? == some (.finish e) &&
            t[b]? == some (.start d.event)
@@ -86,7 +86,7 @@ def ChanModel.decisionsOk (cm : ChanModel) (ip : IProgram) (fp : Chan.LFp) (t : 
 /-- What the decisions of the whole program are known to be. -/
 inductive DecisionStatus where
   | none
-  /-- Checked on every model (one per order of puts, D52): `Chan.decision_reads` applies. -/
+  /-- Checked on every model (one per order of puts, D52): `Chan.decision_readsRF` applies. -/
   | proven (n : Nat)
   | notEstablished (n : Nat) (why : String)
   /-- No value could be proposed for a decision: the program is instantiated only up to the
@@ -127,11 +127,11 @@ partial def instantiateRunning (ctx : IRContext OpCode) (func : OperationPtr) (s
     let (ca, orders) ← match models with
       | .ok r => pure r
       | .error e => if ip.decides.isEmpty then return (ip, round, .notEstablished n e) else throw e
-    let (fps0, _) := ip.footprints ctx
+    let (fps0, _) := ip.footprintsR ctx
     let mut why : Option String := none
     for o in orders do
       let cm ← ip.chanModel ca o
-      let fp := ip.labelFp ca cm fps0
+      let fp := ip.labelRFp ca cm fps0
       let cv := cm.verdict fp
       if cv.completes != some true then
         why := why <|> some "the program does not complete"

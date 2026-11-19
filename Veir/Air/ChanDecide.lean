@@ -124,16 +124,16 @@ section
 variable {fp : LFp} {eff : Label → Mem V → Mem V} {idx : Array (List Nat)}
   {ix : Std.HashMap Label Nat} {t : List Label}
 
-/-- **A result, once written, is the checked execution's.** In every execution, partial or
-complete, in which `finish v` has fired, location `(B, v)` holds what `t` ends with. -/
-theorem value_after_writer (hw : wfB p = true) (hfr : LFramed fp eff)
-    (hc : checkH p idx t = some true) (hr : racesOkE p idx fp t = true)
+/-- **A result, once written, is the complete execution `t`'s**, when the program is race-free
+on its labels: in every execution, partial or complete, in which `finish v` has fired, location
+`(B, v)` holds what `t` ends with. -/
+theorem value_after_writerRF (hw : wfB p = true) (hfr : LFramed fp eff) {G₀ : List Label}
+    (r₀ : Run p [] t G₀) (d₀ : Done p G₀) (hrf : RaceFree p fp (· ∈ t))
     {B : Nat} (hB : soleWritersB fp (cands p) B = true) {v : Nat}
     {s F : List Label} (hs : Run p [] s F) (hx : Label.finish v ∈ s) (m : Mem V) :
     runL eff s m (B, Int.ofNat v) = runL eff t m (B, Int.ofNat v) := by
-  obtain ⟨G₀, r₀, d₀⟩ := checkH_true hc
   obtain ⟨u, H, ru, dH⟩ := completes_from_anywhere r₀ d₀ hs
-  have whole := outcome_uniqueE hw hfr hc hr (hs.trans ru) dH m
+  have whole := (deterministic (wf_of_wfB hw) hfr r₀ d₀ (hs.trans ru) dH hrf m).symm
   rw [runL_append] at whole
   have hxF : Label.finish v ∈ F := (hs.mem _).mpr (Or.inl hx)
   rw [← whole, runL_outside hfr u _ (fun z hz hwz => ?_)]
@@ -141,18 +141,26 @@ theorem value_after_writer (hw : wfB p = true) (hfr : LFramed fp eff)
   subst this
   exact ru.not_mem _ hz hxF
 
-/-- **D59: what a decision reads.** If the checked execution fires `finish v` (position `i`)
-before a label `y` reading `(B, v)` (position `j`), then in every execution, when `y` fires,
-`(B, v)` holds what `t` ends with. -/
-theorem decision_reads (hw : wfB p = true) (hfr : LFramed fp eff)
+/-- **A result, once written, is the checked execution's.** -/
+theorem value_after_writer (hw : wfB p = true) (hfr : LFramed fp eff)
     (hc : checkH p idx t = some true) (hr : racesOkE p idx fp t = true)
+    {B : Nat} (hB : soleWritersB fp (cands p) B = true) {v : Nat}
+    {s F : List Label} (hs : Run p [] s F) (hx : Label.finish v ∈ s) (m : Mem V) :
+    runL eff s m (B, Int.ofNat v) = runL eff t m (B, Int.ofNat v) := by
+  obtain ⟨G₀, r₀, d₀⟩ := checkH_true hc
+  exact value_after_writerRF hw hfr r₀ d₀ (raceFree_of_racesOkE hr) hB hs hx m
+
+/-- **D59: what a decision reads**, from a complete execution `t` on whose labels the program is
+race-free. If `t` fires `finish v` (position `i`) before a label `y` reading `(B, v)` (position
+`j`), then in every execution, when `y` fires, `(B, v)` holds what `t` ends with. -/
+theorem decision_readsRF (hw : wfB p = true) (hfr : LFramed fp eff) {G₀ : List Label}
+    (r₀ : Run p [] t G₀) (d₀ : Done p G₀) (hrf : RaceFree p fp (· ∈ t))
     {B : Nat} (hB : soleWritersB fp (cands p) B = true) {v : Nat} {y : Label}
     (hwx : lwritesB fp (.finish v) (B, Int.ofNat v) = true)
     (hry : lreadsB fp y (B, Int.ofNat v) = true)
     {i j : Nat} (hi : t[i]? = some (.finish v)) (hj : t[j]? = some y) (hij : i < j)
     {s₁ s₂ F : List Label} (hs : Run p [] (s₁ ++ y :: s₂) F) (m : Mem V) :
     runL eff s₁ m (B, Int.ofNat v) = runL eff t m (B, Int.ofNat v) := by
-  obtain ⟨G₀, r₀, _⟩ := checkH_true hc
   have hnd := r₀.nodup
   have hil : i < t.length := (List.getElem?_eq_some_iff.mp hi).1
   have hjl : j < t.length := (List.getElem?_eq_some_iff.mp hj).1
@@ -162,12 +170,11 @@ theorem decision_reads (hw : wfB p = true) (hfr : LFramed fp eff)
     intro h
     have : i = j := (List.Nodup.getElem_inj hnd).mp (by rw [hti, htj, h])
     omega
-  -- The two conflict on `(B, v)`, so the race check orders them.
+  -- The two conflict on `(B, v)`, so the program orders them.
   have hconf : LConflict fp (.finish v) y := by
     obtain ⟨a, ha, hk, hb, he⟩ := lwritesB_iff.mp hwx
     obtain ⟨b, hb', hk', hbb, he'⟩ := lreadsB_iff.mp hry
     exact ⟨a, ha, b, hb', hb.trans hbb.symm, Or.inl hk, _, he, he'⟩
-  have hrf := raceFree_of_racesOkE hr
   have hmx : Label.finish v ∈ t := hti ▸ List.getElem_mem hil
   have hmy : y ∈ t := htj ▸ List.getElem_mem hjl
   have hhb : HB p (.finish v) y := by
@@ -192,7 +199,19 @@ theorem decision_reads (hw : wfB p = true) (hfr : LFramed fp eff)
     · simp at h
     · exact h
   obtain ⟨H, r₁, _⟩ := hs.split
-  exact value_after_writer hw hfr hc hr hB r₁ hpre m
+  exact value_after_writerRF hw hfr r₀ d₀ hrf hB r₁ hpre m
+
+/-- **D59: what a decision reads**, from the checks. -/
+theorem decision_reads (hw : wfB p = true) (hfr : LFramed fp eff)
+    (hc : checkH p idx t = some true) (hr : racesOkE p idx fp t = true)
+    {B : Nat} (hB : soleWritersB fp (cands p) B = true) {v : Nat} {y : Label}
+    (hwx : lwritesB fp (.finish v) (B, Int.ofNat v) = true)
+    (hry : lreadsB fp y (B, Int.ofNat v) = true)
+    {i j : Nat} (hi : t[i]? = some (.finish v)) (hj : t[j]? = some y) (hij : i < j)
+    {s₁ s₂ F : List Label} (hs : Run p [] (s₁ ++ y :: s₂) F) (m : Mem V) :
+    runL eff s₁ m (B, Int.ofNat v) = runL eff t m (B, Int.ofNat v) := by
+  obtain ⟨G₀, r₀, d₀⟩ := checkH_true hc
+  exact decision_readsRF hw hfr r₀ d₀ (raceFree_of_racesOkE hr) hB hwx hry hi hj hij hs m
 
 end
 

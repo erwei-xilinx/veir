@@ -326,9 +326,11 @@ follows from the element semantics.
 
 **Chunked transfers (phase 1, `SCALE_DESIGN.md` §2).** `races`, `run` and `outcome` check the
 channel model on chunks of consecutive elements when the chunking (`Chan.validB`) and the chunk
-condition (`Chan.condB`) check; that the verdicts hold of the element model is proven
-(`Chan.chunked_sound`, `Chan.chunked_deadlock`, `Chan.outcome_uniqueC`). Nothing is added to the
-trusted base: the chunking itself is checked, not trusted.
+condition (`Chan.condBR`) check; that the verdicts hold of the element model is proven
+(`Chan.chunked_soundR`, `Chan.chunked_deadlock`, `Chan.outcome_uniqueCR`). Nothing is added to the
+trusted base: the chunking itself is checked, not trusted. Footprints are ranges (`labelRFp`,
+`Chan.racesOkRangeE`); that they stand for the positions `labelFp` lists is part of the model, as
+`labelFp` was.
 
 **Loop templates (phase 2a, `SCALE_DESIGN.md` §3.1).** For a function whose loop bounds are not
 known or that is too large to instantiate, `races` checks a template instead: the certificate and

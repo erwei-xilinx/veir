@@ -29,6 +29,25 @@ structure Access where
   elems : List Int
 deriving Repr, Inhabited
 
+/-- An access to the positions `[lo, hi)` of each range: a footprint that does not list its
+positions (`Chan.racesOkRange`). -/
+structure RAcc where
+  buf : Nat
+  kind : AccessKind
+  ranges : List (Int × Int)
+deriving Repr, Inhabited
+
+def RAcc.elems (a : RAcc) : List Int :=
+  a.ranges.flatMap fun (lo, hi) => (List.range (hi - lo).toNat).map fun (k : Nat) => lo + (k : Int)
+
+def RAcc.toAccess (a : RAcc) : Access := ⟨a.buf, a.kind, a.elems⟩
+
+/-- Positions as ranges: runs of consecutive positions, in order. -/
+def runsOf (ps : List Int) : List (Int × Int) :=
+  (ps.foldl (fun (acc : List (Int × Int)) q => match acc with
+    | (lo, hi) :: rest => if q == hi then (lo, hi + 1) :: rest else (q, q + 1) :: acc
+    | [] => [(q, q + 1)]) []).reverse
+
 /-- Two accesses conflict: same buffer, a common element, and at least one write. -/
 def Access.Conflicts (a b : Access) : Prop :=
   a.buf = b.buf ∧ (a.kind = .write ∨ b.kind = .write) ∧ ∃ x, x ∈ a.elems ∧ x ∈ b.elems

@@ -2,7 +2,7 @@ module
 
 public import Veir.Air.Channels
 public import Veir.Air.ChanEventReach
-public import Veir.Air.ChanChunk
+public import Veir.Air.ChanRange
 
 namespace Veir.Air
 
@@ -18,9 +18,10 @@ so D20 and D21 follow from the model rather than being checked separately. A DMA
 are only known when running stays one event (D7, D23).
 - deadlock: `Chan.checkH` on the execution `Chan.genTrace` proposes (`checkH_true`,
   `checkH_false`);
-- races: `Chan.racesOkE` on that execution (`raceFree_of_racesOkE`), with the footprints below;
+- races: `Chan.racesOkRangeE` on that execution (`raceFree_of_racesOkRangeE`), with the footprints
+  below as ranges (`labelRFp`);
 - the outcome: that execution, run on concrete memory. When it is race-free, every execution
-  ends the same way (`Chan.outcome_uniqueH`).
+  ends the same way (`Chan.outcome_uniqueR`).
 
 **Not proven** (this file is the trusted glue):
 - that the elements built here are those D28–D34 and D51 describe for the IR;
@@ -329,6 +330,51 @@ def IProgram.labelFp (ip : IProgram) (ca : ChanAnalysis) (cm : ChanModel)
     let slotR : Access := ⟨ip.slotBuf, .read, [k]⟩
     slotR :: ((List.range ((cm.dstLoc[k]?.map (·.length)).getD 0)).flatMap fun i => cm.dstAccess ip k i)
 
+/-- `dstAccess` as ranges: a run-time offset (D54, D23) is the whole buffer, one range. -/
+def ChanModel.dstAccessR (cm : ChanModel) (ip : IProgram) (k i : Nat) : List RAcc :=
+  let dyn := (cm.dstDyn[k]? >>= (·[i]?)).getD []
+  let dynReads : List RAcc := dyn.filterMap fun (h, _) => match h with
+    | .result e _ => some ⟨ip.resultBuf, .read, [(Int.ofNat e, Int.ofNat e + 1)]⟩
+    | _ => none
+  let whole (b : Nat) : RAcc := ⟨b, .write, [(0, (ip.buffers[b]!.type.numel : Int))]⟩
+  match cm.dstAt k i, cm.dstShiftAt k i with
+  | some (b, _), some iss => [whole b, ⟨ip.resultBuf, .read, [(Int.ofNat iss, Int.ofNat iss + 1)]⟩] ++ dynReads
+  | some (b, q), none => if dyn.isEmpty then [⟨b, .write, [(q, q + 1)]⟩] else whole b :: dynReads
+  | none, _ => []
+
+/-- What each label reads and writes, as ranges (`labelFp`'s positions, `Chan.toLFp`). -/
+def IProgram.labelRFp (ip : IProgram) (ca : ChanAnalysis) (cm : ChanModel)
+    (rfps0 : Array (List RAcc)) : Chan.RFp
+  | .start v => (ip.offsetReads.getD v []).map fun (e, _) => ⟨ip.resultBuf, .read, [(Int.ofNat e, Int.ofNat e + 1)]⟩
+  | .finish v =>
+    let results : List RAcc :=
+      ⟨ip.resultBuf, .write, [(Int.ofNat v, Int.ofNat v + 1)]⟩ ::
+        (ip.resultReads v).map fun u => ⟨ip.resultBuf, .read, [(Int.ofNat u, Int.ofNat u + 1)]⟩
+    results ++
+    if cm.dmaEvents.contains v then [] else
+    match ca.endpoints[v]? with
+    | some ep => if ep.isPut then [] else [⟨ep.buf, .write, runsOf ((ep.dst.filter (·.2)).map (·.1))⟩]
+    | none => rfps0[v]?.getD []
+  | .read k =>
+    let slotW : RAcc := ⟨ip.slotBuf, .write, [(Int.ofNat k, Int.ofNat k + 1)]⟩
+    let whole (b : Nat) : List (Int × Int) := [(0, (ip.buffers[b]!.type.numel : Int))]
+    let dyn := (cm.srcDyn[k]?).getD []
+    let dynReads : List RAcc := dyn.filterMap fun (h, _) => match h with
+      | .result e _ => some ⟨ip.resultBuf, .read, [(Int.ofNat e, Int.ofNat e + 1)]⟩
+      | _ => none
+    match (cm.srcLoc[k]?).join, (cm.srcShift[k]?).join with
+    | some (b, _), some i => [slotW, ⟨b, .read, whole b⟩, ⟨ip.resultBuf, .read, [(Int.ofNat i, Int.ofNat i + 1)]⟩] ++ dynReads
+    | some (b, q), none =>
+      if dyn.isEmpty then [slotW, ⟨b, .read, [(q, q + 1)]⟩] else [slotW, ⟨b, .read, whole b⟩] ++ dynReads
+    | none, _ => [slotW]
+  | .push _ => []
+  | .pull k i =>
+    let slotR : RAcc := ⟨ip.slotBuf, .read, [(Int.ofNat k, Int.ofNat k + 1)]⟩
+    slotR :: cm.dstAccessR ip k i
+  | .xfer k =>
+    let slotR : RAcc := ⟨ip.slotBuf, .read, [(Int.ofNat k, Int.ofNat k + 1)]⟩
+    slotR :: ((List.range ((cm.dstLoc[k]?.map (·.length)).getD 0)).flatMap fun i => cm.dstAccessR ip k i)
+
 structure LState where
   m : MState
   slots : Std.HashMap Nat Val := {}
@@ -435,7 +481,7 @@ def ChanModel.owner (cm : ChanModel) : Chan.Label → Nat
   | .xfer k => ((cm.prog.elems[k]?).bind fun e => e.dsts.head?.join).getD 0
 
 /-- The checked verdicts: an execution, whether it completes (`none`: internal error), whether it
-is race-free (`Chan.racesOkE`), and witnesses of races for messages. -/
+is race-free (`Chan.racesOkRangeE`), and witnesses of races for messages. -/
 structure ChanVerdict where
   trace : List Chan.Label
   completes : Option Bool
@@ -444,7 +490,7 @@ structure ChanVerdict where
   /-- For the first race: an execution, checked by `Chan.checkH`, firing its two labels the other
   way round. -/
   alt : Option (Chan.Label × Chan.Label × List Chan.Label) := none
-  /-- Phase 1: the verdicts were found on chunked transfers (`Chan.chunked_sound`): how many chunks
+  /-- Phase 1: the verdicts were found on chunked transfers (`Chan.chunked_soundR`): how many chunks
   for how many elements. -/
   chunks : Option (Nat × Nat) := none
 
@@ -496,18 +542,18 @@ def ChanModel.someTrace (cm : ChanModel) : List Chan.Label :=
   else Chan.genTrace cp (Chan.buildIndex cp)
 
 /-- The element-level verdicts (below), on every element. -/
-def ChanModel.verdictElems (cm : ChanModel) (fp : Chan.LFp) (checkRaces := true) : ChanVerdict :=
+def ChanModel.verdictElems (cm : ChanModel) (fp : Chan.RFp) (checkRaces := true) : ChanVerdict :=
   let cp := cm.prog
   let idx := Chan.buildIndex cp
   let t := Chan.genTrace cp idx
   -- `outcome_uniqueH` needs `Chan.wfB`; a model that fails it is an internal error.
   let c := if Chan.wfB cp then Chan.checkH cp idx t else none
   if c == some true && checkRaces then
-    -- Orders between positions come from the event graph (`Chan.racesOkE`): no matrix over
+    -- Orders between positions come from the event graph (`Chan.racesOkRangeE`): no matrix over
     -- every label of the execution.
-    let ok := Chan.racesOkE cp idx fp t
+    let ok := Chan.racesOkRangeE cp idx fp t
     -- One witness per pair of events and buffer: what the report prints.
-    let ws := if ok then [] else Chan.raceWitnessesD cp idx fp t cm.owner
+    let ws := if ok then [] else Chan.raceWitnessesR cp idx fp t cm.owner
     let arr := t.toArray
     let alt := ws.head?.bind fun (i, j) =>
       let (x, y) := (arr[i]!, arr[j]!)
@@ -516,10 +562,10 @@ def ChanModel.verdictElems (cm : ChanModel) (fp : Chan.LFp) (checkRaces := true)
   else { trace := t, completes := c, raceFree := true, witnesses := [] }
 
 /-- The checked verdicts, on chunked transfers when they are fewer than the elements and the
-chunking and the chunk condition check (`Chan.chunked_sound`, `Chan.chunked_deadlock`,
-`Chan.outcome_uniqueC`); the execution reported is the chunks' expanded (`Chan.expandL`). A race
+chunking and the chunk condition check (`Chan.chunked_soundR`, `Chan.chunked_deadlock`,
+`Chan.outcome_uniqueCR`); the execution reported is the chunks' expanded (`Chan.expandL`). A race
 found on chunks is looked for again element by element, for its witnesses. -/
-def ChanModel.verdict (cm : ChanModel) (fp : Chan.LFp) (checkRaces := true) : ChanVerdict :=
+def ChanModel.verdict (cm : ChanModel) (fp : Chan.RFp) (checkRaces := true) : ChanVerdict :=
   let cp := cm.prog
   let ch := cm.chunking
   if ch.members.size < cp.elems.size && Chan.validB cp ch && Chan.wfB cp then
@@ -530,7 +576,10 @@ def ChanModel.verdict (cm : ChanModel) (fp : Chan.LFp) (checkRaces := true) : Ch
     let t := tc.flatMap (Chan.expandL ch)
     let chunks := some (ch.members.size, cp.elems.size)
     if c == some true && checkRaces then
-      if Chan.condB ch fp cm.slotBuf tc && Chan.racesOkE pc idx (Chan.chunkFp ch fp) tc then
+      -- Each chunked label's footprint computed once (`Chan.memoWith_eq`: the same function).
+      let memo := Chan.buildMemo (Chan.chunkRFp ch fp) tc
+      if Chan.condBR ch fp cm.slotBuf tc &&
+          Chan.racesOkRangeE pc idx (Chan.memoWith memo (Chan.chunkRFp ch fp)) tc then
         { trace := t, completes := c, raceFree := true, witnesses := [], chunks }
       else cm.verdictElems fp checkRaces
     else if c == some true || c == some false then

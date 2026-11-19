@@ -778,10 +778,15 @@ theorem element_label {x : Label} (hx : Kinded p x) (h : ∀ v, x ≠ .start v) 
   | pull k i => exact ⟨_, Or.inr (Or.inr (Or.inl ⟨i, rfl⟩))⟩
   | xfer k => exact ⟨_, Or.inr (Or.inr (Or.inr rfl))⟩
 
-/-- **Race-freedom transfers from the chunked program**, whose labels' footprints contain their
+/-- Access `b` covers access `a`: the same buffer, a write if `a` is, every position of `a`. -/
+def Covers (a b : Access) : Prop := a.buf = b.buf ∧ (a.kind = .write → b.kind = .write) ∧
+  ∀ e ∈ a.elems, e ∈ b.elems
+
+/-- **Race-freedom transfers from the chunked program**, whose labels' footprints cover their
 members', when the chunk condition holds. -/
 theorem raceFree_of_chunked (hv : Valid p ch) {fp fpc : LFp} {S Sc : Label → Prop}
-    (hcond : CondOk p ch fp S) (hcov : ∀ x, Kinded p x → ∀ a ∈ fp x, a ∈ fpc (up ch x))
+    (hcond : CondOk p ch fp S)
+    (hcov : ∀ x, Kinded p x → ∀ a ∈ fp x, ∃ b ∈ fpc (up ch x), Covers a b)
     (hS : ∀ x, S x → Kinded p x ∧ Sc (up ch x)) (h : RaceFree (chunked p ch) fpc Sc) :
     RaceFree p fp S := by
   intro x y hx hy hne hc
@@ -802,7 +807,14 @@ theorem raceFree_of_chunked (hv : Valid p ch) {fp fpc : LFp} {S Sc : Label → P
       · exact Or.inl (hb_same hv mx my hle hX)
       · exact Or.inr (hb_same hv my mx hle hX)
   · obtain ⟨a, ha, b, hb, hab⟩ := hc
-    have hcc : LConflict fpc (up ch x) (up ch y) := ⟨a, hcov x hkx a ha, b, hcov y hky b hb, hab⟩
+    have hcc : LConflict fpc (up ch x) (up ch y) := by
+      obtain ⟨a', ha', ⟨hba, hwa, hea⟩⟩ := hcov x hkx a ha
+      obtain ⟨b', hb', ⟨hbb, hwb, heb⟩⟩ := hcov y hky b hb
+      obtain ⟨hbuf, hw, e, he, he'⟩ := hab
+      refine ⟨a', ha', b', hb', ⟨by rw [← hba, ← hbb, hbuf], ?_, e, hea e he, heb e he'⟩⟩
+      rcases hw with h | h
+      · exact Or.inl (hwa h)
+      · exact Or.inr (hwb h)
     rcases h _ _ hsx hsy hup hcc with hxy | hyx
     · rcases hb_transfer hv hxy with hall | ⟨hi, hmono⟩
       · exact Or.inl (hall x y mx my)
@@ -1716,7 +1728,8 @@ theorem chunked_sound {fp : LFp} {slot : Nat} {idx : Array (List Nat)} {tc : Lis
   have hv' := valid_of_validB hv
   obtain ⟨G, r, d⟩ := checkH_true hc
   refine ⟨completes_of_chunked hv' r d, ?_⟩
-  exact raceFree_of_chunked hv' (condOk_of_condB hv' hcond) (fun x hx => chunkFp_cov hv' fp hx)
+  exact raceFree_of_chunked hv' (condOk_of_condB hv' hcond)
+    (fun x hx a ha => ⟨a, chunkFp_cov hv' fp hx a ha, rfl, id, fun _ h => h⟩)
     (fun x h => ⟨h.1, h.2⟩) (raceFree_of_racesOkE hr)
 
 /-- **A deadlock of the chunked program is one of the element program.** -/

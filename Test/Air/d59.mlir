@@ -2,17 +2,17 @@
 
 // RUN: not air-veir races --allow-unregistered-dialect --mem=0:3 %S/Inputs/d59_device_bound.mlir | filecheck %s
 // CHECK-LABEL: @device_bound: 6 event(s), 2 buffer(s), 0 race(s)
-// CHECK-NEXT: 'scf.for' (event 0 = 3). Every execution reads these values (proven, Chan.decision_reads)
+// CHECK-NEXT: 'scf.for' (event 0 = 3). Every execution reads these values (proven, Chan.decision_readsRF)
 // CHECK-NEXT: no deadlock (proven
 // No token path from the execute to the loop: the decision's read is a race (D60).
 // CHECK-LABEL: @unordered_bound: 5 event(s), 2 buffer(s), 1 race(s)
 // CHECK-NEXT: not established (the program has a race)
 // CHECK: race: RAW on the results of an event element 0 between finish of event 0 (air.execute) and finish of event 1 (control-flow decision)
 // CHECK-LABEL: @device_branch:
-// CHECK-NEXT: 'scf.if' (event 0 = 0). Every execution reads these values (proven, Chan.decision_reads)
+// CHECK-NEXT: 'scf.if' (event 0 = 0). Every execution reads these values (proven, Chan.decision_readsRF)
 // The bound reaches the core through a channel; the herd's loop is instantiated once it arrived.
 // CHECK-LABEL: @channel_bound:
-// CHECK-NEXT: 'scf.for' (iteration [0, 0, 0, 0]) (event 4 = 3). Every execution reads these values (proven, Chan.decision_reads)
+// CHECK-NEXT: 'scf.for' (iteration [0, 0, 0, 0]) (event 4 = 3). Every execution reads these values (proven, Chan.decision_readsRF)
 // CHECK-NEXT: no deadlock (proven
 
 // RUN: air-veir run --allow-unregistered-dialect --mem=0:3 %S/Inputs/d59_device_bound.mlir | filecheck %s --check-prefix=INTERP
@@ -28,7 +28,7 @@
 // The synchronous program is fine; air-dependency leaves the index_cast unordered after the load
 // (AIR-024), so the value deciding the loop is not computed in the part before it, which races.
 // RUN: air-veir races --allow-unregistered-dialect --mem=0:3 %S/Inputs/d59_sync_bound.mlir | filecheck %s --check-prefix=SYNC
-// SYNC: 'scf.for' (event 1 = 3). Every execution reads these values (proven, Chan.decision_reads)
+// SYNC: 'scf.for' (event 1 = 3). Every execution reads these values (proven, Chan.decision_readsRF)
 // RUN: not air-veir races --allow-unregistered-dialect --mem=0:3 %S/Inputs/d59_sync_bound_dep.mlir | filecheck %s --check-prefix=DEP
 // DEP: the value deciding 'scf.for' is not computed in the execution proposed for the part of the program before it
 // DEP: race: RAW on the results of an event element 0 between finish of event 0 (air.execute) and finish of event 1 (a synchronous op)

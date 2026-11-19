@@ -72,9 +72,16 @@ put, gets and buffering; the chunked program has one element per chunk. Proven:
 `ChanModel.chunking` (not trusted: `validB` and `condB` check what it builds) groups elements
 greedily; a race found on chunks is looked for again element by element, for its witnesses.
 
-Footprints stay lists of positions: chunks remove the per-element execution, not the per-position
-race check. Modules that move millions of positions (`air_split_l2_memref.mlir` #15,
-`tranpose_linalg_cpy_to_4d_air_memcpy.mlir`) need footprints as ranges.
+**Footprints as ranges (2026-11-18, `ChanRange.lean`, proven).** An access is a list of ranges
+`[lo, hi)` (`RAcc`); its positions are what the theorems speak of (`toLFp`) and are not listed by
+the check. `racesOkRange` cuts each buffer at the ends of all its accesses' ranges and checks each
+piece as `racesOkR` checks a position (`raceFree_of_racesOkRange`: a position's accesses are its
+piece's). Whole buffers (D22, D23) are one range; a chunk's members' ranges are joined
+(`chunkRFp`, covering every member's access: `raceFree_of_chunked` takes covering footprints).
+The D59/D62 checks have range versions implying the position ones, and `decision_readsRF` takes a
+complete execution and race-freedom on its labels, which every path gives. `tranpose_linalg_cpy`
+went from out of memory (14 GB) to 3.5 s and 190 MB. What remains for the largest modules is the
+memory the D62 rounds simulate element by element (`air_split_l2_memref.mlir` #15: 4e6 positions).
 
 ## 3. Phase 2: certificates instead of instantiation (cause 2)
 

@@ -267,7 +267,7 @@ def extractRunning (args : Args) (ctx : IRContext OpCode) (func : OperationPtr) 
           Below, the verdicts for that part alone, instantiated up to the decisions not known; a \
           deadlock there may come from what those decisions control, which is left out"
       | .proven _ => some s!"  values events compute, read by control flow (D59) and transfers (D62): {kinds}: \
-          {"; ".intercalate shown}{more}. Every execution reads these values (proven, Chan.decision_reads)"
+          {"; ".intercalate shown}{more}. Every execution reads these values (proven, Chan.decision_readsRF)"
       | .notEstablished _ why => some s!"  values events compute, read by control flow (D59) and transfers (D62): {kinds}: \
           {"; ".intercalate shown}{more}. These are the values one execution computes; that every \
           execution reads them is not established ({why}), so the verdicts below are for this control flow"
@@ -343,7 +343,7 @@ def cmdRun (args : Args) (file : String) : IO Unit := do
     let orders ← match ip.putOrders ca with
       | .ok os => pure os
       | .error e => do IO.println s!"@{name}: not covered: {e}"; continue
-    let (fps0, _) := ip.footprints ctx.raw
+    let (fps0, _) := ip.footprintsR ctx.raw
     let eventAt (v : Nat) := s!"event {v}{pathStr ip.ctxs[v]!.path} ({kindName ip.prog.events[v]!.kind})"
     -- D52: one model per order of the puts no token orders; the program's executions are all of
     -- theirs.
@@ -355,7 +355,7 @@ def cmdRun (args : Args) (file : String) : IO Unit := do
       let cm ← match ip.chanModel ca o with
         | .ok cm => pure cm
         | .error e => do header := header <|> some s!"not covered: {e}"; continue
-      let cv := cm.verdict (ip.labelFp ca cm fps0)
+      let cv := cm.verdict (ip.labelRFp ca cm fps0)
       match cv.completes with
       | some false => header := header <|> some s!"deadlocks{tag} (see `races`)"
       | none => header := header <|> some s!"internal error: the proposed execution failed its check{tag}"
@@ -363,8 +363,8 @@ def cmdRun (args : Args) (file : String) : IO Unit := do
         let first := outcome ip (ip.runLabels ctx.raw ca cm cv.trace)
         if !outcomes.any (·.1 == first) then outcomes := outcomes ++ [(first, tag)]
         if cv.raceFree then
-          let via := if cv.chunks.isSome then " [on chunks: Chan.outcome_uniqueC]" else ""
-          lines := lines ++ [s!"  race-free: every execution ends with this memory (Chan.outcome_uniqueH){tag}{via}"]
+          let thm := if cv.chunks.isSome then "Chan.outcome_uniqueCR, on chunks" else "Chan.outcome_uniqueR"
+          lines := lines ++ [s!"  race-free: every execution ends with this memory ({thm}){tag}"]
         else
           match cv.alt with
           | none => lines := lines ++ [s!"  races (see `races`): other executions may end differently{tag}"]
@@ -386,13 +386,13 @@ def cmdRun (args : Args) (file : String) : IO Unit := do
 
 /-- What `races` reports for one model (one order of the puts, D52): its proven verdicts. -/
 def raceLines (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalysis) (cm : ChanModel)
-    (fps0 : Array (List Access)) (eventAt : Nat → String) : List String := Id.run do
+    (fps0 : Array (List RAcc)) (eventAt : Nat → String) : List String := Id.run do
   let p := ip.prog
   let _ := ctx
   let mut out : List String := []
   let cp := cm.prog
   let labelAt := cm.labelName eventAt
-  let fp := ip.labelFp ca cm fps0
+  let fp := ip.labelRFp ca cm fps0
   let cv := cm.verdict fp
   let fired : Std.HashSet Chan.Label := Std.HashSet.ofList cv.trace
   match cv.completes with
@@ -421,7 +421,7 @@ def raceLines (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalysis) (cm :
       out := out ++ [s!"  note: {noGet.length} element(s) of async puts no get takes (D34)"]
   | some true =>
     let via := match cv.chunks with
-      | some (n, m) => s!" [on {n} chunks of {m} elements: Chan.chunked_sound]"
+      | some (n, m) => s!" [on {n} chunks of {m} elements: Chan.chunked_soundR]"
       | none => ""
     out := out ++ [s!"  no deadlock (proven, Chan.checkH_true): an execution completes, and every execution can (Chan.completes_from_anywhere){via}"]
     -- Elements of sync puts that nothing gets stay in the buffer (D30): a fragment of a program.
@@ -438,9 +438,8 @@ def raceLines (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalysis) (cm :
       -- Name the pair in event (program) order, not in the order this execution fired it.
       let (x, y) := if cm.owner arr[j]! < cm.owner arr[i]! then (arr[j]!, arr[i]!) else (arr[i]!, arr[j]!)
       let witness := (fp x).findSome? fun a => (fp y).findSome? fun b =>
-        if a.conflictsB b then
-          let bs : Std.HashSet Int := Std.HashSet.ofList b.elems
-          (a.elems.find? bs.contains).map fun e =>
+        if a.buf == b.buf && (a.kind == .write || b.kind == .write) then
+          (Chan.commonPos a b).map fun e =>
             let kind := match a.kind, b.kind with
               | .write, .read => "RAW" | .read, .write => "WAR" | _, _ => "WAW"
             (kind, if a.buf == ip.slotBuf then "an element in flight"
@@ -539,7 +538,7 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
             continue
           | none => throw e
         else throw e
-    let (fps0, issues) := ip.footprints ctx.raw
+    let (fps0, issues) := ip.footprintsR ctx.raw
     let p := ip.prog
     let eventAt (v : Nat) := s!"event {v}{pathStr ip.ctxs[v]!.path} ({kindName p.events[v]!.kind})"
     -- Every verdict comes from the proven model (Veir.Air.ChanSem, ChanMem, ChanFast, ChanGlue).

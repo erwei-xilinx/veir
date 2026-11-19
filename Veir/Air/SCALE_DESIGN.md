@@ -172,6 +172,13 @@ happens-before between the labels; the checker below gives the paths.
    by the arithmetic progression the iteration difference contributes, cut to the finite range the
    patterns allow; anything else is reported, not assumed disjoint.
 
+**Nested loops (2026-11-19).** A token that leaves an inner loop at its last iteration and enters
+it again in the next iteration of an outer loop relates the inner loop's iterations by `Rel.wrap`
+(source last, target first); with `toFirst` and `fromLast` (target first, source last) the
+compositions `le;wrap = toFirst`, `wrap;le = fromLast`, `toFirst;le = any`, `le;fromLast = any` are
+proven (`compRel_ok`), and the chain rule accepts `any` on the other loops (`chain_holds`): every
+instance of an earlier outer iteration then reaches every instance of a later one.
+
 **Verdict.** `races` gives "race-free for every value of the unknown bounds" (proven,
 `LoopCert.raceFree_of_certOk`); deadlock and outcomes are phase 2b.
 

@@ -65,4 +65,37 @@ module {
     }
     return
   }
+  // Nested loops: the outer loop's token runs through the inner one, so each inner loop starts
+  // after the previous outer iteration's last inner iteration (`Rel.wrap`); every copy is
+  // ordered.
+  func.func @nest_wrap(%a: memref<64xi32>, %b: memref<64xi32>, %n: index) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c8 = arith.constant 8 : index
+    %t0 = air.wait_all async
+    %r = scf.for %i = %c0 to %n step %c1 iter_args(%t = %t0) -> (!air.async.token) {
+      %r2 = scf.for %j = %c0 to %n step %c1 iter_args(%u = %t) -> (!air.async.token) {
+        %d = air.dma_memcpy_nd async [%u] (%b[%c0] [%c8] [%c1], %a[%c0] [%c8] [%c1]) : (memref<64xi32>, memref<64xi32>)
+        scf.yield %d : !air.async.token
+      }
+      scf.yield %r2 : !air.async.token
+    }
+    return
+  }
+  // The same, but each outer iteration starts its inner loop from the loop's first token: the
+  // outer iterations are not ordered, and they write the same region.
+  func.func @nest_unordered(%a: memref<64xi32>, %b: memref<64xi32>, %n: index) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c8 = arith.constant 8 : index
+    %t0 = air.wait_all async
+    %r = scf.for %i = %c0 to %n step %c1 iter_args(%t = %t0) -> (!air.async.token) {
+      %r2 = scf.for %j = %c0 to %n step %c1 iter_args(%u = %t0) -> (!air.async.token) {
+        %d = air.dma_memcpy_nd async [%u] (%b[%c0] [%c8] [%c1], %a[%c0] [%c8] [%c1]) : (memref<64xi32>, memref<64xi32>)
+        scf.yield %d : !air.async.token
+      }
+      scf.yield %r2 : !air.async.token
+    }
+    return
+  }
 }

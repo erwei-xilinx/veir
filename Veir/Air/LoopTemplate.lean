@@ -139,7 +139,9 @@ def candidates (lu lv : List Nat) (ku kv : List Nat) (trips : Nat → Nat) : Lis
   let opts (L : Nat) : List Rel :=
     match lu.contains L, lv.contains L with
     | true, true =>
-      if iu L == iv L then [.eq] else if iv L == iu L + 1 then [.succ] else []
+      if iu L == iv L then [.eq] else if iv L == iu L + 1 then [.succ]
+      -- Leaving an inner loop at its end and entering it again (next iteration of an outer one).
+      else if iu L + 1 == trips L && iv L == 0 then [.wrap] else []
     | true, false => .any :: (if iu L + 1 == trips L then [.last] else [])
     | false, true => .any :: (if iv L == 0 then [.first] else [])
     | false, false => [.any]

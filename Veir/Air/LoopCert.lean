@@ -43,6 +43,13 @@ inductive Rel where
   | first
   /-- Only the source is inside: its last iteration. -/
   | last
+  /-- Both ends, the source in the last iteration and the target in the first (a path that leaves
+  an inner loop and enters it again in the next iteration of an outer one). -/
+  | wrap
+  /-- Both ends, the target in the first iteration. -/
+  | toFirst
+  /-- Both ends, the source in the last iteration. -/
+  | fromLast
 deriving DecidableEq, Repr, Inhabited, Hashable
 
 /-- An iteration when that end is inside the loop. -/
@@ -58,6 +65,9 @@ def Rel.holds : Rel → Nat → Option Nat → Option Nat → Bool
   | .any, _, _, _ => true
   | .first, _, none, some j => j == 0
   | .last, n, some i, none => i + 1 == n
+  | .wrap, n, some i, some j => i + 1 == n && j == 0
+  | .toFirst, _, some _, some j => j == 0
+  | .fromLast, n, some i, some _ => i + 1 == n
   | _, _, _, _ => false
 
 /-- The composition of `r₁` (source to middle) and `r₂` (middle to target) on one loop, given which
@@ -77,6 +87,12 @@ def compRel (inA inB inC : Bool) (r₁ r₂ : Rel) : Option Rel :=
   | true, true, true, .le, .any => some .any
   | true, true, true, .any, .le => some .any
   | true, true, true, .any, .any => some .any
+  | true, true, true, .le, .wrap => some .toFirst
+  | true, true, true, .wrap, .le => some .fromLast
+  | true, true, true, .toFirst, .le => some .any
+  | true, true, true, .le, .fromLast => some .any
+  | true, true, true, .toFirst, .any => some .any
+  | true, true, true, .any, .fromLast => some .any
   -- Source and middle inside: leaving the loop.
   | true, false, true, .eq, .last => some .last
   | true, false, true, .eq, .any => some .any
@@ -114,11 +130,12 @@ theorem compRel_ok {inA inB inC : Bool} {r₁ r₂ r : Rel} (h : compRel inA inB
     simp only [compRel, reduceCtorEq, or_self, ite_false, ite_true, Option.some.injEq,
       or_false, or_true] at h <;>
     (try subst h) <;>
-    simp only [side, ite_true, ite_false, Rel.holds, beq_iff_eq, decide_eq_true_eq,
+    simp only [side, ite_true, ite_false, Rel.holds, beq_iff_eq, decide_eq_true_eq, Bool.and_eq_true,
       Bool.false_eq_true, forall_const, Bool.true_eq_false, false_implies, true_and,
       and_true] at hr hi hj hn ⊢
   all_goals first
     | exact ⟨0, by omega⟩
+    | exact ⟨n - 1, by omega⟩
     | exact ⟨i, by omega⟩
     | exact ⟨j, by omega⟩
     | exact ⟨j - 1, by omega⟩
@@ -318,12 +335,13 @@ theorem Pat.get_set (π : Pat) (L : Nat) (r : Rel) (L' : Nat) :
   · have hne : (L == L') = false := by simp; omega
     simp only [Pat.set, Pat.get, List.find?_cons, hne, h, ite_false, find?_filter_ne π h]
 
-/-- The chain rule: an instance reaching the same event's next iteration of `L` (the same
-iteration of its other loops) reaches every later iteration of `L`. -/
+/-- The chain rule: an instance reaching the same event's next iteration of `L` (in its other
+loops the same iteration, or any) reaches every later iteration of `L`. -/
 def chain (ls : Loops) (f : Fact) (L : Nat) : Option Fact :=
   let lv := ls[f.src]?.getD []
   if f.src == f.dst && lv.contains L && f.pat.get L == .succ &&
-      lv.all (fun L' => L' == L || f.pat.get L' == .eq) && f.pat.all (fun x => lv.contains x.1) then
+      lv.all (fun L' => L' == L || f.pat.get L' == .eq || f.pat.get L' == .any) &&
+      f.pat.all (fun x => lv.contains x.1) then
     some { f with pat := normPat (f.pat.set L .lt) }
   else none
 
@@ -340,11 +358,12 @@ theorem chain_holds {ls : Loops} {n : Nat → Nat} {R : Nat → Iter → Nat →
   obtain ⟨⟨⟨⟨hsd, hL⟩, hsucc⟩, hothers⟩, hkeys⟩ := hcond
   subst hsd
   have hinL : inL ls a L = true := by simpa [inL] using hL
-  have heqO : ∀ L', L' ≠ L → inL ls a L' = true → π.get L' = .eq := by
+  have heqO : ∀ L', L' ≠ L → inL ls a L' = true → π.get L' = .eq ∨ π.get L' = .any := by
     intro L' hne hin
-    rcases hothers L' (by simpa [inL] using hin) with h | h
+    rcases hothers L' (by simpa [inL] using hin) with (h | h) | h
     · exact absurd h hne
-    · exact h
+    · exact Or.inl h
+    · exact Or.inr h
   -- Loops outside the event's are `any`.
   have hout : ∀ L', inL ls a L' = false → π.get L' = .any := by
     intro L' hn
@@ -354,9 +373,10 @@ theorem chain_holds {ls : Loops} {n : Nat → Nat} {R : Nat → Iter → Nat →
     have := hkeys x hx
     simp only [inL] at hn
     simp_all
-  -- `π` relates instances one iteration of `L` apart, equal in the others.
+  -- `π` relates instances one iteration of `L` apart, equal in its `eq` loops.
   have hstep : ∀ ia ib, ib L = ia L + 1 → Valid ls n a ia → Valid ls n a ib →
-      (∀ L', L' ≠ L → inL ls a L' = true → ia L' = ib L') → GuardOk n g → R a ia a ib := by
+      (∀ L', L' ≠ L → inL ls a L' = true → π.get L' = .eq → ia L' = ib L') → GuardOk n g →
+      R a ia a ib := by
     intro ia ib hd hva hvb heq hg
     refine hf hg ia ib hva hvb ?_
     intro L'
@@ -364,20 +384,22 @@ theorem chain_holds {ls : Loops} {n : Nat → Nat} {R : Nat → Iter → Nat →
     · subst hL'; simp [hsucc, hinL, side, Rel.holds, hd]
     · cases hin : inL ls a L'
       · simp [hout L' hin, Rel.holds]
-      · simp [heqO L' hL' hin, side, Rel.holds, heq L' hL' hin]
+      · rcases heqO L' hL' hin with he | he
+        · simp [he, side, Rel.holds, heq L' hL' hin he]
+        · simp [he, Rel.holds]
   intro hg ia ib hva hvb hm
   simp only at hva hvb hm ⊢
   have hmL := hm L
   rw [normPat_get, Pat.get_set] at hmL
   simp only [ite_true, hinL, side, Rel.holds, decide_eq_true_eq] at hmL
-  have heq : ∀ L', L' ≠ L → inL ls a L' = true → ia L' = ib L' := by
-    intro L' hne hin
+  have heq : ∀ L', L' ≠ L → inL ls a L' = true → π.get L' = .eq → ia L' = ib L' := by
+    intro L' hne hin he
     have := hm L'
-    rw [normPat_get, Pat.get_set, ite_eq_right_iff.mpr (fun e => absurd e hne), heqO L' hne hin] at this
+    rw [normPat_get, Pat.get_set, ite_eq_right_iff.mpr (fun e => absurd e hne), he] at this
     simpa [hin, side, Rel.holds] using this
   -- Induction on the distance in `L`.
   suffices H : ∀ d ia, ib L = ia L + d + 1 → Valid ls n a ia →
-      (∀ L', L' ≠ L → inL ls a L' = true → ia L' = ib L') → R a ia a ib from
+      (∀ L', L' ≠ L → inL ls a L' = true → π.get L' = .eq → ia L' = ib L') → R a ia a ib from
     H (ib L - ia L - 1) ia (by omega) hva heq
   intro d
   induction d with
@@ -391,8 +413,9 @@ theorem chain_holds {ls : Loops} {n : Nat → Nat} {R : Nat → Iter → Nat →
       by_cases h : L' = L
       · subst h; have := hvb L' hin; simp [ic]; omega
       · rw [hicO L' h]; exact hva L' hin
-    have r1 := hstep ia ic (by simp [ic]) hva hvc (fun L' h _ => (hicO L' h).symm) hg
-    have r2 := ih ic (by simp [ic]; omega) hvc (fun L' h hin => by rw [hicO L' h]; exact heq L' h hin)
+    have r1 := hstep ia ic (by simp [ic]) hva hvc (fun L' h _ _ => (hicO L' h).symm) hg
+    have r2 := ih ic (by simp [ic]; omega) hvc
+      (fun L' h hin he => by rw [hicO L' h]; exact heq L' h hin he)
     exact htrans _ _ _ _ _ _ r1 r2
 
 /-- Union: the same claim for `L` equal and for `L` later gives it for `L` equal or later. -/
@@ -526,7 +549,7 @@ theorem mem_nubFacts {l : List Fact} {f : Fact} (h : f ∈ nubFacts l) : f ∈ l
 /-- Whether relation `r` holds of every pair `r'` holds of. -/
 def relLe (r' r : Rel) : Bool :=
   r' == r || r == .any || (r == .le && (r' == .eq || r' == .lt || r' == .succ)) ||
-    (r == .lt && r' == .succ)
+    (r == .lt && r' == .succ) || ((r == .toFirst || r == .fromLast) && r' == .wrap)
 
 /-- `f` claims what `g` claims: the same events, a guard of fewer conditions, a pattern at least as
 general on every loop. Only used to leave `g` out. -/

@@ -10,3 +10,5 @@
 // CHECK: @tiles: 1 template event(s), 1 symbolic loop(s): race-free for every trip count
 // CHECK: @tiles_same: {{.*}} not established: 'memref.store' and 'memref.store' (loop 0: earlier iteration)
 // CHECK: @big: 2 template event(s), 1 symbolic loop(s): race-free for every trip count
+// CHECK: @nest_wrap: 2 template event(s), 2 symbolic loop(s): race-free for every trip count
+// CHECK: @nest_unordered: {{.*}} not established: 'air.dma_memcpy_nd' and 'air.dma_memcpy_nd' (loop 0: earlier iteration

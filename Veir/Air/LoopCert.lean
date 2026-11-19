@@ -50,6 +50,8 @@ inductive Rel where
   | toFirst
   /-- Both ends, the source in the last iteration. -/
   | fromLast
+  /-- Only the source is inside: any iteration but the last. -/
+  | notLast
 deriving DecidableEq, Repr, Inhabited, Hashable
 
 /-- An iteration when that end is inside the loop. -/
@@ -68,6 +70,7 @@ def Rel.holds : Rel → Nat → Option Nat → Option Nat → Bool
   | .wrap, n, some i, some j => i + 1 == n && j == 0
   | .toFirst, _, some _, some j => j == 0
   | .fromLast, n, some i, some _ => i + 1 == n
+  | .notLast, n, some i, none => decide (i + 1 < n)
   | _, _, _, _ => false
 
 /-- The composition of `r₁` (source to middle) and `r₂` (middle to target) on one loop, given which
@@ -95,6 +98,7 @@ def compRel (inA inB inC : Bool) (r₁ r₂ : Rel) : Option Rel :=
   | true, true, true, .any, .fromLast => some .any
   -- Source and middle inside: leaving the loop.
   | true, false, true, .eq, .last => some .last
+  | true, false, true, .lt, .last => some .notLast
   | true, false, true, .eq, .any => some .any
   | true, false, true, .le, .last => some .any
   | true, false, true, .le, .any => some .any
@@ -418,12 +422,30 @@ theorem chain_holds {ls : Loops} {n : Nat → Nat} {R : Nat → Iter → Nat →
       (fun L' h hin he => by rw [hicO L' h]; exact heq L' h hin he)
     exact htrans _ _ _ _ _ _ r1 r2
 
-/-- Union: the same claim for `L` equal and for `L` later gives it for `L` equal or later. -/
+/-- Unions of two relations on one loop, given whether the source and the target are inside it:
+equal or later is `le`; the last iteration or any other, of a source alone inside, is `any`. -/
+def unionRel (inA inB : Bool) (r₁ r₂ : Rel) : Option Rel :=
+  match inA, inB, r₁, r₂ with
+  | _, _, .eq, .lt => some .le
+  | true, false, .last, .notLast => some .any
+  | _, _, _, _ => none
+
+/-- **A union holds only where one of its parts does.** -/
+theorem unionRel_ok {inA inB : Bool} {r₁ r₂ r : Rel} (h : unionRel inA inB r₁ r₂ = some r)
+    {n i j : Nat} (hi : inA = true → i < n)
+    (hr : r.holds n (side inA i) (side inB j) = true) :
+    r₁.holds n (side inA i) (side inB j) = true ∨ r₂.holds n (side inA i) (side inB j) = true := by
+  cases inA <;> cases inB <;> cases r₁ <;> cases r₂ <;>
+    simp only [unionRel, reduceCtorEq, Option.some.injEq] at h <;> (try subst h) <;>
+    simp only [side, ite_true, ite_false, Rel.holds, beq_iff_eq, decide_eq_true_eq,
+      Bool.false_eq_true, forall_const] at hr hi ⊢ <;> omega
+
+/-- Union: the same claim for two relations on `L` gives it for their union (`unionRel`). -/
 def union (ls : Loops) (f g : Fact) (L : Nat) : Option Fact :=
-  if f.src == g.src && f.dst == g.dst && f.guard == g.guard && f.pat.get L == .eq &&
-      g.pat.get L == .lt &&
+  if f.src == g.src && f.dst == g.dst && f.guard == g.guard &&
       (compKeys ls f g).all (fun L' => L' == L || f.pat.get L' == g.pat.get L') then
-    some { f with pat := normPat (f.pat.set L .le) }
+    (unionRel (inL ls f.src L) (inL ls f.dst L) (f.pat.get L) (g.pat.get L)).map fun r =>
+      { f with pat := normPat (f.pat.set L r) }
   else none
 
 theorem union_holds {ls : Loops} {n : Nat → Nat} {R : Nat → Iter → Nat → Iter → Prop}
@@ -433,8 +455,8 @@ theorem union_holds {ls : Loops} {n : Nat → Nat} {R : Nat → Iter → Nat →
   split at hc
   case isFalse => cases hc
   case isTrue hcond =>
-  cases hc
-  obtain ⟨⟨⟨⟨⟨hs, hd⟩, hgd⟩, heqL⟩, hltL⟩, hsame⟩ := hcond
+  obtain ⟨r, hu, rfl⟩ := Option.map_eq_some_iff.mp hc
+  obtain ⟨⟨⟨hs, hd⟩, hgd⟩, hsame⟩ := hcond
   -- The two patterns agree off `L`.
   have hag : ∀ L', L' ≠ L → f.pat.get L' = g.pat.get L' := by
     intro L' hne
@@ -448,25 +470,22 @@ theorem union_holds {ls : Loops} {n : Nat → Nat} {R : Nat → Iter → Nat →
   simp only at hguard hva hvb hm ⊢
   have hmL := hm L
   rw [normPat_get, Pat.get_set, ite_eq_left_iff.mpr (fun e => absurd rfl e)] at hmL
-  cases ha : inL ls f.src L <;> cases hb : inL ls f.dst L <;>
-    simp only [ha, hb, side, Rel.holds, ite_true, ite_false, Bool.false_eq_true,
-      decide_eq_true_eq] at hmL
-  rcases Nat.lt_or_eq_of_le hmL with hlt | heq
+  rcases unionRel_ok hu (fun h => hva L h) hmL with h1 | h2
+  · refine hf hguard ia ib hva hvb ?_
+    intro L'
+    by_cases h : L' = L
+    · subst h; exact h1
+    · have := hm L'
+      rw [normPat_get, Pat.get_set, ite_eq_right_iff.mpr (fun e => absurd e h)] at this
+      exact this
   · rw [hs, hd]
     refine hg (hgd ▸ hguard) ia ib (hs ▸ hva) (hd ▸ hvb) ?_
     intro L'
     rw [← hs, ← hd]
     by_cases h : L' = L
-    · subst h; simp [hltL, ha, hb, side, Rel.holds, hlt]
+    · subst h; exact h2
     · have := hm L'
       rw [normPat_get, Pat.get_set, ite_eq_right_iff.mpr (fun e => absurd e h), hag L' h] at this
-      exact this
-  · refine hf hguard ia ib hva hvb ?_
-    intro L'
-    by_cases h : L' = L
-    · subst h; simp [heqL, ha, hb, side, Rel.holds, heq]
-    · have := hm L'
-      rw [normPat_get, Pat.get_set, ite_eq_right_iff.mpr (fun e => absurd e h)] at this
       exact this
 
 /-- Each instance reaches itself. -/

@@ -98,4 +98,48 @@ module {
     }
     return
   }
+  // A parallel loop's tokens reduced in iteration order (each step in its iteration, D27).
+  // Each iteration reads %a into its own buffer; the copy into %a waits for the reduction.
+  func.func @reduce_then_copy(%a: memref<64x64xi32>, %b: memref<64x64xi32>, %n: index) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c64 = arith.constant 64 : index
+    %t0 = air.wait_all async
+    %r = scf.parallel (%i, %j) = (%c0, %c0) to (%n, %n) step (%c1, %c1) init (%t0) -> !air.async.token {
+      %ta, %buf = air.execute -> (memref<1x1xi32, 2>) {
+        %x = memref.alloc() : memref<1x1xi32, 2>
+        air.execute_terminator %x : memref<1x1xi32, 2>
+      }
+      %d = air.dma_memcpy_nd async [%t0, %ta] (%buf[] [] [], %a[%i, %j] [%c1, %c1] [%c64, %c1]) : (memref<1x1xi32, 2>, memref<64x64xi32>)
+      scf.reduce(%d : !air.async.token) {
+      ^bb0(%x: !air.async.token, %y: !air.async.token):
+        %w = air.wait_all async [%x, %y]
+        scf.reduce.return %w : !air.async.token
+      }
+    }
+    %e = air.dma_memcpy_nd async [%r] (%a[%c0, %c0] [%c64, %c64] [%c64, %c1], %b[%c0, %c0] [%c64, %c64] [%c64, %c1]) : (memref<64x64xi32>, memref<64x64xi32>)
+    return
+  }
+  // The same, but the copy into %a waits only for the loop's initial token: it races with the
+  // iterations' reads.
+  func.func @copy_beside_reduce(%a: memref<64x64xi32>, %b: memref<64x64xi32>, %n: index) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c64 = arith.constant 64 : index
+    %t0 = air.wait_all async
+    %r = scf.parallel (%i, %j) = (%c0, %c0) to (%n, %n) step (%c1, %c1) init (%t0) -> !air.async.token {
+      %ta, %buf = air.execute -> (memref<1x1xi32, 2>) {
+        %x = memref.alloc() : memref<1x1xi32, 2>
+        air.execute_terminator %x : memref<1x1xi32, 2>
+      }
+      %d = air.dma_memcpy_nd async [%t0, %ta] (%buf[] [] [], %a[%i, %j] [%c1, %c1] [%c64, %c1]) : (memref<1x1xi32, 2>, memref<64x64xi32>)
+      scf.reduce(%d : !air.async.token) {
+      ^bb0(%x: !air.async.token, %y: !air.async.token):
+        %w = air.wait_all async [%x, %y]
+        scf.reduce.return %w : !air.async.token
+      }
+    }
+    %e = air.dma_memcpy_nd async [%t0] (%a[%c0, %c0] [%c64, %c64] [%c64, %c1], %b[%c0, %c0] [%c64, %c64] [%c64, %c1]) : (memref<64x64xi32>, memref<64x64xi32>)
+    return
+  }
 }

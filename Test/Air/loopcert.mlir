@@ -12,3 +12,5 @@
 // CHECK: @big: 2 template event(s), 1 symbolic loop(s): race-free for every trip count
 // CHECK: @nest_wrap: 2 template event(s), 2 symbolic loop(s): race-free for every trip count
 // CHECK: @nest_unordered: {{.*}} not established: 'air.dma_memcpy_nd' and 'air.dma_memcpy_nd' (loop 0: earlier iteration
+// CHECK: @reduce_then_copy: {{.*}} race-free for every trip count
+// CHECK: @copy_beside_reduce: {{.*}} not established: 'air.dma_memcpy_nd' and 'air.dma_memcpy_nd' are neither ordered nor disjoint

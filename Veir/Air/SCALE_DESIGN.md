@@ -178,6 +178,13 @@ it again in the next iteration of an outer loop relates the inner loop's iterati
 compositions `le;wrap = toFirst`, `wrap;le = fromLast`, `toFirst;le = any`, `le;fromLast = any` are
 proven (`compRel_ok`), and the chain rule accepts `any` on the other loops (`chain_holds`): every
 instance of an earlier outer iteration then reaches every instance of a later one.
+An `scf.parallel`'s reduction is folded in iteration order (D27); when sampling, each step of the
+fold is made in its iteration's frame (`IState.iterFrames`), so the steps are one template event
+chained by `succ` and `wrap` across the iterations, not one event per sampled iteration after the
+loop (instantiation itself is unchanged). What follows the loop waits for the last step: with
+`notLast` (a source alone inside, any iteration but the last), `lt;last = notLast` and the union
+`last + notLast = any` (`unionRel_ok`; union is now a table of such pairs), every iteration reaches
+it.
 
 **Verdict.** `races` gives "race-free for every value of the unknown bounds" (proven,
 `LoopCert.raceFree_of_certOk`); deadlock and outcomes are phase 2b.

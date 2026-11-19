@@ -204,6 +204,9 @@ structure IState where
   symPos : List Nat := []
   evFrames : Array (List (Nat × Nat)) := #[]
   bufFrames : Array (List (Nat × Nat)) := #[]
+  /-- The frames (symbolic iterations and their places in the path) of the last parallel loop's
+  iterations, in order: its reduction folds each iteration's value in that iteration's frame. -/
+  iterFrames : List (List (Nat × Nat) × List Nat) := []
 
 abbrev IM := StateT IState (Except String)
 
@@ -1369,9 +1372,11 @@ partial def parallelIterations (ctx : IRContext OpCode) (op : OperationPtr) (wha
   let outerF := ((← get).frames, (← get).symPos)
   let mut after : List Nat := []
   let mut out : List (List HVal) := []
+  let mut iterFrames : List (List (Nat × Nat) × List Nat) := []
   for pt in points do
     let fr := (dims.zip pt).filterMap fun ((_, _, _, sym), (_, k)) => sym.map (·, k)
     let pos := dims.zipIdx.filterMap fun ((_, _, _, sym), d) => sym.map fun _ => path.length + d
+    iterFrames := iterFrames ++ [(outerF.1 ++ fr, outerF.2 ++ pos)]
     modify fun st => { st with blocking := outer, frames := outerF.1 ++ fr, symPos := outerF.2 ++ pos }
     let mut env' := env
     for a in args, iv in pt do
@@ -1382,7 +1387,7 @@ partial def parallelIterations (ctx : IRContext OpCode) (op : OperationPtr) (wha
     for b in (← get).blocking do
       if !after.contains b then after := after ++ [b]
     out := out ++ [← yields.toList.mapM fun v => liftE (lookupH env' ctx v what)]
-  modify fun st => { st with blocking := if points.isEmpty then outer else after }
+  modify fun st => { st with blocking := if points.isEmpty then outer else after, iterFrames }
   return some out
 
 /-- `scf.parallel`: every iteration concurrent; the result is the reduction of the iterations'
@@ -1413,9 +1418,14 @@ partial def parallelLoop (ctx : IRContext OpCode) (op : OperationPtr)
   if opName ctx term != "scf.reduce" then throw s!"{what}: expected the body to end in scf.reduce"
   let some reduced ← parallelIterations ctx op what (term.getOperands! ctx) lbs ubs steps env path
     | return env
-  -- Fold each reduction region over the iterations' values.
+  -- Fold each reduction region over the iterations' values, each in its iteration's frame (when
+  -- sampling, a step of the fold belongs to its iteration, not to what follows the loop).
+  let iterFrames := (← get).iterFrames
+  let outerF := ((← get).frames, (← get).symPos)
   let mut acc := inits
-  for vs in reduced do
+  for vs in reduced, k in [0:reduced.length] do
+    if let some (fr, pos) := iterFrames[k]? then
+      modify fun st => { st with frames := fr, symPos := pos }
     let mut next := []
     for j in [0:acc.length], a in acc, r in vs do
       let rb ← liftE (singleBlock ctx term s!"{what} reduction")
@@ -1429,6 +1439,7 @@ partial def parallelLoop (ctx : IRContext OpCode) (op : OperationPtr)
       renv ← walkOps ctx rops.pop renv path
       next := next ++ [← liftE (lookupH renv ctx (rterm.getOperands! ctx)[0]! what)]
     acc := next
+    modify fun st => { st with frames := outerF.1, symPos := outerF.2 }
   let mut out := env
   for i in [0:op.getNumResults! ctx], h in acc do
     out := out.insert (.opResult ⟨op, i⟩) h

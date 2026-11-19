@@ -181,6 +181,8 @@ def streamsOf (s : LoopTemplate.Sample) : Except String (Array DStream) := do
   for k in [0:elems.size] do
     if let some j := elems[k]!.prev then next := next.insert j k
   let mut out : Array DStream := #[]
+  -- Instance-local streams, one per signature (each instance of the events has its own chain).
+  let mut locals : Std.HashMap (Nat × List (Option Nat) × Nat × Bool) Unit := {}
   for k0 in [0:elems.size] do
     if elems[k0]!.prev.isSome then continue
     let mut chain : Array Nat := #[k0]
@@ -192,6 +194,30 @@ def streamsOf (s : LoopTemplate.Sample) : Except String (Array DStream) := do
     let e0 := elems[k0]!
     let nSlots := e0.dsts.length
     if chain.any fun k => elems[k]!.buffered != e0.buffered then throw "a stream both buffered and not"
+    -- One instance moves the whole chain at each end, inside symbolic loops: instance-local.
+    let one (xs : Array (Option Nat)) : Option (Option Nat) :=
+      if xs.all (·.isNone) then some none else
+      match xs[0]? with
+      | some (some u) => if xs.all (· == some u) then some (some u) else none
+      | _ => none
+    let srcOne := one (chain.map fun k => elems[k]!.src)
+    let slotOne := (List.range nSlots).map fun i => one (chain.map fun k => (elems[k]!.dsts[i]?).bind id)
+    if let some (some u) := srcOne then
+      if !s.tloops[s.tev[u]!]!.isEmpty && slotOne.all (·.isSome) then
+        let tP := s.tev[u]!
+        let tGs := slotOne.map fun o => (o.get!).map (s.tev[·]!)
+        let key := (tP, tGs, chain.size, e0.buffered)
+        if !locals.contains key then
+          locals := locals.insert key ()
+          let m := chain.size
+          let seg (t : Nat) : Seg := { ev := t, off := 0, m := m }
+          let slots : List (List Seg × Nat) := tGs.map fun o =>
+            match o with
+            | some t => ([seg t], m)
+            | none => ([], 0)
+          out := out.push { puts := [seg tP], per := m, slots, buffered := e0.buffered, rate := 1,
+                            πread := 0, πpush := 0, πpull := 0, πxfer := 0, isLocal := true }
+        continue
     if chain.any fun k => elems[k]!.dsts.length != nSlots then throw "a stream's slots differ"
     let (puts, per) ← runsOf s (chain.map fun k => elems[k]!.src)
     if puts.isEmpty then throw "a stream no put sends"
@@ -245,6 +271,7 @@ def certificate (ctx : IRContext OpCode) (T : Template) (s : LoopTemplate.Sample
   -- Alignment classes: the loops of each stream's runs.
   let mut par := (List.range nl).toArray
   for σ in streams0 do
+    if σ.isLocal then continue
     let ls := (sides σ).flatMap fun (segs, _) => segs.filterMap fun g => loopOf g.ev
     let nonEmpty := (sides σ).filter (!·.1.isEmpty)
     if !ls.isEmpty && ls.length != (nonEmpty.flatMap (·.1)).length then
@@ -272,6 +299,7 @@ def certificate (ctx : IRContext OpCode) (T : Template) (s : LoopTemplate.Sample
   -- Rates: elements per unit, equal at every end.
   let mut streams := #[]
   for σ in streams0 do
+    if σ.isLocal then streams := streams.push σ; continue
     match σ.puts.head? >>= fun g => loopOf g.ev with
     | some Lp =>
       let K := σ.per * csOf[Lp]!
@@ -291,7 +319,7 @@ def certificate (ctx : IRContext OpCode) (T : Template) (s : LoopTemplate.Sample
   let runGcd (σ : DStream) : Nat :=
     ((sides σ).flatMap fun (segs, _) => segs.flatMap fun g => [g.off, g.m]).foldl Nat.gcd 0
   for C in (cls.toList.eraseDups) do
-    let inC := streams.toList.filter fun σ =>
+    let inC := streams.toList.filter fun σ => !σ.isLocal &&
       (σ.puts.head? >>= fun g => loopOf g.ev).any (cls[·]! == C)
     if inC.isEmpty then continue
     let f := inC.foldl (fun acc σ => Nat.lcm acc (σ.rate / Nat.gcd σ.rate (runGcd σ))) 1
@@ -335,6 +363,7 @@ def certificate (ctx : IRContext OpCode) (T : Template) (s : LoopTemplate.Sample
   -- Offsets: a run's event spans its run's units; others follow `eq` edges.
   let mut forced : Std.HashMap (Nat × Nat) (Nat × Nat) := {}
   for σ in streams do
+    if σ.isLocal then continue
     for (segs, _) in sides σ do
       for g in segs do
         if let some L := loopOf g.ev then

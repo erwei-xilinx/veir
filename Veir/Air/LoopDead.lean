@@ -144,6 +144,9 @@ structure DStream where
   πpush : Nat
   πpull : Nat
   πxfer : Nat
+  /-- Every side moves all of an instance's elements in one instance of its events, all in the same
+  loops: the stream lives in one instance (a DMA's elements, put and got by the DMA itself). -/
+  isLocal : Bool := false
 deriving Inhabited, Repr
 
 /-- A stream's first put event. -/
@@ -192,13 +195,15 @@ def sLoop (σ : DStream) : Option Nat := (D.T.loops[σ.head]?.getD []).head?
 
 /-- Element `e`'s coordinate in class `C`: its time unit in its stream's class, else its first
 put's. -/
-def coordEl (tot : Nat → Nat) (σ : DStream) (e : Nat) (C : Nat) : Nat :=
+def coordEl (tot : Nat → Nat) (σ : DStream) (e : Nat) (it : Iter) (C : Nat) : Nat :=
+  if σ.isLocal then D.coordEv tot σ.head it false C else
   match D.sLoop σ with
   | some Lp => if D.cls[Lp]! == C then 1 + e / σ.rate else D.coordEv tot σ.head (fun _ => 0) false C
   | none => D.coordEv tot σ.head (fun _ => 0) false C
 
-def keyEl (tot : Nat → Nat) (σ : DStream) (e π : Nat) : List Nat :=
-  D.order.map (D.coordEl tot σ e) ++ [π, e]
+/-- An element's key; `it` is its instance's iterations, used by an instance-local stream. -/
+def keyEl (tot : Nat → Nat) (σ : DStream) (e : Nat) (it : Iter) (π : Nat) : List Nat :=
+  D.order.map (D.coordEl tot σ e it) ++ [π, e]
 
 end DCert
 
@@ -418,7 +423,13 @@ one loop of the stream's class, `P` being `rate` per unit of it, starting at its
 element's unit and finishing at its last's; or, when the stream has no loop, none; and where the
 first put is for the other classes. -/
 def sideOk (σ : DStream) (segs : List Seg) (P : Nat) : Bool :=
-  (match D.sLoop σ with
+  (if σ.isLocal then
+    -- In one instance: the same loops as the first put, starting no later and finishing no
+    -- earlier than it starts.
+    segs.all fun g => D.loopsOf g.ev == D.loopsOf σ.head && (D.loopsOf σ.head).all fun L =>
+      decide (offOf (D.sOff[g.ev]?.getD []) L ≤ offOf (D.sOff[σ.head]?.getD []) L) &&
+      decide (offOf (D.sOff[σ.head]?.getD []) L ≤ offOf (D.fOff[g.ev]?.getD []) L)
+  else match D.sLoop σ with
    | some Lp => segs.all fun g => match D.loopsOf g.ev with
        | [L] => D.cls[L]! == D.cls[Lp]! && P == σ.rate * D.scale[L]! && decide (0 < D.scale[L]!) &&
            decide (0 < g.m) && offOf (D.sOff[g.ev]?.getD []) L == g.off / σ.rate &&
@@ -515,7 +526,7 @@ theorem shape_parts {σ : DStream} (hs : D.shapeOk σ = true) :
   · exact ⟨hne, fun sg hsg => by simpa using hall sg hsg⟩
 
 /-- The first put's loops: the stream's loop, or none. -/
-theorem head_loops {σ : DStream} (hs : D.shapeOk σ = true) :
+theorem head_loops {σ : DStream} (hs : D.shapeOk σ = true) (hloc : σ.isLocal = false) :
     (∃ Lp, D.sLoop σ = some Lp ∧ D.loopsOf σ.head = [Lp]) ∨
     (D.sLoop σ = none ∧ D.loopsOf σ.head = []) := by
   obtain ⟨_, hp, hpo, _⟩ := shape_parts hs
@@ -524,7 +535,8 @@ theorem head_loops {σ : DStream} (hs : D.shapeOk σ = true) :
   have hsl : D.sLoop σ = (D.loopsOf σ.head).head? := rfl
   cases hS : D.sLoop σ with
   | some Lp =>
-    simp only [DCert.sideOk, hS, Bool.and_eq_true, List.all_eq_true] at hpo
+    simp only [DCert.sideOk, hloc, hS, Bool.false_eq_true, ite_false, Bool.and_eq_true,
+      List.all_eq_true] at hpo
     have := hpo.1 g (by rw [hgs]; exact List.mem_cons_self ..)
     rw [← hhead] at this
     split at this
@@ -540,25 +552,27 @@ theorem head_loops {σ : DStream} (hs : D.shapeOk σ = true) :
 /-- **An element between its run's start and finish**: for a side of a stream that checks, an
 event moving element `e` (in its run, in the iteration `e / P`) starts no later and finishes no
 earlier than `e`'s coordinates. -/
-theorem side_coords {σ : DStream} {segs : List Seg} {P : Nat} {g : Seg} {e : Nat} {it : Iter}
-    (hs : D.shapeOk σ = true) (hside : D.sideOk σ segs P = true) (hg : g ∈ segs)
-    (hoff : g.off ≤ e % P) (hlt : e % P < g.off + g.m)
+theorem side_coords {σ : DStream} {segs : List Seg} {P : Nat} {g : Seg} {e : Nat} {it itE : Iter}
+    (hs : D.shapeOk σ = true) (hloc : σ.isLocal = false) (hside : D.sideOk σ segs P = true)
+    (hg : g ∈ segs) (hoff : g.off ≤ e % P) (hlt : e % P < g.off + g.m)
     (hit : ∀ L ∈ D.loopsOf g.ev, it L = e / P) (C : Nat) (hC : C ∈ D.order) :
-    D.coordEv tot g.ev it false C ≤ D.coordEl tot σ e C ∧
-      D.coordEl tot σ e C ≤ D.coordEv tot g.ev it true C := by
+    D.coordEv tot g.ev it false C ≤ D.coordEl tot σ e itE C ∧
+      D.coordEl tot σ e itE C ≤ D.coordEv tot g.ev it true C := by
   have hr := (shape_parts hs).1
   have hct : D.isTop g.ev C = D.isTop σ.head C := by
     simp only [DCert.sideOk, Bool.and_eq_true, List.all_eq_true, beq_iff_eq] at hside
     exact hside.2 g hg C hC
-  rcases head_loops hs with ⟨Lp, hS, hH⟩ | ⟨hS, hH⟩
-  · simp only [DCert.sideOk, hS, Bool.and_eq_true, List.all_eq_true] at hside
+  rcases head_loops hs hloc with ⟨Lp, hS, hH⟩ | ⟨hS, hH⟩
+  · simp only [DCert.sideOk, hloc, hS, Bool.false_eq_true, ite_false, Bool.and_eq_true,
+      List.all_eq_true] at hside
     have hgs := hside.1 g hg
     split at hgs
     · next L hL =>
       simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hgs
       obtain ⟨⟨⟨⟨⟨hcl, hP⟩, hsc⟩, _⟩, hso⟩, hfo⟩ := hgs
       have hiL := hit L (by rw [hL]; exact List.mem_singleton_self _)
-      simp only [DCert.coordEl, hS, DCert.coordEv, loopIn_single hL, loopIn_single hH]
+      simp only [DCert.coordEl, hloc, Bool.false_eq_true, ite_false, hS, DCert.coordEv,
+        loopIn_single hL, loopIn_single hH]
       by_cases hc : D.cls[Lp]! = C
       · have hcL : D.cls[L]! = C := by rw [hcl, hc]
         subst hP
@@ -568,19 +582,56 @@ theorem side_coords {σ : DStream} {segs : List Seg} {P : Nat} {g : Seg} {e : Na
       · have hcL : ¬ D.cls[L]! = C := by rw [hcl]; exact hc
         simp [hcL, hc, hct]
     · simp at hgs
-  · simp only [DCert.sideOk, hS, Bool.and_eq_true, List.all_eq_true] at hside
+  · simp only [DCert.sideOk, hloc, hS, Bool.false_eq_true, ite_false, Bool.and_eq_true,
+      List.all_eq_true] at hside
     have hgn : D.loopsOf g.ev = [] := by simpa using hside.1 g hg
-    simp [DCert.coordEl, hS, DCert.coordEv, loopIn_nil hH, loopIn_nil hgn, hct]
+    simp [DCert.coordEl, hloc, hS, DCert.coordEv, loopIn_nil hH, loopIn_nil hgn, hct]
+
+/-- In an instance-local stream, an element lies between the start and finish of each event moving
+it, in that event's instance. -/
+theorem side_coords_local {σ : DStream} {segs : List Seg} {P : Nat} {g : Seg} {e : Nat} {it itE : Iter}
+    (hloc : σ.isLocal = true) (hside : D.sideOk σ segs P = true) (hg : g ∈ segs)
+    (hit : ∀ L ∈ D.loopsOf g.ev, it L = itE L) (C : Nat) (hC : C ∈ D.order) :
+    D.coordEv tot g.ev it false C ≤ D.coordEl tot σ e itE C ∧
+      D.coordEl tot σ e itE C ≤ D.coordEv tot g.ev it true C := by
+  simp only [DCert.sideOk, hloc, ite_true, Bool.and_eq_true, List.all_eq_true, beq_iff_eq,
+    decide_eq_true_eq] at hside
+  obtain ⟨hl, hctx⟩ := hside
+  obtain ⟨hloops, hoffs⟩ := hl g hg
+  have hct : D.isTop g.ev C = D.isTop σ.head C := hctx g hg C hC
+  have hin : ∀ L, D.loopIn g.ev C = some L ↔ D.loopIn σ.head C = some L := by
+    intro L; simp only [DCert.loopIn]; simp only [DCert.loopsOf] at hloops; rw [hloops]
+  simp only [DCert.coordEl, hloc, ite_true, DCert.coordEv]
+  cases hL : D.loopIn σ.head C with
+  | some L =>
+    have hgL := (hin L).mpr hL
+    rw [hgL]
+    have hm := (loopIn_spec hL).1
+    have ⟨h1, h2⟩ := hoffs L hm
+    have hiL := hit L (by rw [hloops]; exact hm)
+    simp only [Bool.false_eq_true, ite_false, ite_true, hiL]
+    omega
+  | none =>
+    have hgN : D.loopIn g.ev C = none := by
+      cases h : D.loopIn g.ev C with
+      | none => rfl
+      | some L => rw [(hin L).mp h] at hL; cases hL
+    rw [hgN, hct]
+    exact ⟨Nat.le_refl _, Nat.le_refl _⟩
 
 /-- Elements of a stream move to later or the same units. -/
-theorem coordEl_mono {σ : DStream} {e e' : Nat} (h : e ≤ e') (C : Nat) :
-    D.coordEl tot σ e C ≤ D.coordEl tot σ e' C := by
+theorem coordEl_mono {σ : DStream} {e e' : Nat} {it it' : Iter} (h : e ≤ e')
+    (hit : σ.isLocal = true → it = it') (C : Nat) :
+    D.coordEl tot σ e it C ≤ D.coordEl tot σ e' it' C := by
   unfold DCert.coordEl
-  split
-  · split
-    · exact Nat.add_le_add_left (Nat.div_le_div_right h) _
+  cases hl : σ.isLocal
+  · simp only [Bool.false_eq_true, ite_false]
+    split
+    · split
+      · exact Nat.add_le_add_left (Nat.div_le_div_right h) _
+      · exact Nat.le_refl _
     · exact Nat.le_refl _
-  · exact Nat.le_refl _
+  · rw [hit hl]; exact Nat.le_refl _
 
 end
 
@@ -733,48 +784,53 @@ namespace LoopDead
 
 open LoopCert Chan
 
+/-- How element `e` of a stream sits in the instance `it` of event `g`'s run (`P` elements per
+iteration): in an instance-local stream, `it` is the element's instance `itE`; otherwise `e` is in
+`g`'s run of its iteration, `e / P`. -/
+def SegAt (D : DCert) (σ : DStream) (g : Seg) (P e : Nat) (itE it : Iter) : Prop :=
+  if σ.isLocal then ∀ L ∈ D.loopsOf g.ev, it L = itE L
+  else g.off ≤ e % P ∧ e % P < g.off + g.m ∧ ∀ L ∈ D.loopsOf g.ev, it L = e / P
+
 /-- What element `k` of `p` is in the template: element `(elOf k).2` of stream `(elOf k).1`, put by
 one of the stream's put events in the iteration of its index (within its run), got at each slot a
 get takes it from likewise, after the stream's previous element. -/
 structure ElemRealized (D : DCert) (p : Prog) (evOf : Nat → Nat × Iter) (elOf : Nat → Nat × Nat)
-    (k : Nat) (el : Elem) : Prop where
+    (elIt : Nat → Iter) (k : Nat) (el : Elem) : Prop where
   stream : (elOf k).1 < D.streams.size
   buffered : el.buffered = D.streams[(elOf k).1]!.buffered
   src : ∃ x, el.src = some x ∧ x < p.graph.size ∧ ∃ g ∈ D.streams[(elOf k).1]!.puts,
-    (evOf x).1 = g.ev ∧ g.off ≤ (elOf k).2 % D.streams[(elOf k).1]!.per ∧
-    (elOf k).2 % D.streams[(elOf k).1]!.per < g.off + g.m ∧
-    ∀ L ∈ D.loopsOf g.ev, (evOf x).2 L = (elOf k).2 / D.streams[(elOf k).1]!.per
+    (evOf x).1 = g.ev ∧
+    SegAt D D.streams[(elOf k).1]! g D.streams[(elOf k).1]!.per (elOf k).2 (elIt k) (evOf x).2
   dlen : el.dsts.length = D.streams[(elOf k).1]!.slots.length
   dsts : ∀ (i : Nat) (sg : List Seg × Nat), D.streams[(elOf k).1]!.slots[i]? = some sg →
     (sg.1 = [] → el.dsts[i]? = some none) ∧
     (sg.1 ≠ [] → ∃ x, el.dsts[i]? = some (some x) ∧ x < p.graph.size ∧ ∃ g ∈ sg.1,
-      (evOf x).1 = g.ev ∧ g.off ≤ (elOf k).2 % sg.2 ∧ (elOf k).2 % sg.2 < g.off + g.m ∧
-      ∀ L ∈ D.loopsOf g.ev, (evOf x).2 L = (elOf k).2 / sg.2)
+      (evOf x).1 = g.ev ∧ SegAt D D.streams[(elOf k).1]! g sg.2 (elOf k).2 (elIt k) (evOf x).2)
   prev : ∀ j, el.prev = some j → j < p.elems.size ∧ (elOf j).1 = (elOf k).1 ∧
-    (elOf j).2 + 1 = (elOf k).2
+    (elOf j).2 + 1 = (elOf k).2 ∧ (D.streams[(elOf k).1]!.isLocal = true → elIt j = elIt k)
 
 /-- **`p` realizes `D` for trip counts `n`** (class lengths `tot`): `evOf` and `elOf` give each event
 and element its place in the template; every dependency of an event is an edge of the template
 relating their instances; the loops of a class agree in length. -/
 structure RealizesD (D : DCert) (n tot : Nat → Nat) (p : Prog) (evOf : Nat → Nat × Iter)
-    (elOf : Nat → Nat × Nat) : Prop where
+    (elOf : Nat → Nat × Nat) (elIt : Nat → Iter) : Prop where
   aligned : Aligned D n tot
   ev : ∀ x, x < p.graph.size →
     (evOf x).1 < D.T.loops.size ∧ LoopCert.Valid D.T.loops n (evOf x).1 (evOf x).2
   preds : ∀ x, x < p.graph.size → ∀ u ∈ p.graph.predsOf x, u < p.graph.size ∧
     ∃ f ∈ D.T.edges, f.src = (evOf u).1 ∧ f.dst = (evOf x).1 ∧
       Matches D.T.loops n f.pat f.src (evOf u).2 f.dst (evOf x).2
-  elems : ∀ k el, p.elems[k]? = some el → ElemRealized D p evOf elOf k el
+  elems : ∀ k el, p.elems[k]? = some el → ElemRealized D p evOf elOf elIt k el
 
 /-- The key of a label of `p`. -/
-def keyOf (D : DCert) (tot : Nat → Nat) (evOf : Nat → Nat × Iter) (elOf : Nat → Nat × Nat) :
-    Chan.Label → List Nat
+def keyOf (D : DCert) (tot : Nat → Nat) (evOf : Nat → Nat × Iter) (elOf : Nat → Nat × Nat)
+    (elIt : Nat → Iter) : Chan.Label → List Nat
   | .start x => D.keyEv tot (evOf x).1 (evOf x).2 false
   | .finish x => D.keyEv tot (evOf x).1 (evOf x).2 true
-  | .read k => D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 D.streams[(elOf k).1]!.πread
-  | .push k => D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 D.streams[(elOf k).1]!.πpush
-  | .pull k _ => D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 D.streams[(elOf k).1]!.πpull
-  | .xfer k => D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 D.streams[(elOf k).1]!.πxfer
+  | .read k => D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 (elIt k) D.streams[(elOf k).1]!.πread
+  | .push k => D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 (elIt k) D.streams[(elOf k).1]!.πpush
+  | .pull k _ => D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 (elIt k) D.streams[(elOf k).1]!.πpull
+  | .xfer k => D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 (elIt k) D.streams[(elOf k).1]!.πxfer
 
 section
 
@@ -793,22 +849,29 @@ theorem ev_lt {v : Nat} {it : Iter} (h : D.evOk v = true) :
     simp only [Bool.false_eq_true, ite_false, ite_true]; omega
   · exact Nat.le_refl _
 
-theorem el_lt_el {σ : DStream} {e e' π π' : Nat} (he : e ≤ e')
-    (h : π < π' ∨ (π = π' ∧ e < e')) : D.keyEl tot σ e π < D.keyEl tot σ e' π' :=
-  lt_of_le_map (pair_lt h) _ fun C _ => coordEl_mono he C
+theorem el_lt_el {σ : DStream} {e e' π π' : Nat} {it it' : Iter} (he : e ≤ e')
+    (hit : σ.isLocal = true → it = it')
+    (h : π < π' ∨ (π = π' ∧ e < e')) : D.keyEl tot σ e it π < D.keyEl tot σ e' it' π' :=
+  lt_of_le_map (pair_lt h) _ fun C _ => coordEl_mono he hit C
 
 /-- An event of a side of a stream that moves element `e`: its start ranks below `e`'s labels
 after it, its finish above those before it. -/
-theorem seg_lt {σ : DStream} {segs : List Seg} {P : Nat} {g : Seg} {e : Nat} {it : Iter}
+theorem seg_lt {σ : DStream} {segs : List Seg} {P : Nat} {g : Seg} {e : Nat} {it itE : Iter}
     (hs : D.shapeOk σ = true) (hside : D.sideOk σ segs P = true) (hg : g ∈ segs)
-    (hoff : g.off ≤ e % P) (hlt : e % P < g.off + g.m) (hit : ∀ L ∈ D.loopsOf g.ev, it L = e / P)
-    {π : Nat} :
-    (D.πs[g.ev]! < π → D.keyEv tot g.ev it false < D.keyEl tot σ e π) ∧
-    (π < D.πf[g.ev]! → D.keyEl tot σ e π < D.keyEv tot g.ev it true) :=
-  ⟨fun h => lt_of_le_map (pair_lt (by simp [h])) _ fun C hC =>
-      (side_coords hs hside hg hoff hlt hit C hC).1,
-   fun h => lt_of_le_map (pair_lt (by simp [h])) _ fun C hC =>
-      (side_coords hs hside hg hoff hlt hit C hC).2⟩
+    (hat : SegAt D σ g P e itE it) {π : Nat} :
+    (D.πs[g.ev]! < π → D.keyEv tot g.ev it false < D.keyEl tot σ e itE π) ∧
+    (π < D.πf[g.ev]! → D.keyEl tot σ e itE π < D.keyEv tot g.ev it true) := by
+  have hc : ∀ C ∈ D.order, D.coordEv tot g.ev it false C ≤ D.coordEl tot σ e itE C ∧
+      D.coordEl tot σ e itE C ≤ D.coordEv tot g.ev it true C := by
+    intro C hC
+    unfold SegAt at hat
+    cases hl : σ.isLocal
+    · simp only [hl, Bool.false_eq_true, ite_false] at hat
+      exact side_coords hs hl hside hg hat.1 hat.2.1 hat.2.2 C hC
+    · simp only [hl, ite_true] at hat
+      exact side_coords_local hl hside hg hat C hC
+  exact ⟨fun h => lt_of_le_map (pair_lt (by simp [h])) _ fun C hC => (hc C hC).1,
+    fun h => lt_of_le_map (pair_lt (by simp [h])) _ fun C hC => (hc C hC).2⟩
 
 end
 
@@ -821,7 +884,7 @@ open LoopCert Chan
 section
 
 variable {D : DCert} {n tot : Nat → Nat} {p : Prog} {evOf : Nat → Nat × Iter}
-  {elOf : Nat → Nat × Nat}
+  {elOf : Nat → Nat × Nat} {elIt : Nat → Iter}
 
 theorem deadOk_ev (hc : D.deadOk = true) {v : Nat} (hv : v < D.T.loops.size) : D.evOk v = true := by
   simp only [DCert.deadOk, Bool.and_eq_true, List.all_eq_true, List.mem_range] at hc
@@ -861,13 +924,13 @@ theorem ranks_of {σ : DStream} (h : D.rankOk σ = true) : Ranks D σ := by
 
 /-- Everything known of an element of `p`. -/
 structure EFacts (D : DCert) (p : Prog) (evOf : Nat → Nat × Iter) (elOf : Nat → Nat × Nat)
-    (k : Nat) (el : Elem) : Prop where
-  real : ElemRealized D p evOf elOf k el
+    (elIt : Nat → Iter) (k : Nat) (el : Elem) : Prop where
+  real : ElemRealized D p evOf elOf elIt k el
   shape : D.shapeOk D.streams[(elOf k).1]! = true
   ranks : Ranks D D.streams[(elOf k).1]!
 
-theorem efacts (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k : Nat} {el : Elem}
-    (hk : p.elems[k]? = some el) : EFacts D p evOf elOf k el := by
+theorem efacts (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf elIt) {k : Nat} {el : Elem}
+    (hk : p.elems[k]? = some el) : EFacts D p evOf elOf elIt k el := by
   have er := hr.elems k el hk
   obtain ⟨hsh, hrk⟩ := deadOk_stream hc er.stream
   exact ⟨er, hsh, ranks_of hrk⟩
@@ -876,32 +939,32 @@ theorem getElem?_of_lt {k : Nat} (h : k < p.elems.size) : ∃ e, p.elems[k]? = s
   ⟨_, Array.getElem?_eq_getElem h⟩
 
 /-- The put of an element: an event of its stream's puts, at its coordinates. -/
-theorem src_facts (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k x : Nat}
+theorem src_facts (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf elIt) {k x : Nat}
     {el : Elem} (hk : p.elems[k]? = some el) (hx : el.src = some x) :
     x < p.graph.size ∧ ∀ π,
-      (D.πs[(evOf x).1]! < π → keyOf D tot evOf elOf (.start x) <
-        D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 π) ∧
-      (π < D.πf[(evOf x).1]! → D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 π <
-        keyOf D tot evOf elOf (.finish x)) ∧
+      (D.πs[(evOf x).1]! < π → keyOf D tot evOf elOf elIt (.start x) <
+        D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 (elIt k) π) ∧
+      (π < D.πf[(evOf x).1]! → D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 (elIt k) π <
+        keyOf D tot evOf elOf elIt (.finish x)) ∧
       ∃ g ∈ D.streams[(elOf k).1]!.puts, (evOf x).1 = g.ev := by
   have F := efacts hc hr hk
-  obtain ⟨x', hx', hxl, g, hg, hev, hoff, hlt, hit⟩ := F.real.src
+  obtain ⟨x', hx', hxl, g, hg, hev, hat⟩ := F.real.src
   rw [hx] at hx'; cases hx'
   have hside := (shape_parts F.shape).2.2.1
   refine ⟨hxl, fun π => ⟨fun h => ?_, fun h => ?_, g, hg, hev⟩⟩
   · simp only [keyOf]; rw [hev] at h ⊢
-    exact (seg_lt F.shape hside hg hoff hlt hit).1 h
+    exact (seg_lt F.shape hside hg hat).1 h
   · simp only [keyOf]; rw [hev] at h ⊢
-    exact (seg_lt F.shape hside hg hoff hlt hit).2 h
+    exact (seg_lt F.shape hside hg hat).2 h
 
 /-- A get of an element at slot `i`: an event of that slot's gets, at its coordinates. -/
-theorem dst_facts (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k x i : Nat}
+theorem dst_facts (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf elIt) {k x i : Nat}
     {el : Elem} (hk : p.elems[k]? = some el) (hx : el.dsts[i]? = some (some x)) :
     x < p.graph.size ∧ ∃ sg, D.streams[(elOf k).1]!.slots[i]? = some sg ∧ ∀ π,
-      (D.πs[(evOf x).1]! < π → keyOf D tot evOf elOf (.start x) <
-        D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 π) ∧
-      (π < D.πf[(evOf x).1]! → D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 π <
-        keyOf D tot evOf elOf (.finish x)) ∧
+      (D.πs[(evOf x).1]! < π → keyOf D tot evOf elOf elIt (.start x) <
+        D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 (elIt k) π) ∧
+      (π < D.πf[(evOf x).1]! → D.keyEl tot D.streams[(elOf k).1]! (elOf k).2 (elIt k) π <
+        keyOf D tot evOf elOf elIt (.finish x)) ∧
       ∃ g ∈ sg.1, (evOf x).1 = g.ev := by
   have F := efacts hc hr hk
   have hil : i < el.dsts.length := (List.getElem?_eq_some_iff.mp hx).1
@@ -911,17 +974,17 @@ theorem dst_facts (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k
   have hd := F.real.dsts i sg hsg
   have hne : sg.1 ≠ [] := by
     intro h; have := hd.1 h; rw [hx] at this; cases this
-  obtain ⟨x', hx', hxl, g, hg, hev, hoff, hlt, hit⟩ := hd.2 hne
+  obtain ⟨x', hx', hxl, g, hg, hev, hat⟩ := hd.2 hne
   rw [hx] at hx'; cases hx'
   have hside := (shape_parts F.shape).2.2.2.1 sg (List.mem_of_getElem? hsg)
   refine ⟨hxl, sg, hsg, fun π => ⟨fun h => ?_, fun h => ?_, g, hg, hev⟩⟩
   · simp only [keyOf]; rw [hev] at h ⊢
-    exact (seg_lt F.shape hside hg hoff hlt hit).1 h
+    exact (seg_lt F.shape hside hg hat).1 h
   · simp only [keyOf]; rw [hev] at h ⊢
-    exact (seg_lt F.shape hside hg hoff hlt hit).2 h
+    exact (seg_lt F.shape hside hg hat).2 h
 
 /-- Slot `i` of an element is got iff that of every element of its stream is. -/
-theorem got_iff (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k j i : Nat}
+theorem got_iff (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf elIt) {k j i : Nat}
     {el ej : Elem} (hk : p.elems[k]? = some el) (hj : p.elems[j]? = some ej)
     (hs : (elOf j).1 = (elOf k).1) (h : ∃ d, el.dsts[i]? = some (some d)) :
     ∃ d, ej.dsts[i]? = some (some d) := by
@@ -940,9 +1003,9 @@ theorem got_iff (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k j
 
 /-! ### Each kind of label: what it waits for is in, and ranks lower -/
 
-theorem pre_start (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {x : Nat}
+theorem pre_start (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf elIt) {x : Nat}
     (hx : x < p.graph.size) {z : Chan.Label} (hz : z ∈ hbPreds p (.start x)) :
-    z ∈ allLabels p ∧ keyOf D tot evOf elOf z < keyOf D tot evOf elOf (.start x) := by
+    z ∈ allLabels p ∧ keyOf D tot evOf elOf elIt z < keyOf D tot evOf elOf elIt (.start x) := by
   simp only [hbPreds, List.mem_map] at hz
   obtain ⟨u, hu, rfl⟩ := hz
   obtain ⟨hus, f, hf, hsrc, hdst, hm⟩ := hr.preds x hx u hu
@@ -963,9 +1026,9 @@ theorem gotLabel_of {k i : Nat} {el : Elem} (hk : p.elems[k]? = some el) :
     gotLabel p k i = if el.buffered then .pull k i else .xfer k := by
   simp [gotLabel, hk]
 
-theorem pre_finish (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {x : Nat}
+theorem pre_finish (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf elIt) {x : Nat}
     (hx : x < p.graph.size) {z : Chan.Label} (hz : z ∈ hbPreds p (.finish x)) :
-    z ∈ allLabels p ∧ keyOf D tot evOf elOf z < keyOf D tot evOf elOf (.finish x) := by
+    z ∈ allLabels p ∧ keyOf D tot evOf elOf elIt z < keyOf D tot evOf elOf elIt (.finish x) := by
   simp only [hbPreds, List.mem_cons, List.mem_flatMap, List.mem_range] at hz
   rcases hz with rfl | ⟨k, _, hz⟩
   · exact ⟨mem_all_start.mpr hx, by simp only [keyOf]; exact ev_lt (deadOk_ev hc (hr.ev x hx).1)⟩
@@ -1011,19 +1074,20 @@ theorem pre_finish (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {
         · simp at hz
 
 /-- The previous element: in, of the same stream, one index lower. -/
-theorem prev_facts (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k j : Nat}
+theorem prev_facts (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf elIt) {k j : Nat}
     {el : Elem} (hk : p.elems[k]? = some el) (hj : el.prev = some j) :
     ∃ ej, p.elems[j]? = some ej ∧ ej.buffered = el.buffered ∧
-      (elOf j).1 = (elOf k).1 ∧ (elOf j).2 + 1 = (elOf k).2 := by
+      (elOf j).1 = (elOf k).1 ∧ (elOf j).2 + 1 = (elOf k).2 ∧
+      (D.streams[(elOf k).1]!.isLocal = true → elIt j = elIt k) := by
   have F := efacts hc hr hk
-  obtain ⟨hjs, h1, h2⟩ := F.real.prev j hj
+  obtain ⟨hjs, h1, h2, h3⟩ := F.real.prev j hj
   obtain ⟨ej, hej⟩ := getElem?_of_lt hjs
   have Fj := efacts hc hr hej
-  exact ⟨ej, hej, by rw [Fj.real.buffered, F.real.buffered, h1], h1, h2⟩
+  exact ⟨ej, hej, by rw [Fj.real.buffered, F.real.buffered, h1], h1, h2, h3⟩
 
-theorem pre_read (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k : Nat}
+theorem pre_read (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf elIt) {k : Nat}
     (hl : Label.read k ∈ allLabels p) {z : Chan.Label} (hz : z ∈ hbPreds p (.read k)) :
-    z ∈ allLabels p ∧ keyOf D tot evOf elOf z < keyOf D tot evOf elOf (.read k) := by
+    z ∈ allLabels p ∧ keyOf D tot evOf elOf elIt z < keyOf D tot evOf elOf elIt (.read k) := by
   obtain ⟨el, hel⟩ := mem_all_read.mp hl
   have F := efacts hc hr hel
   simp only [hbPreds, hel, List.mem_append] at hz
@@ -1035,15 +1099,15 @@ theorem pre_read (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k 
     simp only [keyOf] at hk ⊢
     exact (hk _).1 (by rw [hev]; exact F.ranks.start_read g hg)
   · obtain ⟨j, hj, rfl⟩ := mem_optL hz
-    obtain ⟨ej, hej, _, h1, h2⟩ := prev_facts hc hr hel hj
+    obtain ⟨ej, hej, _, h1, h2, h3⟩ := prev_facts hc hr hel hj
     refine ⟨mem_all_read.mpr ⟨ej, hej⟩, ?_⟩
     simp only [keyOf]
     rw [h1]
-    exact el_lt_el (by omega) (Or.inr ⟨rfl, by omega⟩)
+    exact el_lt_el (by omega) h3 (Or.inr ⟨rfl, by omega⟩)
 
-theorem pre_push (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k : Nat}
+theorem pre_push (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf elIt) {k : Nat}
     (hl : Label.push k ∈ allLabels p) {z : Chan.Label} (hz : z ∈ hbPreds p (.push k)) :
-    z ∈ allLabels p ∧ keyOf D tot evOf elOf z < keyOf D tot evOf elOf (.push k) := by
+    z ∈ allLabels p ∧ keyOf D tot evOf elOf elIt z < keyOf D tot evOf elOf elIt (.push k) := by
   obtain ⟨el, hel, hb⟩ := mem_all_push.mp hl
   have F := efacts hc hr hel
   have rk := F.ranks.buf (by rw [← F.real.buffered]; exact hb)
@@ -1051,18 +1115,18 @@ theorem pre_push (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k 
   rcases hz with rfl | hz
   · refine ⟨mem_all_read.mpr ⟨el, hel⟩, ?_⟩
     simp only [keyOf]
-    exact el_lt_el (Nat.le_refl _) (Or.inl rk.1)
+    exact el_lt_el (Nat.le_refl _) (fun _ => rfl) (Or.inl rk.1)
   · obtain ⟨j, hj, rfl⟩ := mem_optL hz
-    obtain ⟨ej, hej, hbj, h1, h2⟩ := prev_facts hc hr hel hj
+    obtain ⟨ej, hej, hbj, h1, h2, h3⟩ := prev_facts hc hr hel hj
     rw [sentLabel_of hej, hbj, hb]
     refine ⟨mem_all_push.mpr ⟨ej, hej, by rw [hbj, hb]⟩, ?_⟩
     simp only [ite_true, keyOf]
     rw [h1]
-    exact el_lt_el (by omega) (Or.inr ⟨rfl, by omega⟩)
+    exact el_lt_el (by omega) h3 (Or.inr ⟨rfl, by omega⟩)
 
-theorem pre_pull (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k i : Nat}
+theorem pre_pull (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf elIt) {k i : Nat}
     (hl : Label.pull k i ∈ allLabels p) {z : Chan.Label} (hz : z ∈ hbPreds p (.pull k i)) :
-    z ∈ allLabels p ∧ keyOf D tot evOf elOf z < keyOf D tot evOf elOf (.pull k i) := by
+    z ∈ allLabels p ∧ keyOf D tot evOf elOf elIt z < keyOf D tot evOf elOf elIt (.pull k i) := by
   obtain ⟨el, hel, hb, hgot⟩ := mem_all_pull.mp hl
   have F := efacts hc hr hel
   have rk := F.ranks.buf (by rw [← F.real.buffered]; exact hb)
@@ -1070,7 +1134,7 @@ theorem pre_pull (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k 
   rcases hz with (rfl | hz) | hz
   · refine ⟨mem_all_push.mpr ⟨el, hel, hb⟩, ?_⟩
     simp only [keyOf]
-    exact el_lt_el (Nat.le_refl _) (Or.inl rk.2.1)
+    exact el_lt_el (Nat.le_refl _) (fun _ => rfl) (Or.inl rk.2.1)
   · split at hz
     · next d hd =>
       simp only [List.mem_singleton] at hz; subst hz
@@ -1080,17 +1144,17 @@ theorem pre_pull (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k 
       exact (hk _).1 (by rw [hev]; exact (rk.2.2.2 sg (List.mem_of_getElem? hsg) g hg).1)
     · simp at hz
   · obtain ⟨j, hj, rfl⟩ := mem_optL hz
-    obtain ⟨ej, hej, hbj, h1, h2⟩ := prev_facts hc hr hel hj
+    obtain ⟨ej, hej, hbj, h1, h2, h3⟩ := prev_facts hc hr hel hj
     rw [gotLabel_of hej, hbj, hb]
     obtain ⟨d', hd'⟩ := got_iff hc hr hel hej h1 hgot
     refine ⟨mem_all_pull.mpr ⟨ej, hej, by rw [hbj, hb], d', hd'⟩, ?_⟩
     simp only [ite_true, keyOf]
     rw [h1]
-    exact el_lt_el (by omega) (Or.inr ⟨rfl, by omega⟩)
+    exact el_lt_el (by omega) h3 (Or.inr ⟨rfl, by omega⟩)
 
-theorem pre_xfer (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k : Nat}
+theorem pre_xfer (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf elIt) {k : Nat}
     (hl : Label.xfer k ∈ allLabels p) {z : Chan.Label} (hz : z ∈ hbPreds p (.xfer k)) :
-    z ∈ allLabels p ∧ keyOf D tot evOf elOf z < keyOf D tot evOf elOf (.xfer k) := by
+    z ∈ allLabels p ∧ keyOf D tot evOf elOf elIt z < keyOf D tot evOf elOf elIt (.xfer k) := by
   obtain ⟨el, hel, hb⟩ := mem_all_xfer.mp hl
   have F := efacts hc hr hel
   have rk := F.ranks.unbuf (by rw [← F.real.buffered]; exact hb)
@@ -1098,7 +1162,7 @@ theorem pre_xfer (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k 
   rcases hz with (rfl | hz) | hz
   · refine ⟨mem_all_read.mpr ⟨el, hel⟩, ?_⟩
     simp only [keyOf]
-    exact el_lt_el (Nat.le_refl _) (Or.inl rk.1)
+    exact el_lt_el (Nat.le_refl _) (fun _ => rfl) (Or.inl rk.1)
   · simp only [List.mem_map, List.mem_filterMap, id] at hz
     obtain ⟨d, ⟨o, ho, hod⟩, rfl⟩ := hz
     subst hod
@@ -1111,16 +1175,16 @@ theorem pre_xfer (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {k 
     · next j hj =>
       simp only [List.mem_map, List.mem_range] at hz
       obtain ⟨i, _, rfl⟩ := hz
-      obtain ⟨ej, hej, hbj, h1, h2⟩ := prev_facts hc hr hel hj
+      obtain ⟨ej, hej, hbj, h1, h2, h3⟩ := prev_facts hc hr hel hj
       rw [gotLabel_of hej, hbj, hb]
       refine ⟨mem_all_xfer.mpr ⟨ej, hej, by rw [hbj, hb]⟩, ?_⟩
       simp only [Bool.false_eq_true, ite_false, keyOf]
       rw [h1]
-      exact el_lt_el (by omega) (Or.inr ⟨rfl, by omega⟩)
+      exact el_lt_el (by omega) h3 (Or.inr ⟨rfl, by omega⟩)
     · simp at hz
 
 /-- Every label of `p` is enabled once all have fired. -/
-theorem en_all (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {l : Chan.Label}
+theorem en_all (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf elIt) {l : Chan.Label}
     (hl : l ∈ allLabels p) : En p (allLabels p) l := by
   cases l with
   | start v =>
@@ -1177,9 +1241,9 @@ theorem en_all (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) {l : 
 
 /-- **Completion for every trip count**: when the certificate checks, every program realizing it
 (for any trip counts `n` its classes align) has a complete execution. -/
-theorem completes_of_deadOk (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf) :
+theorem completes_of_deadOk (hc : D.deadOk = true) (hr : RealizesD D n tot p evOf elOf elIt) :
     ∃ t G, Run p [] t G ∧ Done p G :=
-  completes_of_rank' (allLabels p) (keyOf D tot evOf elOf) (fun _ hl => en_all hc hr hl)
+  completes_of_rank' (allLabels p) (keyOf D tot evOf elOf elIt) (fun _ hl => en_all hc hr hl)
     (fun l hl z hz => by
       cases l with
       | start x => exact pre_start hc hr (mem_all_start.mp hl) hz
@@ -1197,7 +1261,7 @@ theorem outcome_every_trip {V : Type} {T : Template} {fp : Chan.LFp}
     {eff : Chan.Label → Veir.Air.Mem V → Veir.Air.Mem V}
     {num : Nat → Iter → Nat} {loc : Nat → Iter → Int → Nat × Int} {exempt : Nat → Prop}
     (hc : T.certOk = true) (hd : D.deadOk = true)
-    (hr : Realizes T n p fp num loc exempt fun _ => True) (hrd : RealizesD D n tot p evOf elOf)
+    (hr : Realizes T n p fp num loc exempt fun _ => True) (hrd : RealizesD D n tot p evOf elOf elIt)
     (hw : Chan.WF p) (hfr : Chan.LFramed fp eff) :
     ∃ t G, Run p [] t G ∧ Done p G ∧
       ∀ t' G', Run p [] t' G' → Done p G' → ∀ m, Chan.runL eff t' m = Chan.runL eff t m := by

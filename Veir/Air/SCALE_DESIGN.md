@@ -262,9 +262,18 @@ proof: `completes_of_rank` (a run exists when a key ranks every label above what
 `edge_lt` (token edges), `side_coords`/`seg_lt` (elements between their runs' starts and finishes),
 `en_all` and the per-label `pre_*` lemmas, `completes_of_deadOk`. Lit: `loopdead.mlir` (aligned,
 an integer multiple, and three refusals the element-level model confirms as deadlocks or as
-depending on the trip counts). Not yet: streams whose ends are in more than one symbolic loop or in
-loops of different nesting, streams of no loop with several runs, and the dependency 2a's patterns
-cannot state (from an inner loop's last iteration to the next outer iteration's first).
+depending on the trip counts). A stream whose every side moves all of
+an instance's elements in one instance of its events (a DMA's elements, put and got by the DMA
+itself) is *instance-local*: it may sit in any nest of symbolic loops, each element at its
+instance's coordinates, between the start and finish of every side's event (`side_coords_local`;
+`RealizesD` gives each element its instance, `elIt`); the sample's chains, one per instance, are
+one template stream. Template-checked functions of the lit sweep: 28 of 98 complete for every
+trip count. Not yet: streams fed by several loops in turn (the puts of one loop, then another's:
+the element index is a sum of trip counts), streams whose ends are in more than one symbolic loop
+and not instance-local, streams of no loop with several runs, and the dependency 2a's patterns
+cannot state (from an inner loop's last iteration to the next outer iteration's first). Most of
+the remaining refusals are real: per-iteration counts that differ at the two ends (lit tests of
+passes, not runnable programs), or unbuffered streams nothing gets.
 
 ## 4. Order of work
 

@@ -1,35 +1,35 @@
 "builtin.module"() ({
   "air.channel"() <{channel_type = "npu_dma_stream", size = [1, 1], sym_name = "ca"}> : () -> ()
   "func.func"() <{function_type = (index) -> (), sym_name = "aligned"}> ({
-  ^bb0(%arg59: index):
-    %68 = "arith.constant"() <{value = 1 : index}> : () -> index
-    %69 = "air.launch"(%68, %arg59) <{operandSegmentSizes = array<i32: 0, 1, 1>}> ({
-    ^bb0(%arg60: index, %arg61: index, %arg62: index):
-      %70 = "air.segment"(%arg62) <{operandSegmentSizes = array<i32: 0, 0, 1>, sym_name = "seg"}> ({
-      ^bb0(%arg63: index):
-        %71 = "arith.constant"() <{value = 0 : index}> : () -> index
-        %72 = "arith.constant"() <{value = 1 : index}> : () -> index
-        %73:2 = "air.execute"() ({
-          %83 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 1>
-          "air.execute_terminator"(%83) : (memref<32xi32, 1>) -> ()
+  ^bb0(%arg72: index):
+    %88 = "arith.constant"() <{value = 1 : index}> : () -> index
+    %89 = "air.launch"(%88, %arg72) <{operandSegmentSizes = array<i32: 0, 1, 1>}> ({
+    ^bb0(%arg73: index, %arg74: index, %arg75: index):
+      %90 = "air.segment"(%arg75) <{operandSegmentSizes = array<i32: 0, 0, 1>, sym_name = "seg"}> ({
+      ^bb0(%arg76: index):
+        %91 = "arith.constant"() <{value = 0 : index}> : () -> index
+        %92 = "arith.constant"() <{value = 1 : index}> : () -> index
+        %93:2 = "air.execute"() ({
+          %103 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 1>
+          "air.execute_terminator"(%103) : (memref<32xi32, 1>) -> ()
         }) : () -> (!air.async.token, memref<32xi32, 1>)
-        %74 = "scf.for"(%71, %arg63, %72, %73#0) ({
-        ^bb0(%arg71: index, %arg72: !air.async.token):
-          %82 = "air.channel.put"(%arg72, %73#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0, 0>, static_src_offsets = array<i64>, static_src_sizes = array<i64>, static_src_strides = array<i64>}> : (!air.async.token, memref<32xi32, 1>) -> !air.async.token
-          "scf.yield"(%82) : (!air.async.token) -> ()
+        %94 = "scf.for"(%91, %arg76, %92, %93#0) ({
+        ^bb0(%arg84: index, %arg85: !air.async.token):
+          %102 = "air.channel.put"(%arg85, %93#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0, 0>, static_src_offsets = array<i64>, static_src_sizes = array<i64>, static_src_strides = array<i64>}> : (!air.async.token, memref<32xi32, 1>) -> !air.async.token
+          "scf.yield"(%102) : (!air.async.token) -> ()
         }) : (index, index, index, !air.async.token) -> !air.async.token
-        %75 = "air.herd"(%72, %72, %arg63) <{operandSegmentSizes = array<i32: 0, 2, 1>, sym_name = "herd"}> ({
-        ^bb0(%arg64: index, %arg65: index, %arg66: index, %arg67: index, %arg68: index):
-          %76 = "arith.constant"() <{value = 0 : index}> : () -> index
-          %77 = "arith.constant"() <{value = 1 : index}> : () -> index
-          %78:2 = "air.execute"() ({
-            %81 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 2>
-            "air.execute_terminator"(%81) : (memref<32xi32, 2>) -> ()
+        %95 = "air.herd"(%92, %92, %arg76) <{operandSegmentSizes = array<i32: 0, 2, 1>, sym_name = "herd"}> ({
+        ^bb0(%arg77: index, %arg78: index, %arg79: index, %arg80: index, %arg81: index):
+          %96 = "arith.constant"() <{value = 0 : index}> : () -> index
+          %97 = "arith.constant"() <{value = 1 : index}> : () -> index
+          %98:2 = "air.execute"() ({
+            %101 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 2>
+            "air.execute_terminator"(%101) : (memref<32xi32, 2>) -> ()
           }) : () -> (!air.async.token, memref<32xi32, 2>)
-          %79 = "scf.for"(%76, %arg68, %77, %78#0) ({
-          ^bb0(%arg69: index, %arg70: !air.async.token):
-            %80 = "air.channel.get"(%arg70, %78#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0>, static_dst_offsets = array<i64>, static_dst_sizes = array<i64>, static_dst_strides = array<i64>}> : (!air.async.token, memref<32xi32, 2>) -> !air.async.token
-            "scf.yield"(%80) : (!air.async.token) -> ()
+          %99 = "scf.for"(%96, %arg81, %97, %98#0) ({
+          ^bb0(%arg82: index, %arg83: !air.async.token):
+            %100 = "air.channel.get"(%arg83, %98#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0>, static_dst_offsets = array<i64>, static_dst_sizes = array<i64>, static_dst_strides = array<i64>}> : (!air.async.token, memref<32xi32, 2>) -> !air.async.token
+            "scf.yield"(%100) : (!air.async.token) -> ()
           }) : (index, index, index, !air.async.token) -> !air.async.token
           "air.herd_terminator"() : () -> ()
         }) : (index, index, index) -> !air.async.token
@@ -40,38 +40,38 @@
     "func.return"() : () -> ()
   }) : () -> ()
   "func.func"() <{function_type = (index) -> (), sym_name = "multiple"}> ({
-  ^bb0(%arg45: index):
-    %49 = "arith.constant"() <{value = 1 : index}> : () -> index
-    %50 = "air.launch"(%49, %arg45) <{operandSegmentSizes = array<i32: 0, 1, 1>}> ({
-    ^bb0(%arg46: index, %arg47: index, %arg48: index):
-      %51 = "air.segment"(%arg48) <{operandSegmentSizes = array<i32: 0, 0, 1>, sym_name = "seg"}> ({
-      ^bb0(%arg49: index):
-        %52 = "arith.constant"() <{value = 0 : index}> : () -> index
-        %53 = "arith.constant"() <{value = 1 : index}> : () -> index
-        %54:2 = "air.execute"() ({
-          %67 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 1>
-          "air.execute_terminator"(%67) : (memref<32xi32, 1>) -> ()
+  ^bb0(%arg58: index):
+    %69 = "arith.constant"() <{value = 1 : index}> : () -> index
+    %70 = "air.launch"(%69, %arg58) <{operandSegmentSizes = array<i32: 0, 1, 1>}> ({
+    ^bb0(%arg59: index, %arg60: index, %arg61: index):
+      %71 = "air.segment"(%arg61) <{operandSegmentSizes = array<i32: 0, 0, 1>, sym_name = "seg"}> ({
+      ^bb0(%arg62: index):
+        %72 = "arith.constant"() <{value = 0 : index}> : () -> index
+        %73 = "arith.constant"() <{value = 1 : index}> : () -> index
+        %74:2 = "air.execute"() ({
+          %87 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 1>
+          "air.execute_terminator"(%87) : (memref<32xi32, 1>) -> ()
         }) : () -> (!air.async.token, memref<32xi32, 1>)
-        %55 = "scf.for"(%52, %arg49, %53, %54#0) ({
-        ^bb0(%arg57: index, %arg58: !air.async.token):
-          %66 = "air.channel.put"(%arg58, %54#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0, 0>, static_src_offsets = array<i64>, static_src_sizes = array<i64>, static_src_strides = array<i64>}> : (!air.async.token, memref<32xi32, 1>) -> !air.async.token
-          "scf.yield"(%66) : (!air.async.token) -> ()
+        %75 = "scf.for"(%72, %arg62, %73, %74#0) ({
+        ^bb0(%arg70: index, %arg71: !air.async.token):
+          %86 = "air.channel.put"(%arg71, %74#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0, 0>, static_src_offsets = array<i64>, static_src_sizes = array<i64>, static_src_strides = array<i64>}> : (!air.async.token, memref<32xi32, 1>) -> !air.async.token
+          "scf.yield"(%86) : (!air.async.token) -> ()
         }) : (index, index, index, !air.async.token) -> !air.async.token
-        %56 = "air.herd"(%53, %53, %arg49) <{operandSegmentSizes = array<i32: 0, 2, 1>, sym_name = "herd"}> ({
-        ^bb0(%arg50: index, %arg51: index, %arg52: index, %arg53: index, %arg54: index):
-          %57 = "arith.constant"() <{value = 0 : index}> : () -> index
-          %58 = "arith.constant"() <{value = 1 : index}> : () -> index
-          %59:2 = "air.execute"() ({
-            %65 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 2>
-            "air.execute_terminator"(%65) : (memref<32xi32, 2>) -> ()
+        %76 = "air.herd"(%73, %73, %arg62) <{operandSegmentSizes = array<i32: 0, 2, 1>, sym_name = "herd"}> ({
+        ^bb0(%arg63: index, %arg64: index, %arg65: index, %arg66: index, %arg67: index):
+          %77 = "arith.constant"() <{value = 0 : index}> : () -> index
+          %78 = "arith.constant"() <{value = 1 : index}> : () -> index
+          %79:2 = "air.execute"() ({
+            %85 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 2>
+            "air.execute_terminator"(%85) : (memref<32xi32, 2>) -> ()
           }) : () -> (!air.async.token, memref<32xi32, 2>)
-          %60 = "arith.constant"() <{value = 4 : index}> : () -> index
-          %61 = "arith.constant"() <{value = 8 : index}> : () -> index
-          %62 = "arith.muli"(%arg54, %60) <{overflowFlags = #arith.overflow<none>}> : (index, index) -> index
-          %63 = "scf.for"(%57, %62, %58, %59#0) ({
-          ^bb0(%arg55: index, %arg56: !air.async.token):
-            %64 = "air.channel.get"(%arg56, %59#1, %57, %61, %58) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 1, 1, 1>, static_dst_offsets = array<i64: -9223372036854775808>, static_dst_sizes = array<i64: -9223372036854775808>, static_dst_strides = array<i64: -9223372036854775808>}> : (!air.async.token, memref<32xi32, 2>, index, index, index) -> !air.async.token
-            "scf.yield"(%64) : (!air.async.token) -> ()
+          %80 = "arith.constant"() <{value = 4 : index}> : () -> index
+          %81 = "arith.constant"() <{value = 8 : index}> : () -> index
+          %82 = "arith.muli"(%arg67, %80) <{overflowFlags = #arith.overflow<none>}> : (index, index) -> index
+          %83 = "scf.for"(%77, %82, %78, %79#0) ({
+          ^bb0(%arg68: index, %arg69: !air.async.token):
+            %84 = "air.channel.get"(%arg69, %79#1, %77, %81, %78) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 1, 1, 1>, static_dst_offsets = array<i64: -9223372036854775808>, static_dst_sizes = array<i64: -9223372036854775808>, static_dst_strides = array<i64: -9223372036854775808>}> : (!air.async.token, memref<32xi32, 2>, index, index, index) -> !air.async.token
+            "scf.yield"(%84) : (!air.async.token) -> ()
           }) : (index, index, index, !air.async.token) -> !air.async.token
           "air.herd_terminator"() : () -> ()
         }) : (index, index, index) -> !air.async.token
@@ -82,35 +82,35 @@
     "func.return"() : () -> ()
   }) : () -> ()
   "func.func"() <{function_type = (index) -> (), sym_name = "gets_after_puts"}> ({
-  ^bb0(%arg31: index):
-    %33 = "arith.constant"() <{value = 1 : index}> : () -> index
-    %34 = "air.launch"(%33, %arg31) <{operandSegmentSizes = array<i32: 0, 1, 1>}> ({
-    ^bb0(%arg32: index, %arg33: index, %arg34: index):
-      %35 = "air.segment"(%arg34) <{operandSegmentSizes = array<i32: 0, 0, 1>, sym_name = "seg"}> ({
-      ^bb0(%arg35: index):
-        %36 = "arith.constant"() <{value = 0 : index}> : () -> index
-        %37 = "arith.constant"() <{value = 1 : index}> : () -> index
-        %38:2 = "air.execute"() ({
-          %48 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 1>
-          "air.execute_terminator"(%48) : (memref<32xi32, 1>) -> ()
+  ^bb0(%arg44: index):
+    %53 = "arith.constant"() <{value = 1 : index}> : () -> index
+    %54 = "air.launch"(%53, %arg44) <{operandSegmentSizes = array<i32: 0, 1, 1>}> ({
+    ^bb0(%arg45: index, %arg46: index, %arg47: index):
+      %55 = "air.segment"(%arg47) <{operandSegmentSizes = array<i32: 0, 0, 1>, sym_name = "seg"}> ({
+      ^bb0(%arg48: index):
+        %56 = "arith.constant"() <{value = 0 : index}> : () -> index
+        %57 = "arith.constant"() <{value = 1 : index}> : () -> index
+        %58:2 = "air.execute"() ({
+          %68 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 1>
+          "air.execute_terminator"(%68) : (memref<32xi32, 1>) -> ()
         }) : () -> (!air.async.token, memref<32xi32, 1>)
-        %39 = "scf.for"(%36, %arg35, %37, %38#0) ({
-        ^bb0(%arg43: index, %arg44: !air.async.token):
-          %47 = "air.channel.put"(%arg44, %38#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0, 0>, static_src_offsets = array<i64>, static_src_sizes = array<i64>, static_src_strides = array<i64>}> : (!air.async.token, memref<32xi32, 1>) -> !air.async.token
-          "scf.yield"(%47) : (!air.async.token) -> ()
+        %59 = "scf.for"(%56, %arg48, %57, %58#0) ({
+        ^bb0(%arg56: index, %arg57: !air.async.token):
+          %67 = "air.channel.put"(%arg57, %58#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0, 0>, static_src_offsets = array<i64>, static_src_sizes = array<i64>, static_src_strides = array<i64>}> : (!air.async.token, memref<32xi32, 1>) -> !air.async.token
+          "scf.yield"(%67) : (!air.async.token) -> ()
         }) : (index, index, index, !air.async.token) -> !air.async.token
-        %40 = "air.herd"(%39, %37, %37, %arg35) <{operandSegmentSizes = array<i32: 1, 2, 1>, sym_name = "herd"}> ({
-        ^bb0(%arg36: index, %arg37: index, %arg38: index, %arg39: index, %arg40: index):
-          %41 = "arith.constant"() <{value = 0 : index}> : () -> index
-          %42 = "arith.constant"() <{value = 1 : index}> : () -> index
-          %43:2 = "air.execute"() ({
-            %46 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 2>
-            "air.execute_terminator"(%46) : (memref<32xi32, 2>) -> ()
+        %60 = "air.herd"(%59, %57, %57, %arg48) <{operandSegmentSizes = array<i32: 1, 2, 1>, sym_name = "herd"}> ({
+        ^bb0(%arg49: index, %arg50: index, %arg51: index, %arg52: index, %arg53: index):
+          %61 = "arith.constant"() <{value = 0 : index}> : () -> index
+          %62 = "arith.constant"() <{value = 1 : index}> : () -> index
+          %63:2 = "air.execute"() ({
+            %66 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 2>
+            "air.execute_terminator"(%66) : (memref<32xi32, 2>) -> ()
           }) : () -> (!air.async.token, memref<32xi32, 2>)
-          %44 = "scf.for"(%41, %arg40, %42, %43#0) ({
-          ^bb0(%arg41: index, %arg42: !air.async.token):
-            %45 = "air.channel.get"(%arg42, %43#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0>, static_dst_offsets = array<i64>, static_dst_sizes = array<i64>, static_dst_strides = array<i64>}> : (!air.async.token, memref<32xi32, 2>) -> !air.async.token
-            "scf.yield"(%45) : (!air.async.token) -> ()
+          %64 = "scf.for"(%61, %arg53, %62, %63#0) ({
+          ^bb0(%arg54: index, %arg55: !air.async.token):
+            %65 = "air.channel.get"(%arg55, %63#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0>, static_dst_offsets = array<i64>, static_dst_sizes = array<i64>, static_dst_strides = array<i64>}> : (!air.async.token, memref<32xi32, 2>) -> !air.async.token
+            "scf.yield"(%65) : (!air.async.token) -> ()
           }) : (index, index, index, !air.async.token) -> !air.async.token
           "air.herd_terminator"() : () -> ()
         }) : (!air.async.token, index, index, index) -> !air.async.token
@@ -121,35 +121,35 @@
     "func.return"() : () -> ()
   }) : () -> ()
   "func.func"() <{function_type = (index, index) -> (), sym_name = "other_bound"}> ({
-  ^bb0(%arg14: index, %arg15: index):
-    %17 = "arith.constant"() <{value = 1 : index}> : () -> index
-    %18 = "air.launch"(%17, %arg14, %arg15) <{operandSegmentSizes = array<i32: 0, 1, 2>}> ({
-    ^bb0(%arg16: index, %arg17: index, %arg18: index, %arg19: index):
-      %19 = "air.segment"(%arg18, %arg19) <{operandSegmentSizes = array<i32: 0, 0, 2>, sym_name = "seg"}> ({
-      ^bb0(%arg20: index, %arg21: index):
-        %20 = "arith.constant"() <{value = 0 : index}> : () -> index
-        %21 = "arith.constant"() <{value = 1 : index}> : () -> index
-        %22:2 = "air.execute"() ({
-          %32 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 1>
-          "air.execute_terminator"(%32) : (memref<32xi32, 1>) -> ()
+  ^bb0(%arg27: index, %arg28: index):
+    %37 = "arith.constant"() <{value = 1 : index}> : () -> index
+    %38 = "air.launch"(%37, %arg27, %arg28) <{operandSegmentSizes = array<i32: 0, 1, 2>}> ({
+    ^bb0(%arg29: index, %arg30: index, %arg31: index, %arg32: index):
+      %39 = "air.segment"(%arg31, %arg32) <{operandSegmentSizes = array<i32: 0, 0, 2>, sym_name = "seg"}> ({
+      ^bb0(%arg33: index, %arg34: index):
+        %40 = "arith.constant"() <{value = 0 : index}> : () -> index
+        %41 = "arith.constant"() <{value = 1 : index}> : () -> index
+        %42:2 = "air.execute"() ({
+          %52 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 1>
+          "air.execute_terminator"(%52) : (memref<32xi32, 1>) -> ()
         }) : () -> (!air.async.token, memref<32xi32, 1>)
-        %23 = "scf.for"(%20, %arg20, %21, %22#0) ({
-        ^bb0(%arg29: index, %arg30: !air.async.token):
-          %31 = "air.channel.put"(%arg30, %22#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0, 0>, static_src_offsets = array<i64>, static_src_sizes = array<i64>, static_src_strides = array<i64>}> : (!air.async.token, memref<32xi32, 1>) -> !air.async.token
-          "scf.yield"(%31) : (!air.async.token) -> ()
+        %43 = "scf.for"(%40, %arg33, %41, %42#0) ({
+        ^bb0(%arg42: index, %arg43: !air.async.token):
+          %51 = "air.channel.put"(%arg43, %42#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0, 0>, static_src_offsets = array<i64>, static_src_sizes = array<i64>, static_src_strides = array<i64>}> : (!air.async.token, memref<32xi32, 1>) -> !air.async.token
+          "scf.yield"(%51) : (!air.async.token) -> ()
         }) : (index, index, index, !air.async.token) -> !air.async.token
-        %24 = "air.herd"(%21, %21, %arg21) <{operandSegmentSizes = array<i32: 0, 2, 1>, sym_name = "herd"}> ({
-        ^bb0(%arg22: index, %arg23: index, %arg24: index, %arg25: index, %arg26: index):
-          %25 = "arith.constant"() <{value = 0 : index}> : () -> index
-          %26 = "arith.constant"() <{value = 1 : index}> : () -> index
-          %27:2 = "air.execute"() ({
-            %30 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 2>
-            "air.execute_terminator"(%30) : (memref<32xi32, 2>) -> ()
+        %44 = "air.herd"(%41, %41, %arg34) <{operandSegmentSizes = array<i32: 0, 2, 1>, sym_name = "herd"}> ({
+        ^bb0(%arg35: index, %arg36: index, %arg37: index, %arg38: index, %arg39: index):
+          %45 = "arith.constant"() <{value = 0 : index}> : () -> index
+          %46 = "arith.constant"() <{value = 1 : index}> : () -> index
+          %47:2 = "air.execute"() ({
+            %50 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 2>
+            "air.execute_terminator"(%50) : (memref<32xi32, 2>) -> ()
           }) : () -> (!air.async.token, memref<32xi32, 2>)
-          %28 = "scf.for"(%25, %arg26, %26, %27#0) ({
-          ^bb0(%arg27: index, %arg28: !air.async.token):
-            %29 = "air.channel.get"(%arg28, %27#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0>, static_dst_offsets = array<i64>, static_dst_sizes = array<i64>, static_dst_strides = array<i64>}> : (!air.async.token, memref<32xi32, 2>) -> !air.async.token
-            "scf.yield"(%29) : (!air.async.token) -> ()
+          %48 = "scf.for"(%45, %arg39, %46, %47#0) ({
+          ^bb0(%arg40: index, %arg41: !air.async.token):
+            %49 = "air.channel.get"(%arg41, %47#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0>, static_dst_offsets = array<i64>, static_dst_sizes = array<i64>, static_dst_strides = array<i64>}> : (!air.async.token, memref<32xi32, 2>) -> !air.async.token
+            "scf.yield"(%49) : (!air.async.token) -> ()
           }) : (index, index, index, !air.async.token) -> !air.async.token
           "air.herd_terminator"() : () -> ()
         }) : (index, index, index) -> !air.async.token
@@ -160,6 +160,64 @@
     "func.return"() : () -> ()
   }) : () -> ()
   "func.func"() <{function_type = (index) -> (), sym_name = "unbalanced"}> ({
+  ^bb0(%arg13: index):
+    %20 = "arith.constant"() <{value = 1 : index}> : () -> index
+    %21 = "air.launch"(%20, %arg13) <{operandSegmentSizes = array<i32: 0, 1, 1>}> ({
+    ^bb0(%arg14: index, %arg15: index, %arg16: index):
+      %22 = "air.segment"(%arg16) <{operandSegmentSizes = array<i32: 0, 0, 1>, sym_name = "seg"}> ({
+      ^bb0(%arg17: index):
+        %23 = "arith.constant"() <{value = 0 : index}> : () -> index
+        %24 = "arith.constant"() <{value = 1 : index}> : () -> index
+        %25:2 = "air.execute"() ({
+          %36 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 1>
+          "air.execute_terminator"(%36) : (memref<32xi32, 1>) -> ()
+        }) : () -> (!air.async.token, memref<32xi32, 1>)
+        %26 = "scf.for"(%23, %arg17, %24, %25#0) ({
+        ^bb0(%arg25: index, %arg26: !air.async.token):
+          %35 = "air.channel.put"(%arg26, %25#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0, 0>, static_src_offsets = array<i64>, static_src_sizes = array<i64>, static_src_strides = array<i64>}> : (!air.async.token, memref<32xi32, 1>) -> !air.async.token
+          "scf.yield"(%35) : (!air.async.token) -> ()
+        }) : (index, index, index, !air.async.token) -> !air.async.token
+        %27 = "air.herd"(%24, %24, %arg17) <{operandSegmentSizes = array<i32: 0, 2, 1>, sym_name = "herd"}> ({
+        ^bb0(%arg18: index, %arg19: index, %arg20: index, %arg21: index, %arg22: index):
+          %28 = "arith.constant"() <{value = 0 : index}> : () -> index
+          %29 = "arith.constant"() <{value = 1 : index}> : () -> index
+          %30:2 = "air.execute"() ({
+            %34 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 2>
+            "air.execute_terminator"(%34) : (memref<32xi32, 2>) -> ()
+          }) : () -> (!air.async.token, memref<32xi32, 2>)
+          %31 = "scf.for"(%28, %arg22, %29, %30#0) ({
+          ^bb0(%arg23: index, %arg24: !air.async.token):
+            %32 = "arith.constant"() <{value = 16 : index}> : () -> index
+            %33 = "air.channel.get"(%arg24, %30#1, %28, %32, %29) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 1, 1, 1>, static_dst_offsets = array<i64: -9223372036854775808>, static_dst_sizes = array<i64: -9223372036854775808>, static_dst_strides = array<i64: -9223372036854775808>}> : (!air.async.token, memref<32xi32, 2>, index, index, index) -> !air.async.token
+            "scf.yield"(%33) : (!air.async.token) -> ()
+          }) : (index, index, index, !air.async.token) -> !air.async.token
+          "air.herd_terminator"() : () -> ()
+        }) : (index, index, index) -> !air.async.token
+        "air.segment_terminator"() : () -> ()
+      }) : (index) -> !air.async.token
+      "air.launch_terminator"() : () -> ()
+    }) : (index, index) -> !air.async.token
+    "func.return"() : () -> ()
+  }) : () -> ()
+  "func.func"() <{function_type = (memref<4096xi32>, memref<4096xi32>, index) -> (), sym_name = "dma_nest"}> ({
+  ^bb0(%arg7: memref<4096xi32>, %arg8: memref<4096xi32>, %arg9: index):
+    %13 = "arith.constant"() <{value = 0 : index}> : () -> index
+    %14 = "arith.constant"() <{value = 1 : index}> : () -> index
+    %15 = "arith.constant"() <{value = 8 : index}> : () -> index
+    "scf.for"(%13, %arg9, %14) ({
+    ^bb0(%arg10: index):
+      %16 = "arith.muli"(%arg10, %15) <{overflowFlags = #arith.overflow<none>}> : (index, index) -> index
+      %17 = "air.wait_all"() : () -> !air.async.token
+      %18 = "scf.for"(%13, %arg9, %14, %17) ({
+      ^bb0(%arg11: index, %arg12: !air.async.token):
+        %19 = "air.dma_memcpy_nd"(%arg12, %arg8, %16, %15, %14, %arg7, %16, %15, %14) <{operandSegmentSizes = array<i32: 1, 1, 1, 1, 1, 1, 1, 1, 1>, static_dst_offsets = array<i64: -9223372036854775808>, static_dst_sizes = array<i64: -9223372036854775808>, static_dst_strides = array<i64: -9223372036854775808>, static_src_offsets = array<i64: -9223372036854775808>, static_src_sizes = array<i64: -9223372036854775808>, static_src_strides = array<i64: -9223372036854775808>}> : (!air.async.token, memref<4096xi32>, index, index, index, memref<4096xi32>, index, index, index) -> !air.async.token
+        "scf.yield"(%19) : (!air.async.token) -> ()
+      }) : (index, index, index, !air.async.token) -> !air.async.token
+      "scf.yield"() : () -> ()
+    }) : (index, index, index) -> ()
+    "func.return"() : () -> ()
+  }) : () -> ()
+  "func.func"() <{function_type = (index) -> (), sym_name = "put_after_get"}> ({
   ^bb0(%arg0: index):
     %0 = "arith.constant"() <{value = 1 : index}> : () -> index
     %1 = "air.launch"(%0, %arg0) <{operandSegmentSizes = array<i32: 0, 1, 1>}> ({
@@ -169,30 +227,20 @@
         %3 = "arith.constant"() <{value = 0 : index}> : () -> index
         %4 = "arith.constant"() <{value = 1 : index}> : () -> index
         %5:2 = "air.execute"() ({
-          %16 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 1>
-          "air.execute_terminator"(%16) : (memref<32xi32, 1>) -> ()
+          %12 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 1>
+          "air.execute_terminator"(%12) : (memref<32xi32, 1>) -> ()
         }) : () -> (!air.async.token, memref<32xi32, 1>)
-        %6 = "scf.for"(%3, %arg4, %4, %5#0) ({
-        ^bb0(%arg12: index, %arg13: !air.async.token):
-          %15 = "air.channel.put"(%arg13, %5#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0, 0>, static_src_offsets = array<i64>, static_src_sizes = array<i64>, static_src_strides = array<i64>}> : (!air.async.token, memref<32xi32, 1>) -> !air.async.token
-          "scf.yield"(%15) : (!air.async.token) -> ()
+        %6:2 = "air.execute"() ({
+          %11 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 1>
+          "air.execute_terminator"(%11) : (memref<32xi32, 1>) -> ()
+        }) : () -> (!air.async.token, memref<32xi32, 1>)
+        %7 = "air.wait_all"(%5#0, %6#0) : (!air.async.token, !air.async.token) -> !air.async.token
+        %8 = "scf.for"(%3, %arg4, %4, %7) ({
+        ^bb0(%arg5: index, %arg6: !air.async.token):
+          %9 = "air.channel.get"(%arg6, %6#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0>, static_dst_offsets = array<i64>, static_dst_sizes = array<i64>, static_dst_strides = array<i64>}> : (!air.async.token, memref<32xi32, 1>) -> !air.async.token
+          %10 = "air.channel.put"(%9, %5#1) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 0, 0, 0, 0>, static_src_offsets = array<i64>, static_src_sizes = array<i64>, static_src_strides = array<i64>}> : (!air.async.token, memref<32xi32, 1>) -> !air.async.token
+          "scf.yield"(%10) : (!air.async.token) -> ()
         }) : (index, index, index, !air.async.token) -> !air.async.token
-        %7 = "air.herd"(%4, %4, %arg4) <{operandSegmentSizes = array<i32: 0, 2, 1>, sym_name = "herd"}> ({
-        ^bb0(%arg5: index, %arg6: index, %arg7: index, %arg8: index, %arg9: index):
-          %8 = "arith.constant"() <{value = 0 : index}> : () -> index
-          %9 = "arith.constant"() <{value = 1 : index}> : () -> index
-          %10:2 = "air.execute"() ({
-            %14 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<32xi32, 2>
-            "air.execute_terminator"(%14) : (memref<32xi32, 2>) -> ()
-          }) : () -> (!air.async.token, memref<32xi32, 2>)
-          %11 = "scf.for"(%8, %arg9, %9, %10#0) ({
-          ^bb0(%arg10: index, %arg11: !air.async.token):
-            %12 = "arith.constant"() <{value = 16 : index}> : () -> index
-            %13 = "air.channel.get"(%arg11, %10#1, %8, %12, %9) <{chan_name = @ca, operandSegmentSizes = array<i32: 1, 0, 1, 1, 1, 1>, static_dst_offsets = array<i64: -9223372036854775808>, static_dst_sizes = array<i64: -9223372036854775808>, static_dst_strides = array<i64: -9223372036854775808>}> : (!air.async.token, memref<32xi32, 2>, index, index, index) -> !air.async.token
-            "scf.yield"(%13) : (!air.async.token) -> ()
-          }) : (index, index, index, !air.async.token) -> !air.async.token
-          "air.herd_terminator"() : () -> ()
-        }) : (index, index, index) -> !air.async.token
         "air.segment_terminator"() : () -> ()
       }) : (index) -> !air.async.token
       "air.launch_terminator"() : () -> ()

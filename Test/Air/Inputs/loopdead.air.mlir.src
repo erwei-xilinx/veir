@@ -156,4 +156,45 @@ module {
     }
     return
   }
+  // A DMA in two nested symbolic loops: its elements live in one instance (instance-local). Each
+  // outer iteration copies its own region, the inner iterations one after another.
+  func.func @dma_nest(%a: memref<4096xi32>, %b: memref<4096xi32>, %n: index) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c8 = arith.constant 8 : index
+    scf.for %i = %c0 to %n step %c1 {
+      %o = arith.muli %i, %c8 : index
+      %t0 = air.wait_all async
+      %r2 = scf.for %j = %c0 to %n step %c1 iter_args(%u = %t0) -> (!air.async.token) {
+        %d = air.dma_memcpy_nd async [%u] (%b[%o] [%c8] [%c1], %a[%o] [%c8] [%c1]) : (memref<4096xi32>, memref<4096xi32>)
+        scf.yield %d : !air.async.token
+      }
+    }
+    return
+  }
+  // In each iteration, the put waits for the get of the same elements: they never meet.
+  func.func @put_after_get(%n: index) {
+    %c1 = arith.constant 1 : index
+    %0 = air.launch async (%lx) in (%lsx=%c1) args(%ln=%n) : index {
+      %1 = air.segment @seg async args(%sn=%ln) : index {
+        %c0_s = arith.constant 0 : index
+        %c1_s = arith.constant 1 : index
+        %ta, %l2 = air.execute -> (memref<32xi32, 1>) {
+          %x = memref.alloc() : memref<32xi32, 1>
+          air.execute_terminator %x : memref<32xi32, 1>
+        }
+        %tb, %l3 = air.execute -> (memref<32xi32, 1>) {
+          %x = memref.alloc() : memref<32xi32, 1>
+          air.execute_terminator %x : memref<32xi32, 1>
+        }
+        %w = air.wait_all async [%ta, %tb]
+        %p = scf.for %i = %c0_s to %sn step %c1_s iter_args(%t = %w) -> (!air.async.token) {
+          %g = air.channel.get async [%t] @ca[] (%l3[] [] []) : (memref<32xi32, 1>)
+          %q = air.channel.put async [%g] @ca[] (%l2[] [] []) : (memref<32xi32, 1>)
+          scf.yield %q : !air.async.token
+        }
+      }
+    }
+    return
+  }
 }

@@ -219,15 +219,31 @@ def streamsOf (s : LoopTemplate.Sample) : Except String (Array DStream) := do
                             πread := 0, πpush := 0, πpull := 0, πxfer := 0, isLocal := true }
         continue
     if chain.any fun k => elems[k]!.dsts.length != nSlots then throw "a stream's slots differ"
-    let (puts, per) ← runsOf s (chain.map fun k => elems[k]!.src)
-    if puts.isEmpty then throw "a stream no put sends"
     if !e0.buffered && (slots0 s chain elems nSlots).any id then
       throw "an unbuffered stream (D51) that a slot has no get for: its puts never finish"
-    let mut slots : List (List Seg × Nat) := []
-    for i in [0:nSlots] do
-      slots := slots ++ [← runsOf s (chain.map fun k => (elems[k]!.dsts[i]?).bind id)]
-    out := out.push { puts, per, slots, buffered := e0.buffered, rate := 0,
-                      πread := 0, πpush := 0, πpull := 0, πxfer := 0 }
+    -- Phases: loops feeding the stream in turn. Every side changes loops at the same elements.
+    let loopsAt (o : Option Nat) : Option (List Nat) := o.map fun u => s.tloops[s.tev[u]!]!
+    let cuts (movers : Array (Option Nat)) : List Nat :=
+      (List.range movers.size).filter fun e => e > 0 && movers[e]!.isSome &&
+        loopsAt movers[e]! != loopsAt movers[e - 1]!
+    let putMovers := chain.map fun k => elems[k]!.src
+    let slotMovers := (List.range nSlots).map fun i => chain.map fun k => (elems[k]!.dsts[i]?).bind id
+    let bounds := cuts putMovers
+    for m in slotMovers do
+      if !(m.all (·.isNone)) && cuts m != bounds then
+        throw "a stream whose puts and gets change loops at different elements"
+    let pieces := (0 :: bounds).zip (bounds ++ [chain.size])
+    let mut prev : Option Nat := none
+    for (lo, hi) in pieces do
+      let sub (m : Array (Option Nat)) := m.extract lo hi
+      let (puts, per) ← runsOf s (sub putMovers)
+      if puts.isEmpty then throw "a stream no put sends"
+      let mut slots : List (List Seg × Nat) := []
+      for m in slotMovers do
+        slots := slots ++ [← runsOf s (sub m)]
+      out := out.push { puts, per, slots, buffered := e0.buffered, rate := 0,
+                        πread := 0, πpush := 0, πpull := 0, πxfer := 0, prevPhase := prev }
+      prev := some (out.size - 1)
   return out
 
 /-! ### Proposing the rest -/
@@ -337,6 +353,12 @@ def certificate (ctx : IRContext OpCode) (T : Template) (s : LoopTemplate.Sample
     let ls := T.loops[v]!
     for (a, b) in ls.zip ls.tail do
       if cls[a]! != cls[b]! then nest := (cIdx cls[a]!, cIdx cls[b]!) :: nest
+  -- A later phase's class ranks before the earlier phase's (`LoopDead.DCert.cmpPhase`).
+  for σ in streams do
+    if let some q := σ.prevPhase then
+      match σ.puts.head? >>= (fun g => loopOf g.ev), (streams[q]? >>= (·.puts.head?)) >>= (fun g => loopOf g.ev) with
+      | some a, some b => if cls[a]! != cls[b]! then nest := (cIdx cls[a]!, cIdx cls[b]!) :: nest
+      | _, _ => pure ()
   let some crank := topo classes.length nest | throw "loops nest in both orders"
   let order := (classes.mergeSort fun a b => crank[cIdx a]! ≤ crank[cIdx b]!)
   -- Where each event is outside a class: after it when something inside reaches it, when it
@@ -354,10 +376,17 @@ def certificate (ctx : IRContext OpCode) (T : Template) (s : LoopTemplate.Sample
           isTop := isTop.set! f.dst true
           changed := true
       for σ in streams do
-        let es := (ends σ).filter (!inside · C)
-        if es.any (isTop[·]!) then
-          for v in es do
-            if !isTop[v]! then isTop := isTop.set! v true; changed := true
+        -- The events of one side are where its first one is; a buffered stream's gets are no
+        -- earlier than its puts, the ends of another meet.
+        let putEnds := (σ.puts.map (·.ev)).filter (!inside · C)
+        let getEnds := (σ.slots.flatMap fun (segs, _) => segs.map (·.ev)).filter (!inside · C)
+        let groups : List (List Nat × List Nat) :=
+          if σ.buffered && !σ.isLocal then [(putEnds, putEnds ++ getEnds), (getEnds, getEnds)]
+          else [(putEnds ++ getEnds, putEnds ++ getEnds)]
+        for (src, dst) in groups do
+          if src.any (isTop[·]!) then
+            for v in dst do
+              if !isTop[v]! then isTop := isTop.set! v true; changed := true
     for v in [0:nv] do
       if isTop[v]! then top := top.modify v (C :: ·)
   -- Offsets: a run's event spans its run's units; others follow `eq` edges.
@@ -421,7 +450,11 @@ def failure (D : DCert) : String := Id.run do
   for v in [0:D.T.loops.size] do
     if !D.evOk v then return s!"template event {v}'s offsets or ranks"
   for f in D.T.edges do
-    if !D.edgeOk f then return s!"the edge from template event {f.src} to {f.dst}"
+    if !D.edgeOk f then
+      return s!"the edge from template event {f.src} to {f.dst}; classes in order {D.order}, \
+        loops {D.loopsOf f.src} and {D.loopsOf f.dst} in classes \
+        {(D.loopsOf f.src).map (D.cls[·]!)} and {(D.loopsOf f.dst).map (D.cls[·]!)}, \
+        after {D.top[f.src]?.getD []} and {D.top[f.dst]?.getD []}"
   for σ in D.streams, j in [0:D.streams.size] do
     if !D.shapeOk σ then return s!"stream {j}'s shape (from template event {σ.head})"
     if !D.rankOk σ then return s!"stream {j}'s ranks (from template event {σ.head})"

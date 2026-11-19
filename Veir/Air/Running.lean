@@ -97,12 +97,13 @@ inductive DecisionStatus where
 /-- Instantiate with run-time control flow (D59). Returns the whole program, how many rounds it
 took, and what is known of its decisions. -/
 partial def instantiateRunning (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List Int)
-    (argData : Std.HashMap Nat (Array Int)) : Except String (IProgram × Nat × DecisionStatus) := do
+    (argData : Std.HashMap Nat (Array Int)) (sampleN : Option Nat := none)
+    (zeroLoops : List SymKey := []) : Except String (IProgram × Nat × DecisionStatus) := do
   let rec go (decisions : Std.HashMap ResultKey Int) (round : Nat) :
       Except String (IProgram × Nat × DecisionStatus) := do
     if round > maxRounds then
       throw s!"more than {maxRounds} rounds of run-time control flow (D59)"
-    let ip ← instantiate ctx func scalars decisions
+    let ip ← instantiate ctx func scalars decisions sampleN zeroLoops
     let ip := { ip.sizeBarePointers ctx with argData }
     if ip.decides.isEmpty && ip.offsets.isEmpty then return (ip, round, .none)
     let offsetsPending := ip.offsets.any (·.values.isNone)

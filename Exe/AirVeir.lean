@@ -6,6 +6,7 @@ import Veir.Air.Channels
 import Veir.Air.ChanGlue
 import Veir.Air.AieCert
 import Veir.Air.Running
+import Veir.Air.LoopTemplate
 
 /-! # `air-veir`: AIR async programs in VeIR
 
@@ -32,7 +33,13 @@ Commands:
                        order the dependencies allow computes the same thing
   races <file>         print every pair of events that read and write a common
                        element without a token path between them (RAW, WAR,
-                       WAW), and problems inside single DMAs; exit 1 if any
+                       WAW), and problems inside single DMAs; exit 1 if any.
+                       A function whose loop bounds are not known, or that is
+                       too large to instantiate, is checked through a loop
+                       template: race-free for every trip count, or the pair
+                       not established (phase 2a)
+  template <file>      print each function's loop template (phase 2a): its
+                       events, edges and footprints, and the certificate
   reduce <file>        print the module with each event's dependency operands
                        reduced as air-dependency-canonicalize reduces them
   check <before> <after>
@@ -441,12 +448,90 @@ def raceLines (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalysis) (cm :
           out := out ++ [s!"  race: {kind} on {buffer} element {e} between {labelAt x} and {labelAt y}, which no execution order fixes"]
   return out
 
+/-- Phase 2a: when a function cannot be instantiated (a loop bound not known, or too many
+instances), race-freedom for every trip count of its symbolic loops, from a loop template
+(`LoopTemplate`, trusted) and its certificate (`LoopCert.raceFree_of_certOk`, proven). `none`
+when there is no template to try. -/
+def templateVerdict (ctx : IRContext OpCode) (func : OperationPtr) (name : String) (scalars : List Int)
+    (why : String) : IO (Option Bool) := do
+  match LoopTemplate.template ctx func scalars with
+  | .ok none => return none
+  | .error e =>
+    IO.println s!"@{name}: {why}; no loop template either: {e}"
+    return some false
+  | .ok (some (T, s)) =>
+    let what (t : Nat) : String :=
+      match (List.range s.tev.size).find? (s.tev[·]! == t) with
+      | some v => s!"'{opName ctx s.ip.prog.events[v]!.op}'"
+      | none => s!"template event {t}"
+    if T.certOk then
+      IO.println s!"@{name}: {T.loops.size} template event(s), {T.nl} symbolic loop(s): race-free for \
+        every trip count of the symbolic loops (proven, LoopCert.raceFree_of_certOk; the template is \
+        extracted, LoopTemplate). Deadlock is not checked (phase 2b)"
+      return some true
+    else
+      let detail := match LoopTemplate.firstFailure T with
+        | some (v, w, σ) =>
+          let reg := ", ".intercalate (σ.map fun ((L, o) : Nat × Ordering) =>
+            s!"loop {L}: {match (o : Ordering) with | .lt => "earlier" | .eq => "same" | .gt => "later"} iteration")
+          s!": {what v} and {what w}{if reg.isEmpty then "" else s!" ({reg})"} are neither ordered nor disjoint"
+        | none => ""
+      IO.println s!"@{name}: {T.loops.size} template event(s), {T.nl} symbolic loop(s): race-freedom for \
+        every trip count not established{detail}"
+      return some false
+
+/-- Print each function's loop template (phase 2a): its events, edges, footprints and the closure's
+size, and the first pair the certificate does not establish. -/
+def cmdTemplate (args : Args) (file : String) : IO Unit := do
+  let (ctx, top) ← load args file
+  for func in topLevelFuncs ctx.raw top do
+    let name := funcName ctx.raw func
+    let t0 ← IO.monoMsNow
+    match LoopTemplate.template ctx.raw func (args.scalarArgs.getD []) with
+    | .error e => IO.println s!"@{name}: no template: {e}"
+    | .ok none => IO.println s!"@{name}: no symbolic loop"
+    | .ok (some (T, s)) =>
+      IO.println s!"@{name}: {T.nl} symbolic loop(s), {T.loops.size} template event(s), \
+        {T.edges.length} edge(s), extracted in {(← IO.monoMsNow) - t0} ms"
+      let t1 ← IO.monoMsNow
+      let nf := T.facts.length
+      IO.println s!"  closure: {nf} fact(s) in {(← IO.monoMsNow) - t1} ms"
+      let t2 ← IO.monoMsNow
+      let ok := T.certOk
+      IO.println s!"  certificate: {ok} in {(← IO.monoMsNow) - t2} ms"
+      for t in [0:T.loops.size] do
+        let v? := (List.range s.tev.size).find? (s.tev[·]! == t)
+        let desc := match v? with
+          | some v => s!"'{opName ctx.raw s.ip.prog.events[v]!.op}' (event {v}{pathStr s.ip.ctxs[v]!.path})"
+          | none => "?"
+        IO.println s!"  t{t}: {desc}, loops {T.loops[t]!}"
+        for a in T.fps[t]! do
+          IO.println s!"    {if a.write then "writes" else "reads"} b{a.buf} coef {a.coef} \
+            {a.offs.size} position(s) from {a.offs[0]?.getD 0}"
+      for f in T.edges do
+        IO.println s!"  edge t{f.src} -> t{f.dst} {repr f.pat} guard {f.guard}"
+      IO.println s!"  {T.facts.length} fact(s) after closure; certificate: {T.certOk}"
+      if let some (v, w, σ) := LoopTemplate.firstFailure T then
+        IO.println s!"  first failure: t{v}, t{w}, region {σ.map fun ((L, o) : Nat × Ordering) => (L, repr o)}"
+
 def cmdRaces (args : Args) (file : String) : IO Bool := do
   let (ctx, top) ← load args file
   let mut clean := true
   for func in topLevelFuncs ctx.raw top do
-    let (ip, dline) ← extractRunning args ctx.raw func (args.scalarArgs.getD []) (partialOk := true)
     let name := funcName ctx.raw func
+    let res ← (extractRunning args ctx.raw func (args.scalarArgs.getD []) (partialOk := true)).toBaseIO
+    let (ip, dline) ← match res with
+      | .ok r => pure r
+      | .error e =>
+        let why := toString e
+        if (why.splitOn "a loop bound is not known").length > 1 ||
+            (why.splitOn "too large to instantiate").length > 1 then
+          match ← templateVerdict ctx.raw func name (args.scalarArgs.getD []) why with
+          | some ok =>
+            if !ok then clean := false
+            continue
+          | none => throw e
+        else throw e
     let (fps0, issues) := ip.footprints ctx.raw
     let p := ip.prog
     let eventAt (v : Nat) := s!"event {v}{pathStr ip.ctxs[v]!.path} ({kindName p.events[v]!.kind})"
@@ -694,6 +779,7 @@ def main (argv : List String) : IO UInt32 := do
       | "run", [f] => cmdRun args f; return 0
       | "reduce", [f] => cmdReduce args f; return 0
       | "races", [f] => return if ← cmdRaces args f then 0 else 1
+      | "template", [f] => cmdTemplate args f; return 0
       | "check", [a, b] => return if ← cmdCheck args a b then 0 else 1
       | "aie", [f] => return if ← cmdAie args f then 0 else 1
       | "outcome", [f] => cmdOutcome args f; return 0

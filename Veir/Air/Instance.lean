@@ -97,6 +97,16 @@ deriving Inhabited
 event's path, and the result's index. -/
 abbrev ResultKey := OperationPtr × List Int × Nat
 
+/-- A symbolic loop: its op, the path to it with symbolic iterations as 0, and the dimension. -/
+abbrev SymKey := OperationPtr × List Int × Nat
+
+/-- What sampling recorded: the symbolic loops, and the frames each event and buffer was made in. -/
+structure SampleInfo where
+  symLoops : Array (SymKey × Bool × Option Nat) := #[]
+  evFrames : Array (List (Nat × Nat)) := #[]
+  bufFrames : Array (List (Nat × Nat)) := #[]
+deriving Inhabited
+
 structure IProgram where
   prog : Program
   ctxs : Array EventCtx
@@ -131,6 +141,7 @@ structure IProgram where
   `scf.index_switch`): its name, how many regions it has, and the regions that ran. Not a verdict:
   it says which parts of the program the input reached. -/
   branches : Array (String × Nat × List Nat) := #[]
+  sample : SampleInfo := {}
 deriving Inhabited
 
 /-- Whether every decision's value was known, so the whole program was instantiated. -/
@@ -180,6 +191,19 @@ structure IState where
   refeedPut : Std.HashMap Nat OperationPtr := {}
   /-- D62: transfers reading results for their offsets, sizes or strides. -/
   offsets : Array Decision := #[]
+  /-- Sampling (`LoopTemplate`): a loop whose trip count is not known, or above `sampleOver`, is
+  *symbolic* and runs `sampleN` iterations (none if in `zeroLoops`). -/
+  sampleN : Option Nat := none
+  sampleOver : Nat := 4
+  zeroLoops : List SymKey := []
+  /-- The symbolic loops met: whether each is sequential, and its trip count if known. -/
+  symLoops : Array (SymKey × Bool × Option Nat) := #[]
+  /-- The symbolic loops around the op being walked and their iterations, outermost first. -/
+  frames : List (Nat × Nat) := []
+  /-- Where symbolic iterations are in the path. -/
+  symPos : List Nat := []
+  evFrames : Array (List (Nat × Nat)) := #[]
+  bufFrames : Array (List (Nat × Nat)) := #[]
 
 abbrev IM := StateT IState (Except String)
 
@@ -187,6 +211,33 @@ def liftE {α : Type} (x : Except String α) : IM α :=
   match x with
   | .ok a => pure a
   | .error e => throw e
+
+/-- The number of symbolic loop `key`, registering it. -/
+def symLoopId (key : SymKey) (seq : Bool) (trips : Option Nat) : IM Nat := do
+  match (← get).symLoops.findIdx? (·.1 == key) with
+  | some i =>
+    -- One trip count per symbolic loop (else it is not known).
+    if (← get).symLoops[i]!.2.2 != trips then
+      modify fun st => { st with symLoops := st.symLoops.set! i (key, seq, none) }
+    pure i
+  | none => modifyGet fun st => (st.symLoops.size, { st with symLoops := st.symLoops.push (key, seq, trips) })
+
+/-- A path with its symbolic iterations as 0. -/
+def maskPath (path : List Int) (pos : List Nat) : List Int :=
+  path.zipIdx.map fun (x, i) => if pos.contains i then 0 else x
+
+/-- How many iterations a loop of `trips` (unknown: `none`) runs, and its symbolic number when
+sampling makes it symbolic. -/
+def sampleTrips (key : SymKey) (seq : Bool) (trips : Option Nat) : IM (Nat × Option Nat) := do
+  let st ← get
+  match st.sampleN, trips with
+  | some sn, t =>
+    if t.isNone || t.getD 0 > st.sampleOver then
+      let id ← symLoopId key seq t
+      return (if st.zeroLoops.contains key then 0 else sn, some id)
+    else return (t.getD 0, none)
+  | none, some t => return (t, none)
+  | none, none => throw "internal error: a loop bound is not known"
 
 /-- A program that instantiates more events than this is refused. -/
 def maxEvents : Nat := 20000
@@ -197,7 +248,9 @@ def pathStr : List Int → String
 
 def newBufferI (name : String) (t : TypeAttr) : IM Nat := do
   let ty ← liftE (parseMemRefType (typeString t))
-  modifyGet fun st => (st.buffers.size, { st with buffers := st.buffers.push { name, type := ty } })
+  let buf : Buffer := { name, type := ty }
+  modifyGet fun st =>
+    (st.buffers.size, { st with buffers := st.buffers.push buf, bufFrames := st.bufFrames.push st.frames })
 
 /-- The elements of a `dense<...>` initial value: a splat or a list of integers; anything else
 (floats, bf16) is opaque (as VEIR-004's constants are). -/
@@ -352,6 +405,7 @@ def pushEvent (e : Event) (c : EventCtx) : IM Nat := do
   -- the last one: the same order, with a linear number of edges.
   set { st with events := st.events.push { e with implicitDeps := st.blocking },
                 ctxs := st.ctxs.push { c with launchInst := st.launchInst },
+                evFrames := st.evFrames.push st.frames,
                 blocking := if blocking then [id] else st.blocking }
   return id
 
@@ -1214,7 +1268,7 @@ partial def branchInstance (ctx : IRContext OpCode) (op : OperationPtr)
 /-- The iterations of a counted loop, in order: `lb`, `lb + step`, ... below `ub`, each running
 the body with the induction variable and the values the previous iteration yielded (D26). -/
 partial def forIterations (ctx : IRContext OpCode) (op : OperationPtr) (what yieldName : String)
-    (lb ub step : Int) (inits : Array ValuePtr) (env : Std.HashMap ValuePtr HVal)
+    (lb : Int) (ub : Option Int) (step : Int) (inits : Array ValuePtr) (env : Std.HashMap ValuePtr HVal)
     (path : List Int) : IM (Std.HashMap ValuePtr HVal) := do
   if step ≤ 0 then throw s!"{what}: a step of {step} is not supported"
   let block ← liftE (singleBlock ctx op what)
@@ -1224,13 +1278,18 @@ partial def forIterations (ctx : IRContext OpCode) (op : OperationPtr) (what yie
   if opName ctx term != yieldName then throw s!"{what}: expected the body to end in {yieldName}"
   let mut iter ← inits.toList.mapM fun v => liftE (lookupH env ctx v what)
   modify fun st => { st with loops := st.loops + 1 }
-  let trips := if ub > lb then ((ub - lb + step - 1) / step).toNat else 0
+  let (trips, sym) ← sampleTrips (op, maskPath path (← get).symPos, 0) true
+    (ub.map fun ub => if ub > lb then ((ub - lb + step - 1) / step).toNat else 0)
+  let outer := ((← get).frames, (← get).symPos)
   for k in [0:trips] do
+    if let some id := sym then
+      modify fun st => { st with frames := outer.1 ++ [(id, k)], symPos := outer.2 ++ [path.length] }
     let iv := lb + k * step
     let mut env' := env.insert args[0]! (.val (intVal ctx args[0]! iv))
     for a in args.toList.drop 1, h in iter do
       env' := env'.insert a h
     env' ← walkOps ctx ops.pop env' (path ++ [iv])
+    modify fun st => { st with frames := outer.1, symPos := outer.2 }
     if (← get).cut then return env
     iter ← (term.getOperands! ctx).toList.mapM fun v => liftE (lookupH env' ctx v what)
   let mut out := env
@@ -1246,7 +1305,9 @@ partial def forLoop (ctx : IRContext OpCode) (op : OperationPtr)
   if operands.size < 3 then throw s!"{what}: expected bounds and a step"
   let some cenv ← controlEnv ctx op (operands.extract 0 3).toList env path | return env
   let lb ← liftE (knownInt cenv ctx what operands[0]!)
-  let ub ← liftE (knownInt cenv ctx what operands[1]!)
+  -- Sampling: an unknown upper bound makes the loop symbolic.
+  let ub ← if (← get).sampleN.isSome then pure (knownInt cenv ctx what operands[1]!).toOption
+    else some <$> liftE (knownInt cenv ctx what operands[1]!)
   let step ← liftE (knownInt cenv ctx what operands[2]!)
   forIterations ctx op what "scf.yield" lb ub step (operands.extract 3 operands.size) env path
 
@@ -1281,33 +1342,42 @@ partial def affineForLoop (ctx : IRContext OpCode) (op : OperationPtr)
     | some (.integerAttr i) => pure i.value
     | some (.indexAttr i) => pure i.value.toInt
     | _ => throw s!"{what}: missing step"
-  forIterations ctx op what "affine.yield" lb ub step (operands.extract (nl + nu) operands.size) env path
+  forIterations ctx op what "affine.yield" lb (some ub) step (operands.extract (nl + nu) operands.size) env path
 
 /-- The iterations of a parallel loop (D27): every point of the iteration space, outermost
 dimension first, with no order between them. A blocking op inside an iteration orders only the
 rest of that iteration; once the loop is done, the host waits for every iteration's blocking ops.
 Returns the values `yields` take in each iteration, or `none` when the instance is cut (D59). -/
 partial def parallelIterations (ctx : IRContext OpCode) (op : OperationPtr) (what : String)
-    (yields : Array ValuePtr) (lbs ubs steps : List Int) (env : Std.HashMap ValuePtr HVal)
-    (path : List Int) : IM (Option (List (List HVal))) := do
+    (yields : Array ValuePtr) (lbs : List Int) (ubs : List (Option Int)) (steps : List Int)
+    (env : Std.HashMap ValuePtr HVal) (path : List Int) : IM (Option (List (List HVal))) := do
   if steps.any (· ≤ 0) then throw s!"{what}: a non-positive step is not supported"
   let block ← liftE (singleBlock ctx op what)
   let args := block.getArguments! ctx
   let ops := blockOps ctx block
   modify fun st => { st with loops := st.loops + 1 }
-  let points : List (List Int) :=
-    (lbs.zip (ubs.zip steps)).foldr (init := [[]]) fun (lb, ub, st) acc =>
-      let trips := if ub > lb then ((ub - lb + st - 1) / st).toNat else 0
-      (List.range trips).flatMap fun (k : Nat) => acc.map fun rest => (lb + (k : Int) * st) :: rest
+  -- Per dimension: its lower bound, step, trip count and symbolic number (sampling).
+  let mut dims : List (Int × Int × Nat × Option Nat) := []
+  for lb in lbs, ub in ubs, st in steps, d in [0:lbs.length] do
+    let (t, sym) ← sampleTrips (op, maskPath path (← get).symPos, d) false
+      (ub.map fun ub => if ub > lb then ((ub - lb + st - 1) / st).toNat else 0)
+    dims := dims ++ [(lb, st, t, sym)]
+  let points : List (List (Int × Nat)) :=
+    dims.foldr (init := [[]]) fun (lb, st, t, _) acc =>
+      (List.range t).flatMap fun (k : Nat) => acc.map fun rest => (lb + (k : Int) * st, k) :: rest
   let outer := (← get).blocking
+  let outerF := ((← get).frames, (← get).symPos)
   let mut after : List Nat := []
   let mut out : List (List HVal) := []
   for pt in points do
-    modify fun st => { st with blocking := outer }
+    let fr := (dims.zip pt).filterMap fun ((_, _, _, sym), (_, k)) => sym.map (·, k)
+    let pos := dims.zipIdx.filterMap fun ((_, _, _, sym), d) => sym.map fun _ => path.length + d
+    modify fun st => { st with blocking := outer, frames := outerF.1 ++ fr, symPos := outerF.2 ++ pos }
     let mut env' := env
     for a in args, iv in pt do
-      env' := env'.insert a (.val (intVal ctx a iv))
-    env' ← walkOps ctx ops.pop env' (path ++ pt)
+      env' := env'.insert a (.val (intVal ctx a iv.1))
+    env' ← walkOps ctx ops.pop env' (path ++ pt.map (·.1))
+    modify fun st => { st with frames := outerF.1, symPos := outerF.2 }
     if (← get).cut then return none
     for b in (← get).blocking do
       if !after.contains b then after := after ++ [b]
@@ -1329,7 +1399,10 @@ partial def parallelLoop (ctx : IRContext OpCode) (op : OperationPtr)
   let ints (start : Nat) : IM (List Int) :=
     (operands.extract start (start + n)).toList.mapM fun v => liftE (knownInt cenv ctx what v)
   let lbs ← ints 0
-  let ubs ← ints n
+  -- Sampling: an unknown upper bound makes the dimension symbolic.
+  let ubs ← if (← get).sampleN.isSome then
+      pure ((operands.extract n (2 * n)).toList.map fun v => (knownInt cenv ctx what v).toOption)
+    else (← ints n).mapM fun x => pure (some x)
   let steps ← ints (2 * n)
   if steps.any (· ≤ 0) then throw s!"{what}: a non-positive step is not supported"
   let inits ← (operands.extract (3 * n) operands.size).toList.mapM fun v =>
@@ -1389,7 +1462,7 @@ partial def forallLoop (ctx : IRContext OpCode) (op : OperationPtr)
   let some term := (blockOps ctx block).back? | throw s!"{what}: expected a terminator"
   if opName ctx term != "scf.forall.in_parallel" then
     throw s!"{what}: expected the body to end in scf.forall.in_parallel"
-  let some _ ← parallelIterations ctx op what #[] lbs ubs steps env path | return env
+  let some _ ← parallelIterations ctx op what #[] lbs (ubs.map some) steps env path | return env
   return env
 
 /-- `affine.parallel` without reductions, as upstream MLIR defines it: dimension i's lower bound
@@ -1437,7 +1510,7 @@ partial def affineParallelLoop (ctx : IRContext OpCode) (op : OperationPtr)
   let block ← liftE (singleBlock ctx op what)
   let some term := (blockOps ctx block).back? | throw s!"{what}: expected a terminator"
   if opName ctx term != "affine.yield" then throw s!"{what}: expected the body to end in affine.yield"
-  let some _ ← parallelIterations ctx op what #[] lbs ubs steps env path | return env
+  let some _ ← parallelIterations ctx op what #[] lbs (ubs.map some) steps env path | return env
   return env
 
 end
@@ -1458,7 +1531,8 @@ def branchOpNames : List String := ["scf.if", "affine.if", "scf.index_switch"]
 /-- Instantiate a function, with the given scalar arguments (others are unknown) and the values
 of event results decided so far (D59). -/
 def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : List Int)
-    (decisions : Std.HashMap ResultKey Int := {}) : Except String IProgram := do
+    (decisions : Std.HashMap ResultKey Int := {}) (sampleN : Option Nat := none)
+    (zeroLoops : List SymKey := []) : Except String IProgram := do
   let .func .func := func.getOpType! ctx
     | throw s!"expected a func.func, but got '{opName ctx func}'"
   let block ← singleBlock ctx func "func.func"
@@ -1496,7 +1570,7 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
             | none => pure none
           decls := decls.insert name { name, size, broadcast, type, refeed }
   let go : IM (Std.HashMap ValuePtr HVal × Array Nat) := do
-    modify fun st => { st with chanDecls := decls, moduleOps := mops, decisions }
+    modify fun st => { st with chanDecls := decls, moduleOps := mops, decisions, sampleN, zeroLoops }
     let mut env : Std.HashMap ValuePtr HVal := {}
     let mut argBufs := #[]
     let mut scalars := scalarArgs
@@ -1523,6 +1597,7 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
            chanDecls := st.chanDecls, chans := st.chans, issues := st.issues, inits := st.inits,
            decides := st.decides, resultKeys := st.resultKeys, offsets := st.offsets,
            offsetReads := st.offsets.foldl (fun m d => m.insert d.event (m.getD d.event [] ++ d.reads)) {},
+           sample := { symLoops := st.symLoops, evFrames := st.evFrames, bufFrames := st.bufFrames },
            branches := (nestedOps ctx func).filterMap fun o =>
              let n := opName ctx o
              if branchOpNames.contains n then some (n, o.getNumRegions! ctx, st.taken.getD o [])

@@ -1,0 +1,68 @@
+module {
+  // Phase 2a. Each iteration writes buf[0] after the previous one: the token chain orders them,
+  // for every %n.
+  func.func @chain(%buf: memref<16xi32>, %n: index) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %t0 = air.wait_all async
+    %r = scf.for %i = %c0 to %n step %c1 iter_args(%t = %t0) -> (!air.async.token) {
+      %t1 = air.execute [%t] {
+        %v = arith.constant 7 : i32
+        memref.store %v, %buf[%c0] : memref<16xi32>
+      }
+      scf.yield %t1 : !air.async.token
+    }
+    return
+  }
+  // Every iteration waits only for %t0 and writes buf[0]: iterations are not ordered.
+  func.func @unordered(%buf: memref<16xi32>, %n: index) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %t0 = air.wait_all async
+    %r = scf.for %i = %c0 to %n step %c1 iter_args(%t = %t0) -> (!air.async.token) {
+      %t1 = air.execute [%t0] {
+        %v = arith.constant 7 : i32
+        memref.store %v, %buf[%c0] : memref<16xi32>
+      }
+      scf.yield %t : !air.async.token
+    }
+    return
+  }
+  // Iteration %i of a parallel loop writes out[%i]: disjoint for every %n.
+  func.func @tiles(%out: memref<64xi32>, %n: index) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    scf.parallel (%i) = (%c0) to (%n) step (%c1) {
+      %v = arith.index_cast %i : index to i32
+      memref.store %v, %out[%i] : memref<64xi32>
+      scf.reduce
+    }
+    return
+  }
+  // Every iteration of a parallel loop writes out[0].
+  func.func @tiles_same(%out: memref<64xi32>, %n: index) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    scf.parallel (%i) = (%c0) to (%n) step (%c1) {
+      %v = arith.index_cast %i : index to i32
+      memref.store %v, %out[%c0] : memref<64xi32>
+      scf.reduce
+    }
+    return
+  }
+  // A known trip count too large to instantiate: the same chain.
+  func.func @big(%buf: memref<16xi32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %big = arith.constant 100000 : index
+    %t0 = air.wait_all async
+    %r = scf.for %i = %c0 to %big step %c1 iter_args(%t = %t0) -> (!air.async.token) {
+      %t1 = air.execute [%t] {
+        %v = arith.constant 7 : i32
+        memref.store %v, %buf[%c0] : memref<16xi32>
+      }
+      scf.yield %t1 : !air.async.token
+    }
+    return
+  }
+}

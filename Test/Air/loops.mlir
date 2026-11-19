@@ -35,5 +35,6 @@
 // GRAPH-NEXT:  event 2 (iteration [1]): air.wait_all async waits for [1], keeps [1]
 // GRAPH-NEXT:  event 3 (iteration [2]): air.wait_all async waits for [2], keeps [2]
 
-// NOARGS: @dynamic_trips: scf.for: a loop bound is not known (does it depend on an argument? pass --args)
+// Phase 2a: without --args, the loop is symbolic and its template's certificate checks.
+// NOARGS: @dynamic_trips: 2 template event(s), 1 symbolic loop(s): race-free for every trip count
 // REDUCE: reduce does not support loops yet; check can validate another tool's rewrite

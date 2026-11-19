@@ -115,6 +115,7 @@ air-opt in.mlir --mlir-print-op-generic --mlir-print-local-scope -o in.generic.m
 .lake/build/bin/air-veir graph  in.generic.mlir   # events, edges kept by the reduction, unordered reads
 .lake/build/bin/air-veir run    in.generic.mlir   # values, and agreement across all allowed orders
 .lake/build/bin/air-veir races  in.generic.mlir   # races, bounds, channel errors, deadlock certificates
+.lake/build/bin/air-veir template in.generic.mlir  # phase 2a: the loop template and its certificate
 .lake/build/bin/air-veir reduce in.generic.mlir > out.mlir
 air-opt out.mlir                                  # AIR re-verifies it
 .lake/build/bin/air-veir check  in.generic.mlir out.mlir
@@ -322,6 +323,15 @@ checked exhaustively, not proven.
 feeds which get, element locations, footprints, concrete effects) is trusted, and tested. The
 verdicts on the model are proven: `checkH`, `racesOkE`, `outcome_uniqueE`. D36 is not assumed; it
 follows from the element semantics.
+
+**Loop templates (phase 2a, `SCALE_DESIGN.md` §3.1).** For a function whose loop bounds are not
+known or that is too large to instantiate, `races` checks a template instead: the certificate and
+`LoopCert.raceFree_of_certOk` (race-freedom for every trip count of the symbolic loops) are proven.
+That the template stands for the program (`LoopCert.Realizes`: its edges are dependencies, each
+label's accesses lie in its covering instance's, places in memory identify buffer instances, and
+conflicts on stream slots or within one event are ordered by the stream) is trusted: the template
+is generalized from a sample with each symbolic loop run three times (`LoopTemplate`), and is not
+cross-checked against a full instantiation (decided 2026-11-18).
 
 **The AIE model** (`Aie.extract`, `Model.steps`, `Model.settle`) is the definition of T1-T10;
 that it says what `AIE_SEMANTICS.md` says is not proven. Explorations are checked

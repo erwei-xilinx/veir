@@ -86,6 +86,73 @@ and checks one tile of each group with its peers' channel endpoints in place.
 **Expected effect.** Checking becomes linear in the ops of the program (18 median, 450 for the
 LLM), and symbolic bounds become possible: a verdict for every sequence length at once.
 
+### 3.1 Phase 2a in detail: race-freedom for every bound (decided 2026-11-18)
+
+Scope: sequential loops (`scf.for`, `affine.for`), parallel loops (`scf.parallel`, `scf.forall`,
+`affine.parallel`) and their nesting. Decisions: the extraction from IR to a template is trusted, as
+`Instance.lean` is, and not cross-checked against instantiation; the first version includes
+parallel loops and nesting.
+
+**Template** (`LoopCert.lean`). A program in which each event inside a symbolic loop appears once:
+- loops `L` with a parent, a kind (sequential or parallel) and a bound: a constant, or unknown;
+- events `v` with the chain of loops around them, outermost first; an *instance* is `(v, it)` with
+  `it L < n L` for each loop `L` of `v`, where `n` gives every loop's trip count;
+- edges `u -> v` ("`v` waits for `u`") with, per loop, how the two instances' iterations relate:
+  for a loop around both, `eq` or `succ` (a token `scf.yield` carries to the next iteration); for a
+  loop around `u` only, `last` (a sequential loop's result) or `any` (a parallel loop's reduction);
+  for a loop around `v` only, `first` (an `iter_args` initial value) or `any` (a captured token).
+  An edge may hold only when a loop has no iteration (the result of an empty `scf.for` is its
+  initial value);
+- footprints: per access, a buffer (allocated per iteration of some of the event's loops, so that
+  allocations in different iterations are different buffers), read or write, and positions
+  `base + sum_L c_L * it L + q` for `q` in a finite pattern.
+
+**Theorem.** For every `n` matching the constant bounds, and every channel program `p` with
+footprints `fp` that *realizes* the template (each template edge is an edge of `p`'s graph; each
+label's footprint lies in the template footprint of an instance that starts before it and finishes
+after it, `startersL`/`finishersL`; distinct buffer instances are distinct buffers), and in which
+two labels of one event that conflict are ordered (the stream's FIFO): `RaceFree p fp S` for every
+`S`. Its route: `hb_starters`, `hb_finishers`, `hb_finish_start` turn an instance path into a
+happens-before between the labels; the checker below gives the paths.
+
+**Checker.**
+1. *Paths for every bound.* Facts `(a, b, pattern, guard)`: for every `n` satisfying `guard` (some
+   loops empty, some not), every instance of `a` reaches every instance of `b` whose iterations
+   relate as `pattern` says (per loop: `eq`, `succ`, `lt`, `le`, `any`, `first`, `last`). Facts
+   start from the edges and close under composition (a table of the per-loop compositions whose
+   intermediate iteration always exists, each proven), the chain rule (`succ` from an instance to
+   the same event's next iteration gives `lt` by induction), and union (`eq` and `lt` give `le`).
+2. *Conflicts.* For each pair of template events whose footprints share a buffer with a write,
+   each region of iterations (per common loop `<`, `=` or `>`) and each emptiness of the guarded
+   loops: either a fact orders the pair over the whole region (one way or the other), or the
+   footprints are disjoint over it: different buffer instances, or no solution to the position
+   equation. That is decided exactly by enumeration for constant bounds, and for one unknown bound
+   by the arithmetic progression the iteration difference contributes, cut to the finite range the
+   patterns allow; anything else is reported, not assumed disjoint.
+
+**Verdict.** `races` gives "race-free for every value of the unknown bounds" (proven,
+`LoopCert.raceFree_of_certOk`); deadlock and outcomes are phase 2b.
+
+**Extraction** (trusted, `LoopTemplate.lean`). The program is instantiated with every symbolic
+loop (trip count not known, or above 4) run three times, with the values events compute (the
+rounds of D59/D62); each event and buffer records the symbolic loops and iterations it was made
+in. Template events are the sample's events up to their iterations (every iteration must make the
+same events); edges are the sample's dependencies generalized to a pattern and kept only if the
+sample has every dependency the pattern claims; one more sample per loop, with that loop empty,
+gives the edges its emptiness guards; footprints must shift by a constant per iteration. A bound
+used anywhere but as a bound is not known in the sample, and the function is refused.
+
+**Status (2026-11-18): implemented.** `LoopCert.lean` (proven, standard axioms only),
+`LoopTemplate.lean`, `air-veir races` falls back to it, `air-veir template` prints it. On the 164
+lit modules the coverage sweep could not instantiate (unknown bound, too large, timeout, out of
+memory): 51 race-free for every trip count; 38 not established, 31 of them a read of an
+`air.execute` result no token orders (D57; where the full model, given bounds, completes, it
+reports the same races: `runtime_repeat_count_unit_reuses_buffer`,
+`fuse_channels_sequential_loops`; elsewhere it deadlocks before the read);
+42 without a template (still over 20000 events in the sample, bounds deciding hierarchy sizes or
+channel indices, D33, run-time branches); 32 still time out or run out of memory, mostly in the
+element-level model the sample is run on (phase 1's chunks are not implemented).
+
 ## 4. Order of work
 
 1. Phase 1: chunk semantics, the reduction theorem in Lean, the chunk condition check; re-run the

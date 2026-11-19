@@ -505,6 +505,40 @@ def raceWitnessesE (p : Prog) (idx : Array (List Nat)) (fp : LFp) (t : List Labe
   let reach := labelReach p idx localDepth g g.reachRows t.toArray
   ((groups (emitted fp t)).toList.flatMap fun (_, arr) => scanReport reach arr.toList).eraseDups
 
+/-- `raceWitnessesE` with one witness per pair of owners (`owner`) and buffer: a pair of labels
+whose owners and buffer already have a witness is not searched again. For messages; no verdict
+uses it. -/
+def raceWitnessesD (p : Prog) (idx : Array (List Nat)) (fp : LFp) (t : List Label)
+    (owner : Label → Nat) : List (Nat × Nat) := Id.run do
+  let g := evGraph p idx
+  let reach := labelReach p idx localDepth g g.reachRows t.toArray
+  let arr := t.toArray
+  let keyOf (buf i j : Nat) : Nat × Nat × Nat :=
+    let a := owner arr[i]!
+    let b := owner arr[j]!
+    (min a b, max a b, buf)
+  let mut seen : Std.HashSet (Nat × Nat × Nat) := {}
+  let mut out : List (Nat × Nat) := []
+  for ((buf, _), L) in (groups (emitted fp t)).toList do
+    let mut lw : Option Nat := none
+    let mut rs : List Nat := []
+    for (j, w) in L.toList do
+      if let some i := lw then
+        let key := keyOf buf i j
+        if i != j && !seen.contains key && !reach i j then
+          out := (i, j) :: out
+          seen := seen.insert key
+      if w then
+        for r in rs do
+          let key := keyOf buf r j
+          if r != j && !seen.contains key && !reach r j then
+            out := (r, j) :: out
+            seen := seen.insert key
+        lw := some j
+        rs := []
+      else rs := j :: rs
+  return out
+
 end Chan
 
 end

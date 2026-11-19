@@ -2,6 +2,7 @@ module
 
 public import Veir.Air.Channels
 public import Veir.Air.ChanEventReach
+public import Veir.Air.ChanChunk
 
 namespace Veir.Air
 
@@ -60,6 +61,8 @@ structure ChanModel where
   destination. -/
   srcDyn : Array (List (HVal × Int)) := #[]
   dstDyn : Array (List (List (HVal × Int))) := #[]
+  /-- The buffer number of the values in flight (`IProgram.slotBuf`). -/
+  slotBuf : Nat := 0
 
 /-- The streams of a program: the slots a put feeds together (one, or a broadcast's), and slots
 only gets read. -/
@@ -242,7 +245,7 @@ def IProgram.chanModel (ip : IProgram) (ca : ChanAnalysis)
     | some i => ps ++ [i]
     | none => ps⟩
   return { prog := ⟨g', elems⟩, srcOf, dstOf, slotName, pos, srcLoc, srcBuf, dstLoc, dmaEvents,
-           srcShift, dstShift, srcDyn, dstDyn }
+           srcShift, dstShift, srcDyn, dstDyn, slotBuf := ip.buffers.size }
 
 /-- A fresh buffer number for the values in flight. -/
 def IProgram.slotBuf (ip : IProgram) : Nat := ip.buffers.size
@@ -424,6 +427,13 @@ def IProgram.fireLabel (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalys
       mem := mem.insert (b, q) v
     return s.putMem mem
 
+/-- The event a label belongs to, for grouping messages. -/
+def ChanModel.owner (cm : ChanModel) : Chan.Label → Nat
+  | .start v | .finish v => v
+  | .read k | .push k => ((cm.prog.elems[k]?).bind (·.src)).getD 0
+  | .pull k i => ((cm.prog.elems[k]?).bind fun e => e.dsts[i]?.join).getD 0
+  | .xfer k => ((cm.prog.elems[k]?).bind fun e => e.dsts.head?.join).getD 0
+
 /-- The checked verdicts: an execution, whether it completes (`none`: internal error), whether it
 is race-free (`Chan.racesOkE`), and witnesses of races for messages. -/
 structure ChanVerdict where
@@ -434,8 +444,59 @@ structure ChanVerdict where
   /-- For the first race: an execution, checked by `Chan.checkH`, firing its two labels the other
   way round. -/
   alt : Option (Chan.Label × Chan.Label × List Chan.Label) := none
+  /-- Phase 1: the verdicts were found on chunked transfers (`Chan.chunked_sound`): how many chunks
+  for how many elements. -/
+  chunks : Option (Nat × Nat) := none
 
-def ChanModel.verdict (cm : ChanModel) (fp : Chan.LFp) (checkRaces := true) : ChanVerdict :=
+/-- Phase 1: consecutive elements of a stream that one put sends to the same gets, all buffered or
+all not, are one chunk, unless an element reads the buffer it writes (the chunk condition would
+fail). Checked by `Chan.validB` and `Chan.condB`, not trusted. -/
+def ChanModel.chunking (cm : ChanModel) : Chan.Chunking := Id.run do
+  let cp := cm.prog
+  let n := cp.elems.size
+  let mut members : Array (Array Nat) := #[]
+  let mut cOf : Array Nat := Array.replicate n 0
+  let mut pos : Array Nat := Array.replicate n 0
+  for k in [0:n] do
+    let e := cp.elems[k]!
+    let srcB := (cm.srcLoc[k]?.join).map (·.1)
+    let dstBs := ((cm.dstLoc[k]?).getD []).filterMap (·.map (·.1))
+    let selfCopy := match srcB with | some b => dstBs.contains b | none => false
+    let join : Option Nat := match e.prev with
+      | some j =>
+        if j < k && !selfCopy && (e.buffered || !e.dsts.isEmpty) then
+          let c := cOf[j]!
+          match members[c]? with
+          | some mc =>
+            if mc.back? == some j then
+              let f := cp.elems[mc[0]!]!
+              if f.src == e.src && f.dsts == e.dsts && f.buffered == e.buffered then some c else none
+            else none
+          | none => none
+        else none
+      | none => none
+    match join with
+    | some c =>
+      cOf := cOf.set! k c
+      pos := pos.set! k members[c]!.size
+      members := members.modify c (·.push k)
+    | none =>
+      cOf := cOf.set! k members.size
+      members := members.push #[k]
+  return { members, cOf, pos }
+
+/-- An execution the model proposes, as far as it goes: on chunked transfers, expanded, when the
+chunking checks. For proposing values (`Running`); no verdict rests on it. -/
+def ChanModel.someTrace (cm : ChanModel) : List Chan.Label :=
+  let cp := cm.prog
+  let ch := cm.chunking
+  if ch.members.size < cp.elems.size && Chan.validB cp ch then
+    let pc := Chan.chunked cp ch
+    (Chan.genTrace pc (Chan.buildIndex pc)).flatMap (Chan.expandL ch)
+  else Chan.genTrace cp (Chan.buildIndex cp)
+
+/-- The element-level verdicts (below), on every element. -/
+def ChanModel.verdictElems (cm : ChanModel) (fp : Chan.LFp) (checkRaces := true) : ChanVerdict :=
   let cp := cm.prog
   let idx := Chan.buildIndex cp
   let t := Chan.genTrace cp idx
@@ -445,7 +506,8 @@ def ChanModel.verdict (cm : ChanModel) (fp : Chan.LFp) (checkRaces := true) : Ch
     -- Orders between positions come from the event graph (`Chan.racesOkE`): no matrix over
     -- every label of the execution.
     let ok := Chan.racesOkE cp idx fp t
-    let ws := if ok then [] else Chan.raceWitnessesE cp idx fp t
+    -- One witness per pair of events and buffer: what the report prints.
+    let ws := if ok then [] else Chan.raceWitnessesD cp idx fp t cm.owner
     let arr := t.toArray
     let alt := ws.head?.bind fun (i, j) =>
       let (x, y) := (arr[i]!, arr[j]!)
@@ -453,16 +515,32 @@ def ChanModel.verdict (cm : ChanModel) (fp : Chan.LFp) (checkRaces := true) : Ch
     { trace := t, completes := c, raceFree := ok, witnesses := ws, alt }
   else { trace := t, completes := c, raceFree := true, witnesses := [] }
 
+/-- The checked verdicts, on chunked transfers when they are fewer than the elements and the
+chunking and the chunk condition check (`Chan.chunked_sound`, `Chan.chunked_deadlock`,
+`Chan.outcome_uniqueC`); the execution reported is the chunks' expanded (`Chan.expandL`). A race
+found on chunks is looked for again element by element, for its witnesses. -/
+def ChanModel.verdict (cm : ChanModel) (fp : Chan.LFp) (checkRaces := true) : ChanVerdict :=
+  let cp := cm.prog
+  let ch := cm.chunking
+  if ch.members.size < cp.elems.size && Chan.validB cp ch && Chan.wfB cp then
+    let pc := Chan.chunked cp ch
+    let idx := Chan.buildIndex pc
+    let tc := Chan.genTrace pc idx
+    let c := Chan.checkH pc idx tc
+    let t := tc.flatMap (Chan.expandL ch)
+    let chunks := some (ch.members.size, cp.elems.size)
+    if c == some true && checkRaces then
+      if Chan.condB ch fp cm.slotBuf tc && Chan.racesOkE pc idx (Chan.chunkFp ch fp) tc then
+        { trace := t, completes := c, raceFree := true, witnesses := [], chunks }
+      else cm.verdictElems fp checkRaces
+    else if c == some true || c == some false then
+      { trace := t, completes := c, raceFree := true, witnesses := [], chunks }
+    else cm.verdictElems fp checkRaces
+  else cm.verdictElems fp checkRaces
+
 def IProgram.runLabels (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalysis)
     (cm : ChanModel) (t : List Chan.Label) : MState :=
   (t.foldl (ip.fireLabel ctx ca cm) { m := ip.initState }).m
-
-/-- The event a label belongs to, for grouping messages. -/
-def ChanModel.owner (cm : ChanModel) : Chan.Label → Nat
-  | .start v | .finish v => v
-  | .read k | .push k => ((cm.prog.elems[k]?).bind (·.src)).getD 0
-  | .pull k i => ((cm.prog.elems[k]?).bind fun e => e.dsts[i]?.join).getD 0
-  | .xfer k => ((cm.prog.elems[k]?).bind fun e => e.dsts.head?.join).getD 0
 
 /-- A label, for messages. -/
 def ChanModel.labelName (cm : ChanModel) (eventAt : Nat → String) : Chan.Label → String

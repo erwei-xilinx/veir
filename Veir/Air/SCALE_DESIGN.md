@@ -56,6 +56,26 @@ footprints, which the race check already computes per event.
 model has about as many steps as events. The LLM's 5.3e9 elements become about 1.8e6 chunks
 (cause 2 remains).
 
+**Status (2026-11-18): implemented, by a simulation instead of a reduction** (`ChanChunk.lean`,
+proven, standard axioms only). A chunk is a run of consecutive elements of a stream with the same
+put, gets and buffering; the chunked program has one element per chunk. Proven:
+- `hb_transfer`: happens-before in the chunked program gives it in the element program, between
+  every pair of members, or, along a chunk's own steps (read, entry, arrival), between members in
+  stream order. Every edge of the chunked order is classified (`edgeOk`), then induction;
+- `raceFree_of_chunked`: race-freedom transfers when, within a chunk, no member's read conflicts
+  with an earlier member's write (`CondOk`, decided by `condB`: stream slots only at the member's
+  own element, other buffers not shared with a write);
+- `completes_iff`: an execution completes in one program iff in the other (a chunked label's
+  members fire in stream order, `expand_run`; a chunked label fires when its last member has);
+- `chunked_sound`, `chunked_deadlock`, `outcome_uniqueC`: the verdicts of `checkH` and `racesOkE`
+  on the chunked program, for the element program, when `validB` checks the chunking.
+`ChanModel.chunking` (not trusted: `validB` and `condB` check what it builds) groups elements
+greedily; a race found on chunks is looked for again element by element, for its witnesses.
+
+Footprints stay lists of positions: chunks remove the per-element execution, not the per-position
+race check. Modules that move millions of positions (`air_split_l2_memref.mlir` #15,
+`tranpose_linalg_cpy_to_4d_air_memcpy.mlir`) need footprints as ranges.
+
 ## 3. Phase 2: certificates instead of instantiation (cause 2)
 
 In the manner of proof-carrying code (Necula, POPL 1997): an untrusted *certificate generator*

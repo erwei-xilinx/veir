@@ -1815,12 +1815,13 @@ def IProgram.finishExecute (ctx : IRContext OpCode) (ip : IProgram) (v : Nat) (s
         if freed.contains b then return fail s!"'{iname}' used {ip.buffers[b]!.name} after it was deallocated"
       let readVals := ins.toList ++ bufs.toList.flatMap fun b =>
         (List.range ip.buffers[b]!.type.numel).map fun (q : Nat) => mem[(b, (q : Int))]?.getD .undef
+      let h := hashInputs readVals
       for b in writtenBuffers ctx inner (fun m => lookup m >>= bufOfVal) do
         for q in [0:ip.buffers[b]!.type.numel] do
-          mem := mem.insert (b, (q : Int)) (opaqueOf inner readVals q)
+          mem := mem.insert (b, (q : Int)) (opaqueOfH inner h q)
       for i in [0:inner.getNumResults! ctx] do
         if !isMemRefType ((ValuePtr.opResult ⟨inner, i⟩).getType! ctx) then
-          vals := vals.insert (.opResult ⟨inner, i⟩) (opaqueOf inner readVals (1000000 + i))
+          vals := vals.insert (.opResult ⟨inner, i⟩) (opaqueOfH inner h (1000000 + i))
   let mut results := s.results
   for y in e.yields, i in [0:e.yields.size] do
     match vals[y]? <|> (c.env[y]? >>= s.resolve) with

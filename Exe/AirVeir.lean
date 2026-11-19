@@ -363,7 +363,8 @@ def cmdRun (args : Args) (file : String) : IO Unit := do
         let first := outcome ip (ip.runLabels ctx.raw ca cm cv.trace)
         if !outcomes.any (·.1 == first) then outcomes := outcomes ++ [(first, tag)]
         if cv.raceFree then
-          lines := lines ++ [s!"  race-free: every execution ends with this memory (Chan.outcome_uniqueH){tag}"]
+          let via := if cv.chunks.isSome then " [on chunks: Chan.outcome_uniqueC]" else ""
+          lines := lines ++ [s!"  race-free: every execution ends with this memory (Chan.outcome_uniqueH){tag}{via}"]
         else
           match cv.alt with
           | none => lines := lines ++ [s!"  races (see `races`): other executions may end differently{tag}"]
@@ -403,7 +404,10 @@ def raceLines (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalysis) (cm :
       | some e => (List.range e.dsts.length).any (fun i => e.dsts[i]?.join.isSome && !Chan.gotH fired k i) ||
           e.src.isSome && !Chan.sentH fired k
       | none => false
-    out := out ++ [s!"  DEADLOCK (proven, Chan.checkH_false): no execution completes; these events never finish: {", ".intercalate (unfinished.map eventAt)}"]
+    let via := match cv.chunks with
+      | some (n, m) => s!" [on {n} chunks of {m} elements: Chan.chunked_deadlock]"
+      | none => ""
+    out := out ++ [s!"  DEADLOCK (proven, Chan.checkH_false): no execution completes; these events never finish: {", ".intercalate (unfinished.map eventAt)}{via}"]
     if let some k := waiting.head? then
       out := out ++ [s!"  the first element that never moves: element {cm.pos[k]!} of {cm.slotName[k]!}"]
     -- Why, when the streams are unbalanced (a fragment of a program, D34).
@@ -416,7 +420,10 @@ def raceLines (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalysis) (cm :
     if !noGet.isEmpty then
       out := out ++ [s!"  note: {noGet.length} element(s) of async puts no get takes (D34)"]
   | some true =>
-    out := out ++ ["  no deadlock (proven, Chan.checkH_true): an execution completes, and every execution can (Chan.completes_from_anywhere)"]
+    let via := match cv.chunks with
+      | some (n, m) => s!" [on {n} chunks of {m} elements: Chan.chunked_sound]"
+      | none => ""
+    out := out ++ [s!"  no deadlock (proven, Chan.checkH_true): an execution completes, and every execution can (Chan.completes_from_anywhere){via}"]
     -- Elements of sync puts that nothing gets stay in the buffer (D30): a fragment of a program.
     let orphans := (List.range cp.elems.size).filter fun k => match cp.elems[k]? with
       | some e => e.src.isSome && e.buffered && e.dsts.any (·.isNone)

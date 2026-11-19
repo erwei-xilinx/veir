@@ -231,6 +231,13 @@ def toRuntime? : Val → Option RuntimeValue
 def opaqueOf (op : OperationPtr) (inputs : List Val) (salt : Nat) : Val :=
   .opaque op.id (hash (", ".intercalate (inputs.map showVal) ++ s!"#{salt}"))
 
+/-- The inputs of an uninterpreted op, hashed once (`opaqueOfH`). -/
+def hashInputs (inputs : List Val) : UInt64 := inputs.foldl (fun h v => mixHash h (hash (showVal v))) 7
+
+/-- `opaqueOf` from hashed inputs: for an op writing many positions from the same inputs, which
+would otherwise hash all of them once per position. -/
+def opaqueOfH (op : OperationPtr) (h : UInt64) (salt : Nat) : Val := .opaque op.id (mixHash h (hash salt))
+
 /-- The value written to a padded position (D20). -/
 def zeroOf (t : MemRefType) : Val :=
   if t.bitwidth > 0 then .rv (.int t.bitwidth (.val 0)) else .opaque 0 0

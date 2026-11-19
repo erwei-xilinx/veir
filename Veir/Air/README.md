@@ -324,6 +324,12 @@ feeds which get, element locations, footprints, concrete effects) is trusted, an
 verdicts on the model are proven: `checkH`, `racesOkE`, `outcome_uniqueE`. D36 is not assumed; it
 follows from the element semantics.
 
+**Chunked transfers (phase 1, `SCALE_DESIGN.md` §2).** `races`, `run` and `outcome` check the
+channel model on chunks of consecutive elements when the chunking (`Chan.validB`) and the chunk
+condition (`Chan.condB`) check; that the verdicts hold of the element model is proven
+(`Chan.chunked_sound`, `Chan.chunked_deadlock`, `Chan.outcome_uniqueC`). Nothing is added to the
+trusted base: the chunking itself is checked, not trusted.
+
 **Loop templates (phase 2a, `SCALE_DESIGN.md` §3.1).** For a function whose loop bounds are not
 known or that is too large to instantiate, `races` checks a template instead: the certificate and
 `LoopCert.raceFree_of_certOk` (race-freedom for every trip count of the symbolic loops) are proven.

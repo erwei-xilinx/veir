@@ -1610,6 +1610,9 @@ structure MState where
   mem : Std.HashMap (Nat × Int) Val := {}
   freed : Std.HashSet Nat := {}
   fault : Option String := none
+  /-- For proposing values only (`Running.proposeValues`): deallocation is not recorded, so that
+  a use after it (a race the checks report) does not stop the run. -/
+  lenient : Bool := false
 deriving Inhabited
 
 def MState.resolve (s : MState) (h : HVal) : Option Val :=
@@ -1734,7 +1737,7 @@ def IProgram.finishExecute (ctx : IRContext OpCode) (ip : IProgram) (v : Nat) (s
     else if iname == "memref.dealloc" then
       let some b := ins[0]? >>= bufOfVal | return fail "memref.dealloc of an unknown buffer"
       if freed.contains b then return fail s!"{ip.buffers[b]!.name} deallocated twice"
-      freed := freed.insert b
+      if !s.lenient then freed := freed.insert b
     else if iname == "memref.load" then
       let some b := ins[0]? >>= bufOfVal | return fail "memref.load of an unknown buffer"
       if freed.contains b then return fail s!"memref.load after {ip.buffers[b]!.name} was deallocated"

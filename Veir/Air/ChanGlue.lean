@@ -541,6 +541,71 @@ def ChanModel.someTrace (cm : ChanModel) : List Chan.Label :=
     (Chan.genTrace pc (Chan.buildIndex pc)).flatMap (Chan.expandL ch)
   else Chan.genTrace cp (Chan.buildIndex cp)
 
+/-- Whether label `x` must fire before label `y`, through the element labels each waits for in
+`Chan.En` (its own earlier labels, and its `prev`'s). Paths through events are not followed. -/
+def Chan.Prog.elemBefore (p : Chan.Prog) (x y : Chan.Label) : Bool := Id.run do
+  let sent (j : Nat) : Chan.Label := if (p.elems[j]?.map (·.buffered)).getD false then .push j else .xfer j
+  let got (j i : Nat) : Chan.Label := if (p.elems[j]?.map (·.buffered)).getD false then .pull j i else .xfer j
+  let preds : Chan.Label → List Chan.Label
+    | .read k => ((p.elems[k]? >>= (·.prev)).map fun j => [.read j]).getD []
+    | .push k => .read k :: ((p.elems[k]? >>= (·.prev)).map fun j => [sent j]).getD []
+    | .pull k i => .push k :: ((p.elems[k]? >>= (·.prev)).map fun j => [got j i]).getD []
+    | .xfer k => .read k :: (match p.elems[k]? with
+        | some e => (e.prev.map fun j => (List.range e.dsts.length).map (got j)).getD []
+        | none => [])
+    | _ => []
+  let mut seen : Std.HashSet Chan.Label := {}
+  let mut todo := preds y
+  -- Each label at most once: the search ends.
+  for _ in [0:4 * p.elems.size + 4] do
+    match todo with
+    | [] => return false
+    | l :: rest =>
+      todo := rest
+      if l == x then return true
+      if seen.contains l then continue
+      seen := seen.insert l
+      todo := preds l ++ todo
+  return false
+
+/-- Two members of the chunked label `X` (indices among its members) that access a position of
+a buffer, one of them writing, and are not ordered: a race inside a chunk, which the races between
+chunked labels do not show. For messages only. Members of one chunked label have the same events,
+so only labels of elements order them (`Chan.Prog.elemBefore`). Members are scanned only when their
+merged ranges show an overlap. -/
+def chunkSelfRace (p : Chan.Prog) (ch : Chan.Chunking) (fp : Chan.RFp) (X : Chan.Label) :
+    Option (Nat × Nat × Nat) := Id.run do
+  let n := Chan.width ch X
+  if n < 2 then return none
+  let ordered (k k' : Nat) : Bool :=
+    let (x, y) := (Chan.memL ch X k, Chan.memL ch X k')
+    p.elemBefore x y || p.elemBefore y x
+  let accs := (List.range n).flatMap fun k => (fp (Chan.memL ch X k)).map (k, ·)
+  let len (rs : List (Int × Int)) : Int := (rs.map fun r => r.2 - r.1).sum
+  let bufs := (accs.map (·.2.buf)).eraseDups
+  for b in bufs do
+    let ws := (accs.filter fun (_, a) => a.buf == b && a.kind == .write).flatMap (·.2.ranges)
+    if ws.isEmpty then continue
+    let rs := (accs.filter fun (_, a) => a.buf == b && a.kind != .write).flatMap (·.2.ranges)
+    let mw := Chan.joinRanges ws
+    let mr := Chan.joinRanges rs
+    let meets := mw.any fun w => mr.any fun r => max w.1 r.1 < min w.2 r.2
+    if len ws ≤ len mw && !meets then continue
+    -- The last writer of each position, then each access against it.
+    let mut wr : Std.HashMap Int Nat := {}
+    for (k, a) in accs do
+      if a.buf == b && a.kind == .write then
+        for q in a.elems do
+          if let some k' := wr[q]? then
+            if k' != k && !ordered k' k then return some (k', k, b)
+          wr := wr.insert q k
+    for (k, a) in accs do
+      if a.buf == b && a.kind != .write then
+        for q in a.elems do
+          if let some k' := wr[q]? then
+            if k' != k && !ordered k' k then return some (k', k, b)
+  return none
+
 /-- The element-level verdicts (below), on every element. -/
 def ChanModel.verdictElems (cm : ChanModel) (fp : Chan.RFp) (checkRaces := true) : ChanVerdict :=
   let cp := cm.prog
@@ -563,8 +628,9 @@ def ChanModel.verdictElems (cm : ChanModel) (fp : Chan.RFp) (checkRaces := true)
 
 /-- The checked verdicts, on chunked transfers when they are fewer than the elements and the
 chunking and the chunk condition check (`Chan.chunked_soundR`, `Chan.chunked_deadlock`,
-`Chan.outcome_uniqueCR`); the execution reported is the chunks' expanded (`Chan.expandL`). A race
-found on chunks is looked for again element by element, for its witnesses. -/
+`Chan.outcome_uniqueCR`); the execution reported is the chunks' expanded (`Chan.expandL`). The
+witnesses of a race found on chunks are members of chunked witnesses; when none is found, the
+races are looked for again element by element. -/
 def ChanModel.verdict (cm : ChanModel) (fp : Chan.RFp) (checkRaces := true) : ChanVerdict :=
   let cp := cm.prog
   let ch := cm.chunking
@@ -578,10 +644,47 @@ def ChanModel.verdict (cm : ChanModel) (fp : Chan.RFp) (checkRaces := true) : Ch
     if c == some true && checkRaces then
       -- Each chunked label's footprint computed once (`Chan.memoWith_eq`: the same function).
       let memo := Chan.buildMemo (Chan.chunkRFp ch fp) tc
-      if Chan.condBR ch fp cm.slotBuf tc &&
-          Chan.racesOkRangeE pc idx (Chan.memoWith memo (Chan.chunkRFp ch fp)) tc then
+      let cfp := Chan.memoWith memo (Chan.chunkRFp ch fp)
+      if !Chan.condBR ch fp cm.slotBuf tc then cm.verdictElems fp checkRaces
+      else if Chan.racesOkRangeE pc idx cfp tc then
         { trace := t, completes := c, raceFree := true, witnesses := [], chunks }
-      else cm.verdictElems fp checkRaces
+      else
+        -- A race of chunked labels is one of members: their footprints are their members'
+        -- positions, and an order of members' labels is one of their chunked labels. The
+        -- witnesses, for messages, are members of the chunked witnesses.
+        let tcA := tc.toArray
+        let offs : Array Nat := tcA.foldl (fun acc X => acc.push (acc.back?.getD 0 + Chan.width ch X)) #[0]
+        let member (X : Chan.Label) (a : RAcc) (q : Int) : Option Nat :=
+          (List.range (Chan.width ch X)).find? fun k => (fp (Chan.memL ch X k)).any fun b =>
+            b.buf == a.buf && Chan.inRanges b.ranges q && (b.kind == .write || a.kind != .write)
+        let owner (X : Chan.Label) : Nat := cm.owner (Chan.memL ch X 0)
+        let wcs := (Chan.raceWitnessesR pc idx cfp tc owner).filterMap fun (i, j) => do
+          let X := tcA[i]!
+          let Y := tcA[j]!
+          let (a, b, q) ← (cfp X).findSome? fun a => (cfp Y).findSome? fun b =>
+            if a.buf == b.buf && (a.kind == .write || b.kind == .write) then
+              (Chan.commonPos a b).map (a, b, ·)
+            else none
+          let ka ← member X a q
+          let kb ← member Y b q
+          pure ((i, j), (offs[i]! + ka, offs[j]! + kb))
+        -- Races inside a chunk, one per event and buffer.
+        let (selfWs, _) := tcA.size.fold (init := ([], ({} : Std.HashSet (Nat × Nat))))
+          fun i _ (out, seen) =>
+            match chunkSelfRace cp ch fp tcA[i]! with
+            | some (k, k', b) =>
+              let key := (owner tcA[i]!, b)
+              if seen.contains key then (out, seen)
+              else ((offs[i]! + k, offs[i]! + k') :: out, seen.insert key)
+            | none => (out, seen)
+        let ws := wcs.map (·.2) ++ selfWs.reverse
+        -- Another execution, on chunks, expanded (`Chan.expand_run`).
+        let alt := wcs.head?.bind fun ((i, j), (wi, wj)) =>
+          (Chan.altTrace pc idx tcA[i]! tcA[j]!).map fun ta =>
+            let ea := t.toArray
+            (ea[wi]!, ea[wj]!, ta.flatMap (Chan.expandL ch))
+        if ws.isEmpty then cm.verdictElems fp checkRaces
+        else { trace := t, completes := c, raceFree := false, witnesses := ws, alt, chunks }
     else if c == some true || c == some false then
       { trace := t, completes := c, raceFree := true, witnesses := [], chunks }
     else cm.verdictElems fp checkRaces
@@ -590,6 +693,12 @@ def ChanModel.verdict (cm : ChanModel) (fp : Chan.RFp) (checkRaces := true) : Ch
 def IProgram.runLabels (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalysis)
     (cm : ChanModel) (t : List Chan.Label) : MState :=
   (t.foldl (ip.fireLabel ctx ca cm) { m := ip.initState }).m
+
+/-- `runLabels` for proposing values: a use after deallocation (reported as a race by the checks)
+does not stop it. -/
+def IProgram.runLabelsLenient (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalysis)
+    (cm : ChanModel) (t : List Chan.Label) : MState :=
+  (t.foldl (ip.fireLabel ctx ca cm) { m := { ip.initState with lenient := true } }).m
 
 /-- A label, for messages. -/
 def ChanModel.labelName (cm : ChanModel) (eventAt : Nat → String) : Chan.Label → String

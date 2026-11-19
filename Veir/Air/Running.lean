@@ -39,7 +39,7 @@ def IProgram.proposeValues (ctx : IRContext OpCode) (ip : IProgram) :
   let some o := orders.head? | throw "no order of puts"
   let cm ← ip.chanModel ca o
   let t := cm.someTrace
-  let s := ip.runLabels ctx ca cm t
+  let s := ip.runLabelsLenient ctx ca cm t
   let mut out : List (ResultKey × Int) := []
   for d in ip.decides ++ ip.offsets do
     if d.values.isSome then continue

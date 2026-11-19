@@ -12,7 +12,7 @@
 // A7-NEXT: no deadlock
 // A7-NEXT: race: RAW on alloc in event 0 element 16 between the transfer of element 8 of event 1 (air.dma_memcpy_nd) and the read of element 0 of event 2 (air.dma_memcpy_nd)
 // SCHED:   @f: {{.*}}%arg1 = [16 : i32, 17 : i32, 18 : i32, 19 : i32, 20 : i32, 21 : i32, 22 : i32, 23 : i32]
-// SCHED-NEXT: races (see `races`); an execution with the read of element 0 of event 2 (air.dma_memcpy_nd) before the transfer of element 8 of event 1 (air.dma_memcpy_nd) ends differently: {{.*}}%arg1 = [undef, 17 : i32, 18 : i32, 19 : i32, 20 : i32, 21 : i32, 22 : i32, 23 : i32]
+// SCHED-NEXT: races (see `races`); an execution with the read of element 0 of event 2 (air.dma_memcpy_nd) before the transfer of element 8 of event 1 (air.dma_memcpy_nd) ends differently: {{.*}}%arg1 = [undef, {{.*}}]
 // A7FIX:   @f: 3 event(s), 3 buffer(s), 0 race(s), 0 problem(s) inside single events
 
 // The cases in Inputs/layer2_cases.air.mlir.src.

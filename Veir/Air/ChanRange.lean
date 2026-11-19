@@ -256,14 +256,15 @@ theorem outcome_uniqueR {V : Type} {rfp : RFp} {eff : Label → Mem V → Mem V}
 
 /-! ### Chunks, as ranges -/
 
-/-- One step of `joinRanges`: a range that starts where the last one ends extends it. -/
+/-- One step of `joinRanges`: a range that starts within the last one extends it. -/
 def joinStep (acc : List (Int × Int)) (r : Int × Int) : List (Int × Int) :=
   match acc with
-  | (lo, hi) :: rest => if hi = r.1 ∧ lo ≤ hi ∧ r.1 ≤ r.2 then (lo, r.2) :: rest else r :: acc
+  | (lo, hi) :: rest => if lo ≤ r.1 ∧ r.1 ≤ hi then (lo, max hi r.2) :: rest else r :: acc
   | [] => [r]
 
-/-- Consecutive ranges that meet, joined. -/
-def joinRanges (rs : List (Int × Int)) : List (Int × Int) := (rs.foldl joinStep []).reverse
+/-- Ranges sorted by start, those that meet or overlap joined. -/
+def joinRanges (rs : List (Int × Int)) : List (Int × Int) :=
+  ((rs.mergeSort fun a b => a.1 ≤ b.1).foldl joinStep []).reverse
 
 def Cov (rs : List (Int × Int)) (q : Int) : Prop := ∃ r ∈ rs, r.1 ≤ q ∧ q < r.2
 
@@ -276,7 +277,7 @@ theorem joinStep_keep {acc : List (Int × Int)} {r : Int × Int} {q : Int} (h : 
     split
     · rename_i hc
       rcases List.mem_cons.mp hr' with rfl | hr'
-      · exact ⟨(lo, r.2), List.mem_cons_self .., h1, by simp at h2 ⊢; omega⟩
+      · exact ⟨(lo, max hi r.2), List.mem_cons_self .., h1, by simp at h2 ⊢; omega⟩
       · exact ⟨r', List.mem_cons_of_mem _ hr', h1, h2⟩
     · exact ⟨r', List.mem_cons_of_mem _ hr', h1, h2⟩
 
@@ -287,7 +288,7 @@ theorem joinStep_add {acc : List (Int × Int)} {r : Int × Int} {q : Int} (h1 : 
     simp only [joinStep]
     split
     · rename_i hc
-      exact ⟨(lo, r.2), List.mem_cons_self .., by simp; omega, h2⟩
+      exact ⟨(lo, max hi r.2), List.mem_cons_self .., by simp; omega, by simp; omega⟩
     · exact ⟨r, List.mem_cons_self .., h1, h2⟩
   | [] => exact ⟨r, List.mem_singleton_self _, h1, h2⟩
 
@@ -307,8 +308,10 @@ theorem foldl_join_cov : ∀ (rs acc : List (Int × Int)) (q : Int), Cov acc q �
       · exact Or.inr ⟨r', hr', h1, h2⟩
 
 theorem joinRanges_cov {rs : List (Int × Int)} {q : Int} (h : Cov rs q) : Cov (joinRanges rs) q := by
-  obtain ⟨r, hr, h1, h2⟩ := foldl_join_cov rs [] q (Or.inr h)
-  exact ⟨r, List.mem_reverse.mpr hr, h1, h2⟩
+  obtain ⟨r, hr, h1, h2⟩ := h
+  obtain ⟨r', hr', h1', h2'⟩ := foldl_join_cov (rs.mergeSort fun a b => a.1 ≤ b.1) [] q
+    (Or.inr ⟨r, List.mem_mergeSort.mpr hr, h1, h2⟩)
+  exact ⟨r', List.mem_reverse.mpr hr', h1', h2'⟩
 
 /-- A chunked label's footprint, as ranges: its members', per buffer and kind, ranges that meet
 joined. -/

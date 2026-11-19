@@ -295,7 +295,15 @@ then buffered streams' ends apart. Template-checked functions of the lit sweep: 
 for every trip count, 19 with one outcome. Not yet: a stream fed by loops in turn whose gets take
 it in other turns (one put loop of `n0 + n1` iterations against get loops of `n0` and `n1`: a sum
 of trip counts), streams whose ends are in more than one symbolic loop and not instance-local, and
-streams of no loop with several runs. Most of
+streams of no loop with several runs.
+
+**Sums of trip counts: deferred (decided 2026-11-19).** They occur in 4-5 `runtime_repeat_count`
+lit functions. The sample cannot show them: it runs every symbolic loop the same number of times,
+so a put loop of `n0 + n1` iterations runs as long as each get loop, and the second get loop is
+never fed. Supporting them needs a sample taken at argument values (so that `n0 + n1` is the sum),
+then either splitting the put loop in the template into its first `n0` and last `n1` iterations
+(mirrored phases, already proven; the split is one more trusted step of the extraction) or
+iterations offset by trip counts in the proven ranking (coordinates depending on trip counts). Most of
 the remaining refusals are real: per-iteration counts that differ at the two ends (lit tests of
 passes, not runnable programs), or unbuffered streams nothing gets.
 

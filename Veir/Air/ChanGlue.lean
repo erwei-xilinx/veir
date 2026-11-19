@@ -493,6 +493,9 @@ structure ChanVerdict where
   /-- Phase 1: the verdicts were found on chunked transfers (`Chan.chunked_soundR`): how many chunks
   for how many elements. -/
   chunks : Option (Nat × Nat) := none
+  /-- For each witness, the theorem that proves another complete execution fires it the other way
+  round (from its certificate, `Chan.certify`). -/
+  witnessThms : List String := []
 
 /-- Phase 1: consecutive elements of a stream that one put sends to the same gets, all buffered or
 all not, are one chunk, unless an element reads the buffer it writes (the chunk condition would
@@ -623,7 +626,8 @@ def ChanModel.verdictElems (cm : ChanModel) (fp : Chan.RFp) (checkRaces := true)
     let alt := ws.head?.bind fun (i, j) =>
       let (x, y) := (arr[i]!, arr[j]!)
       (Chan.altTrace cp idx x y).map (x, y, ·)
-    { trace := t, completes := c, raceFree := ok, witnesses := ws, alt }
+    { trace := t, completes := c, raceFree := ok, witnesses := ws, alt,
+      witnessThms := ws.map fun _ => "Chan.witness_sound" }
   else { trace := t, completes := c, raceFree := true, witnesses := [] }
 
 /-- The checked verdicts, on chunked transfers when they are fewer than the elements and the
@@ -668,23 +672,30 @@ def ChanModel.verdict (cm : ChanModel) (fp : Chan.RFp) (checkRaces := true) : Ch
           let ka ← member X a q
           let kb ← member Y b q
           pure ((i, j), (offs[i]! + ka, offs[j]! + kb))
-        -- Races inside a chunk, one per event and buffer.
-        let (selfWs, _) := tcA.size.fold (init := ([], ({} : Std.HashSet (Nat × Nat))))
-          fun i _ (out, seen) =>
-            match chunkSelfRace cp ch fp tcA[i]! with
-            | some (k, k', b) =>
-              let key := (owner tcA[i]!, b)
-              if seen.contains key then (out, seen)
-              else ((offs[i]! + k, offs[i]! + k') :: out, seen.insert key)
-            | none => (out, seen)
-        let ws := wcs.map (·.2) ++ selfWs.reverse
+        -- Races inside a chunk, one per event and buffer, certified on the elements.
+        let selfCands := (List.range tcA.size).filterMap fun i =>
+          (chunkSelfRace cp ch fp tcA[i]!).map fun (k, k', b) =>
+            (owner tcA[i]!, b, offs[i]! + min k k', offs[i]! + max k k')
+        let selfWs : List (Nat × Nat) := if selfCands.isEmpty then [] else Id.run do
+          let arrE := t.toArray
+          let idxE := Chan.buildIndex cp
+          let mut seen : Std.HashSet (Nat × Nat) := {}
+          let mut out : List (Nat × Nat) := []
+          for (o, b, a, a') in selfCands do
+            if !seen.contains (o, b) && Chan.certify cp idxE arrE a a' Chan.windowFuel then
+              seen := seen.insert (o, b)
+              out := (a, a') :: out
+          return out.reverse
+        let ws := wcs.map (·.2) ++ selfWs
+        let thms := wcs.map (fun _ => "Chan.witness_soundC") ++ selfWs.map fun _ => "Chan.witness_soundE"
         -- Another execution, on chunks, expanded (`Chan.expand_run`).
         let alt := wcs.head?.bind fun ((i, j), (wi, wj)) =>
           (Chan.altTrace pc idx tcA[i]! tcA[j]!).map fun ta =>
             let ea := t.toArray
             (ea[wi]!, ea[wj]!, ta.flatMap (Chan.expandL ch))
         if ws.isEmpty then cm.verdictElems fp checkRaces
-        else { trace := t, completes := c, raceFree := false, witnesses := ws, alt, chunks }
+        else { trace := t, completes := c, raceFree := false, witnesses := ws, alt, chunks,
+               witnessThms := thms }
     else if c == some true || c == some false then
       { trace := t, completes := c, raceFree := true, witnesses := [], chunks }
     else cm.verdictElems fp checkRaces

@@ -70,7 +70,7 @@ put, gets and buffering; the chunked program has one element per chunk. Proven:
 - `chunked_sound`, `chunked_deadlock`, `outcome_uniqueC`: the verdicts of `checkH` and `racesOkE`
   on the chunked program, for the element program, when `validB` checks the chunking.
 `ChanModel.chunking` (not trusted: `validB` and `condB` check what it builds) groups elements
-greedily; a race found on chunks is looked for again element by element, for its witnesses.
+greedily. A race found on chunks is reported with witnesses on chunks, mapped to members (below).
 
 **Footprints as ranges (2026-11-18, `ChanRange.lean`, proven).** An access is a list of ranges
 `[lo, hi)` (`RAcc`); its positions are what the theorems speak of (`toLFp`) and are not listed by
@@ -82,6 +82,21 @@ The D59/D62 checks have range versions implying the position ones, and `decision
 complete execution and race-freedom on its labels, which every path gives. `tranpose_linalg_cpy`
 went from out of memory (14 GB) to 3.5 s and 190 MB. What remains for the largest modules is the
 memory the D62 rounds simulate element by element (`air_split_l2_memref.mlir` #15: 4e6 positions).
+
+**D62 memory and race witnesses (2026-11-19).** Overlapping ranges are merged after sorting
+(`joinRanges`), and values are proposed from a run a use after deallocation does not stop
+(`MState.lenient`). #15 went from out of memory to 57 s and 3.4 GB; its 2048 races are real.
+
+Witnesses are proven (`ChanWitness.lean`): a witness `x` before `y` in a complete execution comes
+with a certificate (`certify`, not trusted; `certB` checks it): the positions a search back from `y`
+reaches, between `x` and `y`, and every position before `x`, are closed under `hbPreds`, with `y`
+in and `x` out. Firing those labels first, then the others, each in the execution's order, is a
+complete execution (`reorder`, from `en_of_preds`: what enables a label is what `hbPreds` lists;
+`buildIndex_complete`: the index lists every element of each event), so `witness_sound`: another
+complete execution fires `y` before `x`. On chunks, the certificate is on the chunked program and
+`expand_run` gives the element execution (`witness_soundC`); a race between members of one chunk is
+certified on the expanded execution (`witness_soundE`). A pair without a certificate is not
+printed; before this, pairs ordered through a path the bounded `labelReach` misses were printed.
 
 ## 3. Phase 2: certificates instead of instantiation (cause 2)
 
@@ -193,4 +208,5 @@ element-level model the sample is run on (phase 1's chunks are not implemented).
 
 Unchanged by this work: the AIR semantics decisions (`SEMANTICS.md`) and the extraction from IR to
 the model (`Instance.lean`, `Channels.lean`, `ChanGlue.lean`). The certificate generator is not
-trusted; the chunk condition and certificate checkers are proven.
+trusted; the chunk condition and certificate checkers are proven, and so are race witnesses
+(`witness_sound`).

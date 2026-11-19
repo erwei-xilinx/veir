@@ -434,7 +434,8 @@ def raceLines (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalysis) (cm :
     let mut seen : Std.HashSet (Nat × Nat × String) := {}
     if !cv.raceFree && cv.witnesses.isEmpty then
       out := out ++ ["  race: the race check failed, and the reporter found no witness"]
-    for (i, j) in cv.witnesses do
+    for ((i, j), n) in cv.witnesses.zipIdx do
+      let thm := (cv.witnessThms[n]?).getD "Chan.witness_sound"
       -- Name the pair in event (program) order, not in the order this execution fired it.
       let (x, y) := if cm.owner arr[j]! < cm.owner arr[i]! then (arr[j]!, arr[i]!) else (arr[i]!, arr[j]!)
       let witness := (fp x).findSome? fun a => (fp y).findSome? fun b =>
@@ -451,7 +452,7 @@ def raceLines (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalysis) (cm :
         let key := (cm.owner x, cm.owner y, buffer)
         if !seen.contains key then
           seen := seen.insert key
-          out := out ++ [s!"  race: {kind} on {buffer} element {e} between {labelAt x} and {labelAt y}, which no execution order fixes"]
+          out := out ++ [s!"  race: {kind} on {buffer} element {e} between {labelAt x} and {labelAt y}, which no execution order fixes: another complete execution fires them the other way round ({thm})"]
   return out
 
 /-- Phase 2a: when a function cannot be instantiated (a loop bound not known, or too many

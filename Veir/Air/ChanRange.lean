@@ -1,6 +1,6 @@
 module
 
-public import Veir.Air.ChanChunk
+public import Veir.Air.ChanWitness
 public import Veir.Air.ChanDecide
 
 namespace Veir.Air
@@ -498,44 +498,20 @@ theorem soleWritersB_of_R {rfp : RFp} {cs : List Label} {B : Nat} (h : soleWrite
       omega
   | _ => simp
 
-/-- Whether the label at position `i` of a complete execution `arr` is before the one at `j` in
-`HB`, by a search back from `j` through `hbPredsI`. A path in `HB` stays between positions `i` and
-`j` (an execution fires each label after those it waits for), so only those are visited. `none`
-when `fuel` labels were visited without an answer. For messages; no verdict uses it. -/
-def hbWindow (p : Prog) (idx : Array (List Nat)) (arr : Array Label) (ix : Std.HashMap Label Nat)
-    (i j : Nat) (fuel : Nat) : Option Bool := Id.run do
-  let mut seen : Std.HashSet Nat := {}
-  let mut todo : List Label := match arr[j]? with
-    | some y => hbPredsI p idx y
-    | none => []
-  for _ in [0:fuel] do
-    match todo with
-    | [] => return some false
-    | l :: rest =>
-      todo := rest
-      match ix[l]? with
-      | some w =>
-        if w == i then return some true
-        if w < i || seen.contains w then continue
-        seen := seen.insert w
-        todo := hbPredsI p idx l ++ todo
-      | none => continue
-  return if todo.isEmpty then some false else none
-
-/-- How many labels `hbWindow` visits for one pair. -/
+/-- How many labels `Chan.certify` visits for one pair. -/
 def windowFuel : Nat := 200000
 
 /-- `raceWitnessesD` on ranges: one witness per pair of owners and buffer, piece by piece, each
-unordered (`hbWindow`). For messages; no verdict uses it. -/
+with a certificate (`Chan.certify`): `Chan.witness_sound` proves another complete execution fires
+the pair the other way round. -/
 def raceWitnessesR (p : Prog) (idx : Array (List Nat)) (rfp : RFp) (t : List Label)
     (owner : Label → Nat) : List (Nat × Nat) := Id.run do
   let g := evGraph p idx
   let reach0 := labelReach p idx localDepth g g.reachRows t.toArray
   let arr := t.toArray
   -- `labelReach` follows paths between labels only a few steps deep: a pair it does not order is
-  -- a witness only if no path orders it (`hbWindow`).
-  let ix := positions t
-  let reach (i j : Nat) : Bool := reach0 i j || hbWindow p idx arr ix i j windowFuel != some false
+  -- a witness only with a certificate.
+  let reach (i j : Nat) : Bool := reach0 i j || !certify p idx arr i j windowFuel
   let em := ends rfp t
   let E (b : Nat) := em.getD b #[]
   let keyOf (buf i j : Nat) : Nat × Nat × Nat :=

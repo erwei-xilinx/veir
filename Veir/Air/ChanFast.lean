@@ -737,15 +737,15 @@ def altTrace (p : Prog) (idx : Array (List Nat)) (x y : Label) : Option (List La
   let t := genTraceWith p idx fun l => if l == x then [y] else []
   if checkH p idx t == some true then some t else none
 
-/-- Each event's elements. -/
-def buildIndex (p : Prog) : Array (List Nat) := Id.run do
-  let mut idx : Array (List Nat) := Array.replicate p.graph.size []
-  for e in p.elems, k in [0:p.elems.size] do
-    if let some v := e.src then idx := idx.modify v (k :: ·)
-    for o in e.dsts.eraseDups do
-      if let some v := o then
-        if e.src != some v then idx := idx.modify v (k :: ·)
-  return idx
+/-- The events element `k` belongs to: its put, then its gets, each once. -/
+def idxStep (p : Prog) (acc : Array (List Nat)) (k : Nat) : Array (List Nat) :=
+  match p.elems[k]? with
+  | some e => (e.src.toList ++ e.dsts.filterMap id).eraseDups.foldl (fun a v => a.modify v (k :: ·)) acc
+  | none => acc
+
+/-- Each event's elements (`Chan.buildIndex_complete`: every one). -/
+def buildIndex (p : Prog) : Array (List Nat) :=
+  (List.range p.elems.size).foldl (idxStep p) (Array.replicate p.graph.size [])
 
 /-- Positions of the labels of `t`. -/
 def positions (t : List Label) : Std.HashMap Label Nat :=

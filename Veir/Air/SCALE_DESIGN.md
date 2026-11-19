@@ -195,6 +195,77 @@ reports the same races: `runtime_repeat_count_unit_reuses_buffer`,
 channel indices, D33, run-time branches); 32 still time out or run out of memory, mostly in the
 element-level model the sample is run on (phase 1's chunks are not implemented).
 
+### 3.2 Phase 2b: deadlock-freedom and outcomes for every bound (design, 2026-11-19)
+
+Goal: for the functions phase 2a proves race-free for every trip count, also "completes, for every
+trip count" (and then, with race-freedom, one outcome: `deterministic` needs one complete execution
+and race-freedom). Every execution can then complete (`completes_from_anywhere`, already proven).
+
+**What is missing from the template.** Channels. Phase 2a only needs a stream's slots to be ordered
+by the stream (`exempt`, `self`); completing needs which put meets which get. The template gains,
+per subchannel (fixed after the hierarchy is instantiated; symbolic loops stay symbolic):
+- the template events that put on it and get from it, each moving a constant number of elements
+  per instance;
+- the order of its elements: the puts' instances in a total order (one put per subchannel per
+  iteration of a chain of sequential loops), likewise the gets.
+
+**Decisions (2026-11-19).** Puts and gets in different loops balance when their loops are aligned
+up to an integer multiple; two bounds are equal when they are the same constant, or the same
+arithmetic expression (arith/affine ops, the same ops in the same order) of the same values (one
+SSA value through `args` of launch, segment and herd is one value); the extraction is trusted, not
+cross-checked against instantiation.
+
+**Balance by alignment.** A subchannel's puts run in one loop chain and its gets in another (one
+per destination slot); loop `L` moves `m_L` elements per iteration. An *alignment class* is a set
+of loops tied by subchannels; each loop `L` of it gets a *scale* `s_L` (time units per iteration)
+and each subchannel a rate `u` (elements per time unit) with `m_L = u * s_L` at both ends. Their
+bounds must satisfy `s_L * n_L = s_L' * n_L'` for every trip count: bounds are `c * E` with `c` a
+constant and `E` an expression, and the equation is checked on `c` and `E`. Then iteration `i` of
+`L` spans time units `[s_L * i, s_L * (i + 1))`, element `e` of the subchannel is moved at unit
+`e / u`, and puts and gets balance for every trip count. A put loop of `n` iterations of `4c`
+elements against a get loop of `4n` iterations of `c`: scales 4 and 1, rate `c`. Anything else
+(counts that depend on the iteration, two put events on one subchannel, bounds the equation does
+not relate) is reported as not established.
+
+**Deadlock-freedom by a ranking.** A run exists when the labels can be listed so that each comes
+after everything `hbPreds` lists for it (`ChanWitness.run_sorted`; the run is complete when it lists
+every finish). The certificate is such a key, compared lexicographically:
+- one coordinate per alignment class, in an order of the classes: a label inside a loop of the
+  class has its time unit (an event instance starts at its iteration's first unit and finishes at
+  its last; an element at its unit); a label outside it is before (`⊥`) or after (`⊤`) all of it;
+- then a place in a topological order of one time unit: event starts and finishes, and per
+  subchannel its reads, pushes, pulls and transfers;
+- then the element index.
+The checker proves, on the template, that every kind of predecessor decreases the key: token
+edges by their relation (`succ`, `lt`, `last`, `first` and `eq` against scales and `⊥`/`⊤`); the
+stream order (`prev`: the previous element, at the same or an earlier unit); meetings and buffering
+(a get's elements after the put's reads and pushes, and after the get started); an event's finish
+after its elements. The theorem: for every `n` that satisfies the known bounds and the alignment
+equations, a program realizing the extended template completes; with `raceFree_of_certOk`,
+`deterministic` gives one outcome for every trip count.
+
+**Extraction** (trusted, as in phase 2a): the sample (each symbolic loop run three times) gives, per
+subchannel, its puts and gets with their template events and element counts; alignment is read off
+the sample (put instance `i` meets get instance `i`) and kept only if the bounds are the same value.
+
+**Status (2026-11-19): implemented.** `LoopDead.lean` (proven, standard axioms only),
+`LoopDeadGen.lean` (extraction, trusted, and the certificate generator, checked), reported by
+`air-veir races` after phase 2a's verdict. As built, a stream is more general than above: in each
+iteration of its loop, its puts (and each slot's gets) are a sequence of *runs*, each event moving
+`m` consecutive elements from offset `off` (several puts on one channel in one iteration); its
+start and finish offsets are its run's first and last element's units. A slot nothing gets is
+allowed for a buffered stream (its elements stay, D30); an unbuffered one is reported (its puts
+never finish). The generator refines a class's unit so that each run fills whole units, places an
+event after a class when anything inside reaches it, when it follows such an event, or when another
+end of its stream is after it, and derives offsets and the order of one unit from the edges. The
+proof: `completes_of_rank` (a run exists when a key ranks every label above what it waits for),
+`edge_lt` (token edges), `side_coords`/`seg_lt` (elements between their runs' starts and finishes),
+`en_all` and the per-label `pre_*` lemmas, `completes_of_deadOk`. Lit: `loopdead.mlir` (aligned,
+an integer multiple, and three refusals the element-level model confirms as deadlocks or as
+depending on the trip counts). Not yet: streams whose ends are in more than one symbolic loop or in
+loops of different nesting, streams of no loop with several runs, and the dependency 2a's patterns
+cannot state (from an inner loop's last iteration to the next outer iteration's first).
+
 ## 4. Order of work
 
 1. Phase 1: chunk semantics, the reduction theorem in Lean, the chunk condition check; re-run the

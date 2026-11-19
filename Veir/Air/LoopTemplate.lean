@@ -162,25 +162,38 @@ def validates (s : Sample) (edges : Std.HashSet (Nat × Nat)) (trips : Nat → N
       | some u, some v => edges.contains (u, v)
       | _, _ => false
 
-/-- The template edges a sample's dependencies give, guarded by `guard`. -/
-def edgeFacts (s : Sample) (trips : Nat → Nat) (guard : Guard) : List Fact := Id.run do
+/-- The template edges a sample's dependencies give, guarded by `guard`, and the dependencies no
+edge covers (as template events). -/
+def edgeFactsC (s : Sample) (trips : Nat → Nat) (guard : Guard) :
+    List Fact × List (Nat × Nat) := Id.run do
   let g := s.ip.prog.graph
   let mut edges : Std.HashSet (Nat × Nat) := {}
   for v in [0:s.tev.size] do
     for u in g.predsOf v do edges := edges.insert (u, v)
-  let mut seen : Std.HashSet (Nat × Nat × Pat) := {}
+  let mut seen : Std.HashMap (Nat × Nat × Pat) Bool := {}
   let mut out := #[]
+  let mut uncovered : List (Nat × Nat) := []
   for v in [0:s.tev.size] do
     for u in g.predsOf v do
       let tu := s.tev[u]!
       let tv := s.tev[v]!
+      let mut covered := false
       for π in candidates s.tloops[tu]! s.tloops[tv]! s.kOf[u]! s.kOf[v]! trips do
-        if seen.contains (tu, tv, π) then continue
-        seen := seen.insert (tu, tv, π)
-        if validates s edges trips tu tv π then
-          out := out.push { src := tu, dst := tv, pat := π, guard }
-          break
-  return out.toList
+        match seen[(tu, tv, π)]? with
+        | some ok => if ok then covered := true; break
+        | none =>
+          let ok := validates s edges trips tu tv π
+          seen := seen.insert (tu, tv, π) ok
+          if ok then
+            out := out.push { src := tu, dst := tv, pat := π, guard }
+            covered := true
+            break
+      if !covered && !uncovered.contains (tu, tv) then uncovered := uncovered ++ [(tu, tv)]
+  return (out.toList, uncovered)
+
+/-- The template edges a sample's dependencies give, guarded by `guard`. -/
+def edgeFacts (s : Sample) (trips : Nat → Nat) (guard : Guard) : List Fact :=
+  (edgeFactsC s trips guard).1
 
 /-- Positions as a sorted array without repeats. -/
 def sortedSet (xs : List Int) : Array Int := (dedupSorted (xs.mergeSort (· ≤ ·))).toArray
@@ -335,7 +348,9 @@ def template (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List Int)
   if ip.sample.symLoops.isEmpty then return none
   let trips : Nat → Nat := fun _ => sampleN
   let (s, evIds, bufIds) ← sampleOf ip none trips
-  let mut edges := edgeFacts s trips []
+  let (edges0, unc0) := edgeFactsC s trips []
+  let mut edges := edges0
+  let mut uncovered := unc0
   -- Dependencies only an empty loop gives.
   for (key, _) in ip.sample.symLoops, L in [0:ip.sample.symLoops.size] do
     -- Only its edges are used: values are needed only when control flow depends on them (D59).
@@ -343,13 +358,16 @@ def template (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List Int)
       else sampled [key]
     let tripsZ : Nat → Nat := fun L' => if L' == L then 0 else sampleN
     let (sZ, _, _) ← sampleOf ipZ (some (s, evIds, bufIds)) tripsZ
-    edges := edges ++ edgeFacts sZ tripsZ [(L, true)]
+    let (eZ, uZ) := edgeFactsC sZ tripsZ [(L, true)]
+    edges := edges ++ eZ
+    uncovered := uncovered ++ uZ.filter (!uncovered.contains ·)
   let (fps, bufLoops) ← footprints ctx s trips
   let fps := fps ++ Array.replicate (s.tloops.size - fps.size) []
   -- Known trip counts, small enough to enumerate.
   let known := (ip.sample.symLoops.toList.zipIdx.filterMap fun ((_, _, t), L) =>
     t.bind fun N => if N ≤ 64 then some (L, N) else none)
-  return some ({ nl := ip.sample.symLoops.size, loops := s.tloops, known, bufLoops, fps, edges }, s)
+  return some ({ nl := ip.sample.symLoops.size, loops := s.tloops, known, bufLoops, fps, edges,
+                 uncovered := uncovered }, s)
 
 /-- The first pair `certOk` rejects, for the report: two template events and the region. -/
 def firstFailure (T : Template) : Option (Nat × Nat × LoopCert.Region) := Id.run do

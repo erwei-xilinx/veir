@@ -7,6 +7,7 @@ import Veir.Air.ChanGlue
 import Veir.Air.AieCert
 import Veir.Air.Running
 import Veir.Air.LoopTemplate
+import Veir.Air.LoopDeadGen
 
 /-! # `air-veir`: AIR async programs in VeIR
 
@@ -471,10 +472,21 @@ def templateVerdict (ctx : IRContext OpCode) (func : OperationPtr) (name : Strin
       match (List.range s.tev.size).find? (s.tev[·]! == t) with
       | some v => s!"'{opName ctx s.ip.prog.events[v]!.op}'"
       | none => s!"template event {t}"
+    -- Phase 2b: completion for every trip count.
+    let dead := match LoopDeadGen.certificate ctx T s with
+      | .ok D =>
+        if D.deadOk then "completes for every trip count (proven, LoopDead.completes_of_deadOk; \
+          streams and loop lengths extracted, LoopDeadGen)"
+        else s!"completion for every trip count not established: the ranking does not check \
+          ({LoopDeadGen.failure D})"
+      | .error e => s!"completion for every trip count not established: {e}"
     if T.certOk then
       IO.println s!"@{name}: {T.loops.size} template event(s), {T.nl} symbolic loop(s): race-free for \
         every trip count of the symbolic loops (proven, LoopCert.raceFree_of_certOk; the template is \
-        extracted, LoopTemplate). Deadlock is not checked (phase 2b)"
+        extracted, LoopTemplate)"
+      IO.println s!"  {dead}"
+      if dead.startsWith "completes" then
+        IO.println "  one outcome for every trip count (proven, LoopDead.outcome_every_trip)"
       return some true
     else
       let detail := match LoopTemplate.firstFailure T with
@@ -485,6 +497,7 @@ def templateVerdict (ctx : IRContext OpCode) (func : OperationPtr) (name : Strin
         | none => ""
       IO.println s!"@{name}: {T.loops.size} template event(s), {T.nl} symbolic loop(s): race-freedom for \
         every trip count not established{detail}"
+      IO.println s!"  {dead}"
       return some false
 
 /-- Print each function's loop template (phase 2a): its events, edges, footprints and the closure's

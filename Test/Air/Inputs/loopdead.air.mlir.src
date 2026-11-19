@@ -1,0 +1,159 @@
+module {
+  air.channel @ca [1, 1]
+  // Phase 2b. Iteration i of the segment's loop puts what iteration i of the herd's loop gets:
+  // the loops are aligned (one bound, passed down as args), and every trip count completes.
+  func.func @aligned(%n: index) {
+    %c1 = arith.constant 1 : index
+    %0 = air.launch async (%lx) in (%lsx=%c1) args(%ln=%n) : index {
+      %1 = air.segment @seg async args(%sn=%ln) : index {
+        %c0_s = arith.constant 0 : index
+        %c1_s = arith.constant 1 : index
+        %ta, %l2 = air.execute -> (memref<32xi32, 1>) {
+          %x = memref.alloc() : memref<32xi32, 1>
+          air.execute_terminator %x : memref<32xi32, 1>
+        }
+        %p = scf.for %i = %c0_s to %sn step %c1_s iter_args(%t = %ta) -> (!air.async.token) {
+          %q = air.channel.put async [%t] @ca[] (%l2[] [] []) : (memref<32xi32, 1>)
+          scf.yield %q : !air.async.token
+        }
+        %h = air.herd @herd async tile (%tx, %ty) in (%sx=%c1_s, %sy=%c1_s) args(%hn=%sn) : index {
+          %c0_h = arith.constant 0 : index
+          %c1_h = arith.constant 1 : index
+          %tb, %l1 = air.execute -> (memref<32xi32, 2>) {
+            %x = memref.alloc() : memref<32xi32, 2>
+            air.execute_terminator %x : memref<32xi32, 2>
+          }
+          %g = scf.for %i = %c0_h to %hn step %c1_h iter_args(%t = %tb) -> (!air.async.token) {
+            %r = air.channel.get async [%t] @ca[] (%l1[] [] []) : (memref<32xi32, 2>)
+            scf.yield %r : !air.async.token
+          }
+        }
+      }
+    }
+    return
+  }
+  func.func @multiple(%n: index) {
+    %c1 = arith.constant 1 : index
+    %0 = air.launch async (%lx) in (%lsx=%c1) args(%ln=%n) : index {
+      %1 = air.segment @seg async args(%sn=%ln) : index {
+        %c0_s = arith.constant 0 : index
+        %c1_s = arith.constant 1 : index
+        %ta, %l2 = air.execute -> (memref<32xi32, 1>) {
+          %x = memref.alloc() : memref<32xi32, 1>
+          air.execute_terminator %x : memref<32xi32, 1>
+        }
+        %p = scf.for %i = %c0_s to %sn step %c1_s iter_args(%t = %ta) -> (!air.async.token) {
+          %q = air.channel.put async [%t] @ca[] (%l2[] [] []) : (memref<32xi32, 1>)
+          scf.yield %q : !air.async.token
+        }
+        %h = air.herd @herd async tile (%tx, %ty) in (%sx=%c1_s, %sy=%c1_s) args(%hn=%sn) : index {
+          %c0_h = arith.constant 0 : index
+          %c1_h = arith.constant 1 : index
+          %tb, %l1 = air.execute -> (memref<32xi32, 2>) {
+            %x = memref.alloc() : memref<32xi32, 2>
+            air.execute_terminator %x : memref<32xi32, 2>
+          }
+          %c4_h = arith.constant 4 : index
+          %c8_h = arith.constant 8 : index
+          %m = arith.muli %hn, %c4_h : index
+          %g = scf.for %i = %c0_h to %m step %c1_h iter_args(%t = %tb) -> (!air.async.token) {
+            %r = air.channel.get async [%t] @ca[] (%l1[%c0_h] [%c8_h] [%c1_h]) : (memref<32xi32, 2>)
+            scf.yield %r : !air.async.token
+          }
+        }
+      }
+    }
+    return
+  }
+  func.func @gets_after_puts(%n: index) {
+    %c1 = arith.constant 1 : index
+    %0 = air.launch async (%lx) in (%lsx=%c1) args(%ln=%n) : index {
+      %1 = air.segment @seg async args(%sn=%ln) : index {
+        %c0_s = arith.constant 0 : index
+        %c1_s = arith.constant 1 : index
+        %ta, %l2 = air.execute -> (memref<32xi32, 1>) {
+          %x = memref.alloc() : memref<32xi32, 1>
+          air.execute_terminator %x : memref<32xi32, 1>
+        }
+        %p = scf.for %i = %c0_s to %sn step %c1_s iter_args(%t = %ta) -> (!air.async.token) {
+          %q = air.channel.put async [%t] @ca[] (%l2[] [] []) : (memref<32xi32, 1>)
+          scf.yield %q : !air.async.token
+        }
+        %h = air.herd @herd async [%p] tile (%tx, %ty) in (%sx=%c1_s, %sy=%c1_s) args(%hn=%sn) : index {
+          %c0_h = arith.constant 0 : index
+          %c1_h = arith.constant 1 : index
+          %tb, %l1 = air.execute -> (memref<32xi32, 2>) {
+            %x = memref.alloc() : memref<32xi32, 2>
+            air.execute_terminator %x : memref<32xi32, 2>
+          }
+          %g = scf.for %i = %c0_h to %hn step %c1_h iter_args(%t = %tb) -> (!air.async.token) {
+            %r = air.channel.get async [%t] @ca[] (%l1[] [] []) : (memref<32xi32, 2>)
+            scf.yield %r : !air.async.token
+          }
+        }
+      }
+    }
+    return
+  }
+  func.func @other_bound(%n: index, %k: index) {
+    %c1 = arith.constant 1 : index
+    %0 = air.launch async (%lx) in (%lsx=%c1) args(%ln=%n, %lk=%k) : index, index {
+      %1 = air.segment @seg async args(%sn=%ln, %sk=%lk) : index, index {
+        %c0_s = arith.constant 0 : index
+        %c1_s = arith.constant 1 : index
+        %ta, %l2 = air.execute -> (memref<32xi32, 1>) {
+          %x = memref.alloc() : memref<32xi32, 1>
+          air.execute_terminator %x : memref<32xi32, 1>
+        }
+        %p = scf.for %i = %c0_s to %sn step %c1_s iter_args(%t = %ta) -> (!air.async.token) {
+          %q = air.channel.put async [%t] @ca[] (%l2[] [] []) : (memref<32xi32, 1>)
+          scf.yield %q : !air.async.token
+        }
+        %h = air.herd @herd async tile (%tx, %ty) in (%sx=%c1_s, %sy=%c1_s) args(%hn=%sk) : index {
+          %c0_h = arith.constant 0 : index
+          %c1_h = arith.constant 1 : index
+          %tb, %l1 = air.execute -> (memref<32xi32, 2>) {
+            %x = memref.alloc() : memref<32xi32, 2>
+            air.execute_terminator %x : memref<32xi32, 2>
+          }
+          %g = scf.for %i = %c0_h to %hn step %c1_h iter_args(%t = %tb) -> (!air.async.token) {
+            %r = air.channel.get async [%t] @ca[] (%l1[] [] []) : (memref<32xi32, 2>)
+            scf.yield %r : !air.async.token
+          }
+        }
+      }
+    }
+    return
+  }
+  func.func @unbalanced(%n: index) {
+    %c1 = arith.constant 1 : index
+    %0 = air.launch async (%lx) in (%lsx=%c1) args(%ln=%n) : index {
+      %1 = air.segment @seg async args(%sn=%ln) : index {
+        %c0_s = arith.constant 0 : index
+        %c1_s = arith.constant 1 : index
+        %ta, %l2 = air.execute -> (memref<32xi32, 1>) {
+          %x = memref.alloc() : memref<32xi32, 1>
+          air.execute_terminator %x : memref<32xi32, 1>
+        }
+        %p = scf.for %i = %c0_s to %sn step %c1_s iter_args(%t = %ta) -> (!air.async.token) {
+          %q = air.channel.put async [%t] @ca[] (%l2[] [] []) : (memref<32xi32, 1>)
+          scf.yield %q : !air.async.token
+        }
+        %h = air.herd @herd async tile (%tx, %ty) in (%sx=%c1_s, %sy=%c1_s) args(%hn=%sn) : index {
+          %c0_h = arith.constant 0 : index
+          %c1_h = arith.constant 1 : index
+          %tb, %l1 = air.execute -> (memref<32xi32, 2>) {
+            %x = memref.alloc() : memref<32xi32, 2>
+            air.execute_terminator %x : memref<32xi32, 2>
+          }
+          %g = scf.for %i = %c0_h to %hn step %c1_h iter_args(%t = %tb) -> (!air.async.token) {
+            %c16_h = arith.constant 16 : index
+            %r = air.channel.get async [%t] @ca[] (%l1[%c0_h] [%c16_h] [%c1_h]) : (memref<32xi32, 2>)
+            scf.yield %r : !air.async.token
+          }
+        }
+      }
+    }
+    return
+  }
+}

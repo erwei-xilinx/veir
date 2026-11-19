@@ -1060,6 +1060,9 @@ structure Template where
   fps : Array (List TAcc)
   edges : List Fact
   fuel : Nat := 32
+  /-- Dependencies of the samples no edge covers (template events): race-freedom does not need
+  them; completion (phase 2b) needs every dependency to be an edge. -/
+  uncovered : List (Nat × Nat) := []
 deriving Inhabited
 
 /-- Every way the loops `C` can compare. -/

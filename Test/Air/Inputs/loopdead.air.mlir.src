@@ -1,5 +1,6 @@
 module {
   air.channel @ca [1, 1]
+  air.channel @cb [1, 1]
   // Phase 2b. Iteration i of the segment's loop puts what iteration i of the herd's loop gets:
   // the loops are aligned (one bound, passed down as args), and every trip count completes.
   func.func @aligned(%n: index) {
@@ -192,6 +193,106 @@ module {
           %g = air.channel.get async [%t] @ca[] (%l3[] [] []) : (memref<32xi32, 1>)
           %q = air.channel.put async [%g] @ca[] (%l2[] [] []) : (memref<32xi32, 1>)
           scf.yield %q : !air.async.token
+        }
+      }
+    }
+    return
+  }
+  // Blocking puts (buffered, D51), all before the herd starts and gets them: the puts' loop and
+  // the gets' run apart in time (their classes not tied).
+  func.func @blocking_then_herd(%n: index, %m: index) {
+    %c1 = arith.constant 1 : index
+    air.launch (%lx) in (%lsx=%c1) args(%ln=%n, %lm=%m) : index, index {
+      air.segment @seg args(%sn=%ln, %sm=%lm) : index, index {
+        %c0 = arith.constant 0 : index
+        %c1_0 = arith.constant 1 : index
+        %t, %l2 = air.execute -> (memref<8xi32, 1>) {
+          %x = memref.alloc() : memref<8xi32, 1>
+          air.execute_terminator %x : memref<8xi32, 1>
+        }
+        scf.for %i = %c0 to %sn step %c1_0 {
+          air.channel.put @cb[] (%l2[] [] []) : (memref<8xi32, 1>)
+        }
+        air.herd @h tile (%tx, %ty) in (%hx=%c1_0, %hy=%c1_0) args(%hn=%sn, %hm=%sm) : index, index {
+          %c0_h = arith.constant 0 : index
+          %c1_h = arith.constant 1 : index
+          %t1, %l1 = air.execute -> (memref<8xi32, 2>) {
+            %x = memref.alloc() : memref<8xi32, 2>
+            air.execute_terminator %x : memref<8xi32, 2>
+          }
+          scf.for %i = %c0_h to %hn step %c1_h {
+            air.channel.get @cb[] (%l1[] [] []) : (memref<8xi32, 2>)
+          }
+        }
+      }
+    }
+    return
+  }
+  // Two loops put on one channel in turn, two loops get in the same turn: a stream in two phases.
+  func.func @phases_blocking(%n: index, %m: index) {
+    %c1 = arith.constant 1 : index
+    air.launch (%lx) in (%lsx=%c1) args(%ln=%n, %lm=%m) : index, index {
+      air.segment @seg args(%sn=%ln, %sm=%lm) : index, index {
+        %c0 = arith.constant 0 : index
+        %c1_0 = arith.constant 1 : index
+        %t, %l2 = air.execute -> (memref<8xi32, 1>) {
+          %x = memref.alloc() : memref<8xi32, 1>
+          air.execute_terminator %x : memref<8xi32, 1>
+        }
+        scf.for %i = %c0 to %sn step %c1_0 {
+          air.channel.put @cb[] (%l2[] [] []) : (memref<8xi32, 1>)
+        }
+        scf.for %i = %c0 to %sm step %c1_0 {
+          air.channel.put @cb[] (%l2[] [] []) : (memref<8xi32, 1>)
+        }
+        air.herd @h tile (%tx, %ty) in (%hx=%c1_0, %hy=%c1_0) args(%hn=%sn, %hm=%sm) : index, index {
+          %c0_h = arith.constant 0 : index
+          %c1_h = arith.constant 1 : index
+          %t1, %l1 = air.execute -> (memref<8xi32, 2>) {
+            %x = memref.alloc() : memref<8xi32, 2>
+            air.execute_terminator %x : memref<8xi32, 2>
+          }
+          scf.for %i = %c0_h to %hn step %c1_h {
+            air.channel.get @cb[] (%l1[] [] []) : (memref<8xi32, 2>)
+          }
+          scf.for %i = %c0_h to %hm step %c1_h {
+            air.channel.get @cb[] (%l1[] [] []) : (memref<8xi32, 2>)
+          }
+        }
+      }
+    }
+    return
+  }
+  // The same, but the second get loop runs %n times against %m puts: not every trip count.
+  func.func @phases_other_bound(%n: index, %m: index) {
+    %c1 = arith.constant 1 : index
+    air.launch (%lx) in (%lsx=%c1) args(%ln=%n, %lm=%m) : index, index {
+      air.segment @seg args(%sn=%ln, %sm=%lm) : index, index {
+        %c0 = arith.constant 0 : index
+        %c1_0 = arith.constant 1 : index
+        %t, %l2 = air.execute -> (memref<8xi32, 1>) {
+          %x = memref.alloc() : memref<8xi32, 1>
+          air.execute_terminator %x : memref<8xi32, 1>
+        }
+        scf.for %i = %c0 to %sn step %c1_0 {
+          air.channel.put @cb[] (%l2[] [] []) : (memref<8xi32, 1>)
+        }
+        scf.for %i = %c0 to %sm step %c1_0 {
+          air.channel.put @cb[] (%l2[] [] []) : (memref<8xi32, 1>)
+        }
+        air.herd @h tile (%tx, %ty) in (%hx=%c1_0, %hy=%c1_0) args(%hn=%sn, %hm=%sm) : index, index {
+          %c0_h = arith.constant 0 : index
+          %c1_h = arith.constant 1 : index
+          %t1, %l1 = air.execute -> (memref<8xi32, 2>) {
+            %x = memref.alloc() : memref<8xi32, 2>
+            air.execute_terminator %x : memref<8xi32, 2>
+          }
+          scf.for %i = %c0_h to %hn step %c1_h {
+            air.channel.get @cb[] (%l1[] [] []) : (memref<8xi32, 2>)
+          }
+          scf.for %i = %c0_h to %hn step %c1_h {
+            air.channel.get @cb[] (%l1[] [] []) : (memref<8xi32, 2>)
+          }
         }
       }
     }

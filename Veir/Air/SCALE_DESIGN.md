@@ -281,11 +281,21 @@ an instance's elements in one instance of its events (a DMA's elements, put and 
 itself) is *instance-local*: it may sit in any nest of symbolic loops, each element at its
 instance's coordinates, between the start and finish of every side's event (`side_coords_local`;
 `RealizesD` gives each element its instance, `elIt`); the sample's chains, one per instance, are
-one template stream. Template-checked functions of the lit sweep: 28 of 98 complete for every
-trip count. Not yet: streams fed by several loops in turn (the puts of one loop, then another's:
-the element index is a sum of trip counts), streams whose ends are in more than one symbolic loop
-and not instance-local, streams of no loop with several runs, and the dependency 2a's patterns
-cannot state (from an inner loop's last iteration to the next outer iteration's first). Most of
+one template stream. A stream may be fed by
+several loops in turn when its gets take it in the same turns (*phases*, `prevPhase`): each phase is
+a stream, the first element of one follows an element of the phase before, and `phaseOk` checks
+that every element of the earlier phase ranks below every element of the later one, class by class
+(the later phase's classes first, the earlier phase before them there), without bounds on element
+indices. An element's labels are on two *sides*: its read, push and transfer where its stream's
+puts are, its arrivals where its gets are, each side with its own loop and rate. A buffered stream's
+two loops need not be aligned (`decouple`: the puts may all come before the gets, as blocking puts
+before a herd): `cmpSide` checks that an element arrives after it is pushed, the gets' class first;
+the ends of an unbuffered stream meet (same place and rate). The generator tries loops aligned,
+then buffered streams' ends apart. Template-checked functions of the lit sweep: 36 of 98 complete
+for every trip count, 19 with one outcome. Not yet: a stream fed by loops in turn whose gets take
+it in other turns (one put loop of `n0 + n1` iterations against get loops of `n0` and `n1`: a sum
+of trip counts), streams whose ends are in more than one symbolic loop and not instance-local, and
+streams of no loop with several runs. Most of
 the remaining refusals are real: per-iteration counts that differ at the two ends (lit tests of
 passes, not runnable programs), or unbuffered streams nothing gets.
 

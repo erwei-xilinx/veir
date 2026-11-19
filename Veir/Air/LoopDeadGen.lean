@@ -273,8 +273,10 @@ def topo (n : Nat) (edges : List (Nat × Nat)) : Option (Array Nat) := Id.run do
       if indeg[y]! == 0 then ready := (ready ++ [y]).mergeSort (· ≤ ·)
   return if done == n then some rank else none
 
-/-- The certificate of completion for template `T` of sample `s`, or why there is none. -/
-def certificate (ctx : IRContext OpCode) (T : Template) (s : LoopTemplate.Sample) :
+/-- The certificate of completion for template `T` of sample `s`, or why there is none. With
+`decouple`, a buffered stream does not tie its puts' loop to its gets' (their classes stay apart,
+the gets' ranked first): its puts may all come before its gets. -/
+def certificateWith (decouple : Bool) (ctx : IRContext OpCode) (T : Template) (s : LoopTemplate.Sample) :
     Except String DCert := do
   if let some (a, b) := T.uncovered.head? then
     throw s!"a dependency of template event {b} on {a} is not a template edge"
@@ -286,15 +288,20 @@ def certificate (ctx : IRContext OpCode) (T : Template) (s : LoopTemplate.Sample
   let sides (σ : DStream) : List (List Seg × Nat) := (σ.puts, σ.per) :: σ.slots
   -- Alignment classes: the loops of each stream's runs.
   let mut par := (List.range nl).toArray
+  let apart (σ : DStream) : Bool := decouple && σ.buffered && !σ.isLocal
   for σ in streams0 do
     if σ.isLocal then continue
     let ls := (sides σ).flatMap fun (segs, _) => segs.filterMap fun g => loopOf g.ev
     let nonEmpty := (sides σ).filter (!·.1.isEmpty)
     if !ls.isEmpty && ls.length != (nonEmpty.flatMap (·.1)).length then
       throw "a stream with a symbolic loop at some ends only"
-    for (a, b) in ls.zip ls.tail do
-      let (ra, rb) := (ufFind par a, ufFind par b)
-      if ra != rb then par := par.set! ra rb
+    -- Tied loops: of every side together, or (apart) of each side.
+    let groups := if apart σ then (sides σ).map fun (segs, _) => segs.filterMap fun g => loopOf g.ev
+      else [ls]
+    for g in groups do
+      for (a, b) in g.zip g.tail do
+        let (ra, rb) := (ufFind par a, ufFind par b)
+        if ra != rb then par := par.set! ra rb
   let cls := (List.range nl).toArray.map (ufFind par)
   -- Scales: per class, its loops' trip counts `c_L * E` with one `E`.
   let mut scale := Array.replicate nl 1
@@ -312,37 +319,58 @@ def certificate (ctx : IRContext OpCode) (T : Template) (s : LoopTemplate.Sample
     for (L, c, _) in trips do
       scale := scale.set! L (TC / c)
       csOf := csOf.set! L c
-  -- Rates: elements per unit, equal at every end.
+  -- Rates: elements per unit on each side; the two sides balance for every trip count.
   let mut streams := #[]
   for σ in streams0 do
-    if σ.isLocal then streams := streams.push σ; continue
+    if σ.isLocal then streams := streams.push { σ with gRate := 1 }; continue
     match σ.puts.head? >>= fun g => loopOf g.ev with
     | some Lp =>
-      let K := σ.per * csOf[Lp]!
+      let tripC (L : Nat) : Except String (Nat × BExpr) :=
+        (tripOf ctx keys[L]!.1).mapError (s!"loop {L}: " ++ ·)
+      let mut gRate : Option Nat := none
       for (segs, G) in σ.slots do
         if let some g := segs.head? then
-          if G * csOf[(loopOf g.ev).get!]! != K then
-            throw "a stream's puts and gets do not balance for every trip count"
-      let TC := scale[Lp]! * csOf[Lp]!
-      if TC == 0 || K % TC != 0 then throw "a stream's rate is not whole"
-      streams := streams.push { σ with rate := K / TC }
+          let Lg := (loopOf g.ev).get!
+          -- Balance: per iteration counts times trip counts, `c * E` at each end.
+          if cls[Lg]! == cls[Lp]! then
+            if G * csOf[Lg]! != σ.per * csOf[Lp]! then
+              throw "a stream's puts and gets do not balance for every trip count"
+          else
+            let (cp, Ep) ← tripC Lp
+            let (cg, Eg) ← tripC Lg
+            if Eg != Ep || G * cg != σ.per * cp then
+              throw "a stream's puts and gets do not balance for every trip count"
+          if scale[Lg]! == 0 || G % scale[Lg]! != 0 then throw "a stream's rate is not whole"
+          let r := G / scale[Lg]!
+          if gRate.any (· != r) then throw "a stream's slots move at different rates"
+          gRate := some r
+      if scale[Lp]! == 0 || σ.per % scale[Lp]! != 0 then throw "a stream's rate is not whole"
+      let rate := σ.per / scale[Lp]!
+      streams := streams.push { σ with rate, gRate := gRate.getD rate }
     | none =>
       if σ.slots.any fun (segs, G) => !segs.isEmpty && G != σ.per then
         throw "a stream's puts and gets do not balance"
-      streams := streams.push { σ with rate := 1 }
+      streams := streams.push { σ with rate := 1, gRate := 1 }
   -- Finer units, so that every run fills whole units of its own: per class a factor `f` dividing
   -- every rate, each rate over `f` dividing the stream's run sizes and offsets.
-  let runGcd (σ : DStream) : Nat :=
-    ((sides σ).flatMap fun (segs, _) => segs.flatMap fun g => [g.off, g.m]).foldl Nat.gcd 0
+  let runGcd (segs : List (List Seg × Nat)) : Nat :=
+    (segs.flatMap fun (ss, _) => ss.flatMap fun g => [g.off, g.m]).foldl Nat.gcd 0
+  -- Per class, the sides whose loop is in it: (stream, get side, rate, run gcd).
+  let sidesIn (C : Nat) : List (Nat × Bool × Nat × Nat) :=
+    streams.toList.zipIdx.flatMap fun (σ, j) =>
+      if σ.isLocal then [] else
+      let putIn := (σ.puts.head? >>= fun g => loopOf g.ev).any (cls[·]! == C)
+      let getIn := ((σ.slots.findSome? (·.1.head?)) >>= fun g => loopOf g.ev).any (cls[·]! == C)
+      (if putIn then [(j, false, σ.rate, runGcd [(σ.puts, σ.per)])] else []) ++
+      (if getIn then [(j, true, σ.gRate, runGcd σ.slots)] else [])
   for C in (cls.toList.eraseDups) do
-    let inC := streams.toList.filter fun σ => !σ.isLocal &&
-      (σ.puts.head? >>= fun g => loopOf g.ev).any (cls[·]! == C)
+    let inC := sidesIn C
     if inC.isEmpty then continue
-    let f := inC.foldl (fun acc σ => Nat.lcm acc (σ.rate / Nat.gcd σ.rate (runGcd σ))) 1
-    if f ≤ 1 || inC.any (fun σ => σ.rate % f != 0) then continue
-    streams := streams.map fun σ =>
-      if inC.any (fun τ => τ.puts.head?.map (·.ev) == σ.puts.head?.map (·.ev)) then
-        { σ with rate := σ.rate / f } else σ
+    let f := inC.foldl (fun acc (_, _, r, g) => Nat.lcm acc (r / Nat.gcd r g)) 1
+    if f ≤ 1 || inC.any (fun (_, _, r, _) => r % f != 0) then continue
+    for (j, get, _, _) in inC do
+      streams := streams.modify j fun σ =>
+        if get then { σ with gRate := σ.gRate / f } else { σ with rate := σ.rate / f }
     for L in [0:nl] do
       if cls[L]! == C then scale := scale.set! L (scale[L]! * f)
   -- The classes' order: outer loops' classes first.
@@ -353,12 +381,22 @@ def certificate (ctx : IRContext OpCode) (T : Template) (s : LoopTemplate.Sample
     let ls := T.loops[v]!
     for (a, b) in ls.zip ls.tail do
       if cls[a]! != cls[b]! then nest := (cIdx cls[a]!, cIdx cls[b]!) :: nest
+  -- A buffered stream's gets' class ranks before its puts' when apart (`LoopDead.DCert.cmpSide`).
+  for σ in streams do
+    if apart σ then
+      match σ.puts.head? >>= (fun g => loopOf g.ev), (σ.slots.findSome? (·.1.head?)) >>= (fun g => loopOf g.ev) with
+      | some a, some b => if cls[a]! != cls[b]! then nest := (cIdx cls[b]!, cIdx cls[a]!) :: nest
+      | _, _ => pure ()
   -- A later phase's class ranks before the earlier phase's (`LoopDead.DCert.cmpPhase`).
+  let getLoop (σ : DStream) : Option Nat := (σ.slots.findSome? (·.1.head?)) >>= fun g => loopOf g.ev
+  let putLoop (σ : DStream) : Option Nat := σ.puts.head? >>= fun g => loopOf g.ev
   for σ in streams do
     if let some q := σ.prevPhase then
-      match σ.puts.head? >>= (fun g => loopOf g.ev), (streams[q]? >>= (·.puts.head?)) >>= (fun g => loopOf g.ev) with
-      | some a, some b => if cls[a]! != cls[b]! then nest := (cIdx cls[a]!, cIdx cls[b]!) :: nest
-      | _, _ => pure ()
+      if let some τ := streams[q]? then
+        for (a?, b?) in [(putLoop σ, putLoop τ), (getLoop σ, getLoop τ)] do
+          match a?, b? with
+          | some a, some b => if cls[a]! != cls[b]! then nest := (cIdx cls[a]!, cIdx cls[b]!) :: nest
+          | _, _ => pure ()
   let some crank := topo classes.length nest | throw "loops nest in both orders"
   let order := (classes.mergeSort fun a b => crank[cIdx a]! ≤ crank[cIdx b]!)
   -- Where each event is outside a class: after it when something inside reaches it, when it
@@ -393,10 +431,11 @@ def certificate (ctx : IRContext OpCode) (T : Template) (s : LoopTemplate.Sample
   let mut forced : Std.HashMap (Nat × Nat) (Nat × Nat) := {}
   for σ in streams do
     if σ.isLocal then continue
-    for (segs, _) in sides σ do
+    for (segs, _) in sides σ, i in [0:(sides σ).length] do
+      let r := if i == 0 then σ.rate else σ.gRate
       for g in segs do
         if let some L := loopOf g.ev then
-          forced := forced.insert (g.ev, L) (g.off / σ.rate, (g.off + g.m - 1) / σ.rate)
+          forced := forced.insert (g.ev, L) (g.off / r, (g.off + g.m - 1) / r)
   let mut sOff : Array (List (Nat × Nat)) := Array.replicate nv []
   let mut fOff : Array (List (Nat × Nat)) := Array.replicate nv []
   for L in [0:nl] do
@@ -445,6 +484,19 @@ def certificate (ctx : IRContext OpCode) (T : Template) (s : LoopTemplate.Sample
   return { D0 with πs := (List.range nv).toArray.map (π[2 * ·]!),
                    πf := (List.range nv).toArray.map (π[2 * · + 1]!), streams := ranked }
 
+/-- The certificate: with loops aligned, else with buffered streams' ends apart. -/
+def certificate (ctx : IRContext OpCode) (T : Template) (s : LoopTemplate.Sample) :
+    Except String DCert :=
+  match certificateWith false ctx T s with
+  | .ok D => if D.deadOk then .ok D else
+      match certificateWith true ctx T s with
+      | .ok D' => if D'.deadOk then .ok D' else .ok D
+      | .error _ => .ok D
+  | .error e =>
+    match certificateWith true ctx T s with
+    | .ok D' => .ok D'
+    | .error _ => .error e
+
 /-- The first part of the certificate the check rejects, for the report. -/
 def failure (D : DCert) : String := Id.run do
   for v in [0:D.T.loops.size] do
@@ -458,6 +510,7 @@ def failure (D : DCert) : String := Id.run do
   for σ in D.streams, j in [0:D.streams.size] do
     if !D.shapeOk σ then return s!"stream {j}'s shape (from template event {σ.head})"
     if !D.rankOk σ then return s!"stream {j}'s ranks (from template event {σ.head})"
+  if !D.phasesOk then return s!"the phases of a stream (classes in order {D.order})"
   return "nothing"
 
 end LoopDeadGen

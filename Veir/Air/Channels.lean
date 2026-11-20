@@ -35,7 +35,10 @@ def paddedDst (base : Int) : List (Dim × Nat × Nat) → List (Int × Bool)
 def feedSlots (d : ChanDecl) (idx : List Int) (dest : Option Int) : Except String (List (List Int)) := do
   match d.broadcast with
   | none =>
-    if dest.isSome then throw s!"@{d.name}: `dest` needs a channel with broadcast_shape"
+    -- D64: without a broadcast there is one consumer, the one at index 0.
+    if let some k := dest then
+      if k != 0 then
+        throw s!"@{d.name}: `dest` = {k} on a channel without broadcast_shape; only 0 names its one consumer (D64)"
     return [idx]
   | some b =>
     if b.length != d.size.length || idx.length != d.size.length then

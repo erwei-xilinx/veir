@@ -136,6 +136,17 @@ structure DmaSide where
   strides : Array (Int ⊕ ValuePtr)
 deriving Inhabited
 
+/-- D65: offsets, sizes and strides of different lengths are padded in front to the longest, as
+AIR's `canonicalizeAIRDmaOperands` does: offsets with 0, sizes with 1, strides with the memref's
+element count (`numel`; with size 1 and offset 0 a padded stride moves nothing). -/
+def DmaSide.padFront (s : DmaSide) (numel : Int) : DmaSide :=
+  let n := max s.offsets.size (max s.sizes.size s.strides.size)
+  let pad (xs : Array (Int ⊕ ValuePtr)) (v : Int) : Array (Int ⊕ ValuePtr) :=
+    Array.replicate (n - xs.size) (.inl v) ++ xs
+  -- An empty pattern is the whole buffer; offsets alone omitted are D14a's zeros, the same.
+  if n == 0 then s
+  else { s with offsets := pad s.offsets 0, sizes := pad s.sizes 1, strides := pad s.strides numel }
+
 structure DmaInfo where
   dst : DmaSide
   src : DmaSide
@@ -181,6 +192,12 @@ def decodeList (stat : Array Int) (dyn : Array ValuePtr) : Except String (Array 
     else out := out.push (.inl v)
   return out
 
+/-- The element count of a memref value's type, for `DmaSide.padFront` (0 when not known). -/
+def numelOf (ctx : IRContext OpCode) (v : ValuePtr) : Int :=
+  match parseMemRefType (typeString (v.getType! ctx)) with
+  | .ok t => if t.unranked then 0 else t.numel
+  | .error _ => 0
+
 /-- Read an `air.dma_memcpy_nd`'s operands and pattern properties. -/
 def decodeDma (ctx : IRContext OpCode) (op : OperationPtr) : Except String DmaInfo := do
   let props := unregProps ctx op
@@ -199,10 +216,10 @@ def decodeDma (ctx : IRContext OpCode) (op : OperationPtr) : Except String DmaIn
     | none => throw s!"air.dma_memcpy_nd: missing {name}"
   let side (memrefGroup offIdx : Nat) (prefix_ : String) : Except String DmaSide := do
     let some m := groups[memrefGroup]!.toList.head? | throw s!"air.dma_memcpy_nd: no {prefix_} memref"
-    return { memref := m,
-             offsets := ← decodeList (← arr s!"static_{prefix_}_offsets") groups[offIdx]!,
-             sizes := ← decodeList (← arr s!"static_{prefix_}_sizes") groups[offIdx + 1]!,
-             strides := ← decodeList (← arr s!"static_{prefix_}_strides") groups[offIdx + 2]! }
+    let offsets ← decodeList (← arr s!"static_{prefix_}_offsets") groups[offIdx]!
+    let sizes ← decodeList (← arr s!"static_{prefix_}_sizes") groups[offIdx + 1]!
+    let strides ← decodeList (← arr s!"static_{prefix_}_strides") groups[offIdx + 2]!
+    return ({ memref := m, offsets, sizes, strides } : DmaSide).padFront (numelOf ctx m)
   let dst ← side 1 2 "dst"
   let src ← side 5 6 "src"
   let padBefore := (denseInts (findProp props "pad_before")).getD #[]

@@ -899,7 +899,15 @@ partial def executeInstance (ctx : IRContext OpCode) (op : OperationPtr)
   let some term := bops.back? | throw s!"{what}: expected a terminator"
   let .air .execute_terminator := term.getOpType! ctx
     | throw s!"{what}: expected the body to end in air.execute_terminator"
-  let body := bops.pop
+  -- D66: blocking `air.wait_all`s that begin the body (nothing before them touches memory) make
+  -- the whole execute wait for their tokens: they are its dependencies. A token anywhere else in
+  -- the body is refused (`captureBody`).
+  let isWait (o : OperationPtr) : Bool := opName ctx o == "air.wait_all" && o.getNumResults! ctx == 0
+  let nWaits := (bops.pop.toList.takeWhile isWait).length
+  let waitDeps ← ((bops.pop.extract 0 nWaits).toList.flatMap fun o => (o.getOperands! ctx).toList).mapM
+    fun v => liftE (tokOf env ctx what v)
+  let deps := deps ++ waitDeps
+  let body := bops.pop.extract nWaits bops.pop.size
   let id := (← get).events.size
   let cap ← captureBody ctx what (body ++ #[term]) env id path
   let captured := cap.captured
@@ -1025,7 +1033,9 @@ partial def channelInstance (ctx : IRContext OpCode) (op : OperationPtr)
   let offs ← liftE (decodeList (← arr s!"static_{pre}_offsets") groups[3]!)
   let szs ← liftE (decodeList (← arr s!"static_{pre}_sizes") groups[4]!)
   let strs ← liftE (decodeList (← arr s!"static_{pre}_strides") groups[5]!)
-  let side : DmaSide := { memref := memref, offsets := offs, sizes := szs, strides := strs }
+  let side : DmaSide :=
+    ({ memref := memref, offsets := offs, sizes := szs, strides := strs } : DmaSide).padFront
+      (numelOf ctx memref)
   let dest ← if isPut && seg[6]! > 0 then
       some <$> liftE (knownInt env ctx s!"{what} (dest)" groups[6]![0]!)
     else pure none

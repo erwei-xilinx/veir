@@ -1,0 +1,61 @@
+module {
+  air.channel @c [1, 1]
+  // D65: one offset for two dimensions is padded in front, as AIR's canonicalization does:
+  // offsets [0, 6], so the put reads elements 6, 7, 14 and 15 of the 2x8 buffer. (Padded at the
+  // back, [6, 0], it would read row 6, out of bounds.)
+  func.func @short_offsets() {
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c6 = arith.constant 6 : index
+    %c8 = arith.constant 8 : index
+    %m = memref.alloc() : memref<2x8xi32>
+    %b = memref.alloc() : memref<4xi32>
+    %t0 = air.wait_all async
+    %p = air.channel.put async [%t0] @c[] (%m[%c6] [%c2, %c2] [%c8, %c1]) : (memref<2x8xi32>)
+    %g = air.channel.get async [%t0] @c[] (%b[] [] []) : (memref<4xi32>)
+    air.wait_all [%p, %g]
+    return
+  }
+
+  // D66: a blocking wait that begins an execute's body makes the whole execute wait: the store
+  // follows the get that fills %b, so they do not race.
+  func.func @wait_in_execute() {
+    %c0 = arith.constant 0 : index
+    %z = arith.constant 0 : i32
+    %m = memref.alloc() : memref<4xi32>
+    %b = memref.alloc() : memref<4xi32>
+    %t0 = air.wait_all async
+    %p = air.channel.put async [%t0] @c[] (%m[] [] []) : (memref<4xi32>)
+    %g = air.channel.get async [%t0] @c[] (%b[] [] []) : (memref<4xi32>)
+    %e = air.execute {
+      air.wait_all [%g]
+      memref.store %z, %b[%c0] : memref<4xi32>
+    }
+    air.wait_all [%p, %e]
+    return
+  }
+
+  // D64: on a channel without broadcast_shape, `dest` 0 names its one consumer.
+  func.func @dest_zero() {
+    %c0 = arith.constant 0 : index
+    %m = memref.alloc() : memref<4xi32>
+    %b = memref.alloc() : memref<4xi32>
+    %t0 = air.wait_all async
+    %p = air.channel.put async [%t0] @c[] (%m[] [] []) dest(%c0) : (memref<4xi32>)
+    %g = air.channel.get async [%t0] @c[] (%b[] [] []) : (memref<4xi32>)
+    air.wait_all [%p, %g]
+    return
+  }
+
+  // D64: any other `dest` names nothing: refused.
+  func.func @dest_one() {
+    %c1 = arith.constant 1 : index
+    %m = memref.alloc() : memref<4xi32>
+    %b = memref.alloc() : memref<4xi32>
+    %t0 = air.wait_all async
+    %p = air.channel.put async [%t0] @c[] (%m[] [] []) dest(%c1) : (memref<4xi32>)
+    %g = air.channel.get async [%t0] @c[] (%b[] [] []) : (memref<4xi32>)
+    air.wait_all [%p, %g]
+    return
+  }
+}

@@ -112,6 +112,13 @@ def parseMemRefType (s : String) (dims : List Nat := []) (leadingBare : Bool := 
       | none => throw s!"'{s}': unsupported memory space"
   return { shape, elem, bitwidth, space, unranked, leadingDyn }
 
+/-- The shape of a memref type, whatever its layout (`strided<...>` included): the type up to its
+first comma read as an identity-layout memref. -/
+def memrefShape? (s : String) : Option (List Nat) :=
+  let head := (s.splitOn ",").headD s
+  let ty := if head == s then s else head ++ ">"
+  (parseMemRefType ty).toOption.map (·.shape)
+
 /-! ### Values and memory -/
 
 inductive Val where

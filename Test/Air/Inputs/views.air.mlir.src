@@ -1,0 +1,43 @@
+module {
+  // A view of a view: %bb is %m[2, 4:8] (elements 20 to 23). The DMA reads it, and the store to
+  // %m[2, 4] (element 20) is not ordered with it: a race. (The source shape of %bb is the strided
+  // view's, 2x8.)
+  func.func @sub_of_sub() {
+    %c2 = arith.constant 2 : index
+    %c4 = arith.constant 4 : index
+    %z = arith.constant 7 : i32
+    %m = memref.alloc() : memref<4x8xi32>
+    %d = memref.alloc() : memref<4xi32>
+    %t, %b = air.execute -> (memref<1x4xi32, strided<[8, 1], offset: 20>>) {
+      %a = memref.subview %m[1, 0] [2, 8] [1, 1] : memref<4x8xi32> to memref<2x8xi32, strided<[8, 1], offset: 8>>
+      %bb = memref.subview %a[1, 4] [1, 4] [1, 1] : memref<2x8xi32, strided<[8, 1], offset: 8>> to memref<1x4xi32, strided<[8, 1], offset: 20>>
+      air.execute_terminator %bb : memref<1x4xi32, strided<[8, 1], offset: 20>>
+    }
+    %x = air.dma_memcpy_nd async [%t] (%d[] [] [], %b[] [] []) : (memref<4xi32>, memref<1x4xi32, strided<[8, 1], offset: 20>>)
+    %u = air.execute {
+      memref.store %z, %m[%c2, %c4] : memref<4x8xi32>
+    }
+    air.wait_all [%x, %u]
+    return
+  }
+
+  // A transpose: %tr[i, j] is %m[j, i]. The DMA reads all of %m in the transposed order; the
+  // store to %m[3, 1] (element 13) races with it.
+  func.func @transpose_view() {
+    %c1 = arith.constant 1 : index
+    %c3 = arith.constant 3 : index
+    %z = arith.constant 7 : i32
+    %m = memref.alloc() : memref<4x4xi32>
+    %d = memref.alloc() : memref<16xi32>
+    %t, %tr = air.execute -> (memref<4x4xi32, strided<[1, 4]>>) {
+      %v = memref.transpose %m (d0, d1) -> (d1, d0) : memref<4x4xi32> to memref<4x4xi32, strided<[1, 4]>>
+      air.execute_terminator %v : memref<4x4xi32, strided<[1, 4]>>
+    }
+    %x = air.dma_memcpy_nd async [%t] (%d[] [] [], %tr[] [] []) : (memref<16xi32>, memref<4x4xi32, strided<[1, 4]>>)
+    %u = air.execute {
+      memref.store %z, %m[%c3, %c1] : memref<4x4xi32>
+    }
+    air.wait_all [%x, %u]
+    return
+  }
+}

@@ -429,6 +429,12 @@ def pushEvent (e : Event) (c : EventCtx) : IM Nat := do
                 blocking := if blocking then [id] else st.blocking }
   return id
 
+/-- An affine attribute's text (kept verbatim by VeIR's parser). -/
+def affineText (ctx : IRContext OpCode) (op : OperationPtr) (prop : String) : Option String :=
+  match findProp (unregProps ctx op) prop with
+  | some (.unregisteredAttr u) => some u.value
+  | _ => none
+
 /-- Where each element of a view lies in its buffer, in the view's row-major order, from where the
 source's elements lie (`src`) and the source's shape. `memref.subview` as upstream defines it (the
 same as `Pattern.subviewFrom`); reshapes and casts keep the order; `memref.reinterpret_cast`
@@ -447,6 +453,27 @@ def viewPositions (ctx : IRContext OpCode) (op : OperationPtr) (src : Nat × Arr
   if bare && name != "memref.reinterpret_cast" then none
   if ["memref.collapse_shape", "memref.expand_shape", "memref.reshape", "memref.cast"].contains name then
     return src
+  if name == "memref.transpose" then
+    -- Result dimension `k` is source dimension `perm[k]` (upstream): result element `j` is
+    -- source element `i` with `i[perm[k]] = j[k]`, row-major in each shape.
+    let text ← affineText ctx op "permutation"
+    let rhs := ((text.splitOn "->").getD 1 "").replace "(" "" |>.replace ")" "" |>.replace ">" ""
+    let perm ← (rhs.splitOn ",").mapM fun t =>
+      let t := t.trimAscii.toString
+      if t.startsWith "d" then (t.drop 1).toString.toNat? else none
+    if perm.length != srcShape.length || !(List.range perm.length).all perm.contains then none
+    if srcShape.foldl (· * ·) 1 != src.2.size then none
+    let shape : List Int := srcShape.map Int.ofNat
+    let rs : List Int := (List.range shape.length).map fun d => ((shape.drop (d + 1)).foldl (· * ·) 1)
+    let rshape : List Int := perm.map fun d => shape[d]!
+    let idxs : List (List Int) := rshape.foldr (init := [[]]) fun n acc =>
+      (List.range n.toNat).flatMap fun (i : Nat) => acc.map ((i : Int) :: ·)
+    let (b, P) := src
+    let ps ← idxs.mapM fun j => do
+      -- Source index: dimension `perm[k]` takes `j[k]`.
+      let lin : Int := (perm.zip j).foldl (fun a (d, x) => a + x * rs[d]!) (0 : Int)
+      P[lin.toNat]?
+    return (b, ps.toArray)
   if name != "memref.subview" && name != "memref.reinterpret_cast" then none
   let props := unregProps ctx op
   let seg ← denseInts (findProp props "operandSegmentSizes")
@@ -473,7 +500,9 @@ def viewPositions (ctx : IRContext OpCode) (op : OperationPtr) (src : Nat × Arr
     let ps : List Int := idxs.map fun i => off + dot i strides
     if ps.any (fun q => q < 0 || (!bare && q ≥ (P.size : Int))) then none
     return (b, ps.toArray)
-  -- subview: source index off + i * stride, row-major in the source's shape.
+  -- subview: source index off + i * stride, row-major in the source's shape (which must be the
+  -- shape of the positions known, else nothing is claimed).
+  if srcShape.foldl (· * ·) 1 != P.size then none
   let shape : List Int := srcShape.map Int.ofNat
   let rs : List Int := (List.range shape.length).map fun d => ((shape.drop (d + 1)).foldl (· * ·) 1)
   let ps ← idxs.mapM fun i => do
@@ -559,9 +588,8 @@ def captureBody (ctx : IRContext OpCode) (what : String) (ops : Array OperationP
         (if localView.contains src || (match captured[src]? with
               | some (.result e i) => st.viewResults.contains (e, i) | _ => false) then none
          else sb.map fun b => (b, (List.range st.buffers[b]!.type.numel).toArray.map Int.ofNat))
-      let srcShape := match parseMemRefType (typeString (src.getType! ctx)) with
-        | .ok t => t.shape
-        | .error _ => []
+      -- The source's logical shape, whatever its layout (a view of a view is strided).
+      let srcShape := (memrefShape? (typeString (src.getType! ctx))).getD []
       let intOf (v : ValuePtr) : Option Int :=
         match captured[v]? <|> env[v]? with
         | some (.val x) => x.toInt?
@@ -604,12 +632,6 @@ def syncOpInstance (ctx : IRContext OpCode) (op : OperationPtr)
 def knownIntH? (h : HVal) : Option Int :=
   match h with
   | .val x => x.toInt?
-  | _ => none
-
-/-- An affine attribute's text (kept verbatim by VeIR's parser). -/
-def affineText (ctx : IRContext OpCode) (op : OperationPtr) (prop : String) : Option String :=
-  match findProp (unregProps ctx op) prop with
-  | some (.unregisteredAttr u) => some u.value
   | _ => none
 
 /-- `affine.apply`: evaluated when its operands are known, `undef` otherwise. The map's dims

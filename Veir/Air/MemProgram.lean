@@ -213,6 +213,15 @@ def decodeList (stat : Array Int) (dyn : Array ValuePtr) : Except String (Array 
     else out := out.push (.inl v)
   return out
 
+/-- D14 (decided 2026-11-20): an explicit pattern on a view addresses the view's buffer from the
+position of the view's element 0 (`base`), in elements of the buffer: position
+`base + Σ (o_i + k_i) · s_i`. As a pattern on the buffer: a leading dimension of size 1 whose
+offset is `base`. (With `base` 0 this is D14b.) -/
+def DmaSide.fromBase (s : DmaSide) (base : Int) : DmaSide :=
+  let offs := if s.offsets.isEmpty then Array.replicate s.sizes.size (.inl 0) else s.offsets
+  { s with offsets := #[.inl base] ++ offs, sizes := #[.inl 1] ++ s.sizes,
+           strides := #[.inl 1] ++ s.strides }
+
 /-- The element count of a memref value's type, for `DmaSide.padFront` (0 when not known). -/
 def numelOf (ctx : IRContext OpCode) (v : ValuePtr) : Int :=
   match parseMemRefType (typeString (v.getType! ctx)) with

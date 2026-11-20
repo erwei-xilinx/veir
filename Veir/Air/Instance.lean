@@ -740,16 +740,26 @@ def chosenRegion (ctx : IRContext OpCode) (op : OperationPtr)
 def castOps : List String :=
   ["arith.index_cast", "arith.index_castui", "arith.extsi", "arith.extui", "arith.trunci"]
 
-/-- D14b: an explicit pattern (sizes and strides given) on a view whose element 0 lies at
-position 0 of its buffer. It then addresses the buffer as on the buffer itself: AIR's composition
-(`ComposeMemrefOp`) adds the view's offsets, all 0, to the pattern's, and keeps its strides. A view
-at another offset is refused: there the composition counts the view's offsets in units of the
-pattern's strides, which is open (D14). -/
-def patternOnZeroView (st : IState) (key : Nat × Nat) (noSizes noStrides : Bool) : Bool :=
-  !noSizes && !noStrides &&
-    match st.viewPos[key]? with
-    | some (_, ps) => ps[0]? == some 0
-    | none => false
+/-- D14: the position of a view's element 0 in its buffer, when its positions are known. -/
+def viewBase (st : IState) (key : Nat × Nat) : Option Int :=
+  st.viewPos[key]? >>= fun (_, ps) => ps[0]?
+
+/-- D14: a side of a transfer on a view, as a side on the view's buffer: a whole view whose
+positions are known stays as it is; an explicit pattern starts at the view's element 0
+(`DmaSide.fromBase`). A view whose positions are not known before running is refused. -/
+def viewSide (st : IState) (key : Nat × Nat) (side : DmaSide) (padded : Bool) (what : String) :
+    Except String DmaSide := do
+  let whole := side.offsets.isEmpty && side.sizes.isEmpty && side.strides.isEmpty
+  if whole && !padded && st.viewPos.contains key then return side
+  if side.sizes.isEmpty || side.strides.isEmpty then
+    throw s!"{what}: a transfer on a view whose element positions are not known before running (its offsets are computed when running) is not supported (D14)"
+  match viewBase st key with
+  | some 0 => return side
+  | some b =>
+    if padded then throw s!"{what}: padding on a view at a nonzero position is not supported (D14)"
+    return side.fromBase b
+  | none =>
+    throw s!"{what}: a pattern on a view whose element positions are not known before running (its offsets are computed when running) is not supported (D14)"
 
 /-- Ops that are control flow or address arithmetic, not effects: never a synchronous op. -/
 def notSyncOp (name : String) : Bool :=
@@ -1020,15 +1030,17 @@ partial def dmaInstance (ctx : IRContext OpCode) (op : OperationPtr)
       let some b := staticBuf (← get) captured[m]! | throw s!"{what}: the DMA's memref does not name a buffer the model knows"
       let pb ← peerBuffer what b r
       captured := captured.insert m (.val (.buf pb))
-  for (m, side) in [(info.dst.memref, info.dst), (info.src.memref, info.src)] do
+  let mut info := info
+  for isDst in [true, false] do
+    let side := if isDst then info.dst else info.src
+    let m := side.memref
     let st ← get
     if let .result e i := captured[m]! then
       if st.viewResults.contains (e, i) then
-        -- A whole view whose element positions are known, or a pattern on a view at offset 0 (D14b).
-        let whole := side.offsets.isEmpty && side.sizes.isEmpty && side.strides.isEmpty
-        if !((whole && st.viewPos.contains (e, i)) ||
-             patternOnZeroView st (e, i) side.sizes.isEmpty side.strides.isEmpty) then
-          throw s!"{what}: a DMA on a view with a pattern is not supported (D14, AIR-009); fold the view into the pattern first"
+        -- A whole view whose element positions are known, or a pattern from the view's element 0
+        -- (D14, D14b).
+        let side' ← liftE (viewSide st (e, i) side (!info.padBefore.isEmpty) what)
+        info := if isDst then { info with dst := side' } else { info with src := side' }
     if (staticBuf st captured[m]!).isNone then
       throw s!"{what}: the DMA's memref does not name a buffer the model knows"
   let blocking := op.getNumResults! ctx = 0
@@ -1095,12 +1107,12 @@ partial def channelInstance (ctx : IRContext OpCode) (op : OperationPtr)
     captured := captured.insert v h
   captured ← transferValues ctx (← get).events.size (#[memref] ++ groups[3]! ++ groups[4]! ++ groups[5]!).toList captured
   let st ← get
+  let mut side := side
   if let .result e i := captured[memref]! then
     if st.viewResults.contains (e, i) then
-      -- A whole view whose element positions are known, or a pattern on a view at offset 0 (D14b).
-      let whole := offs.isEmpty && szs.isEmpty && strs.isEmpty && padBefore.isEmpty
-      if !((whole && st.viewPos.contains (e, i)) || patternOnZeroView st (e, i) szs.isEmpty strs.isEmpty) then
-        throw s!"{what}: a channel endpoint on a view with a pattern is not supported (D14, AIR-009); fold the view into the pattern first"
+      -- A whole view whose element positions are known, or a pattern from the view's element 0
+      -- (D14, D14b).
+      side ← liftE (viewSide st (e, i) side (!padBefore.isEmpty) what)
   if (staticBuf st captured[memref]!).isNone then
     throw s!"{what}: the memref does not name a buffer the model knows"
   let blocking := op.getNumResults! ctx = 0
@@ -1802,6 +1814,69 @@ def IProgram.finishDma (ip : IProgram) (v : Nat) (s : MState) : MState := Id.run
       mem := mem.insert (db, p) x
     return { s with mem }
 
+/-- D22b: the element positions the memref values of a body name, from what is known before
+running: a value from outside is its buffer's whole (in order) or a view's known positions
+(`IProgram.viewPos`); inside, an allocation's buffer whole, and a view as `viewPositions` computes
+it from its source. Values with unknown positions are absent. Footprints and effects both use it,
+so they agree. -/
+def IProgram.bodyPositions (ctx : IRContext OpCode) (ip : IProgram) (v : Nat) :
+    Std.HashMap ValuePtr (Nat × Array Int) := Id.run do
+  let c := ip.ctxs[v]!
+  let e := ip.prog.events[v]!
+  let wholeOf (b : Nat) : Nat × Array Int :=
+    (b, (List.range ip.buffers[b]!.type.numel).toArray.map Int.ofNat)
+  let outside (o : ValuePtr) : Option (Nat × Array Int) :=
+    match c.env[o]? with
+    | some (.val (.buf b)) => if ip.buffers[b]!.type.unranked || ip.buffers[b]!.type.leadingDyn then none
+        else some (wholeOf b)
+    | some (.result e' i) =>
+      if ip.viewResults.contains (e', i) then ip.viewPos[(e', i)]?
+      else (ip.resultBufs[(e', i)]?).map wholeOf
+    | _ => none
+  let mut pos : Std.HashMap ValuePtr (Nat × Array Int) := {}
+  let mut ints : Std.HashMap ValuePtr Int := {}
+  for inner in e.body do
+    let iname := opName ctx inner
+    let operands := inner.getOperands! ctx
+    let intOf (o : ValuePtr) : Option Int :=
+      ints[o]? <|> (match c.env[o]? with | some (.val x) => x.toInt? | _ => none)
+    if iname.startsWith "arith." then
+      let ins := operands.toList.map fun o => match intOf o with
+        | some n => some (intVal ctx o n) | none => none
+      if let some vs := ins.mapM id then
+        if let some rs := vs.mapM toRuntime? then
+          if let .ok results := evalArith ctx inner rs.toArray then
+            for r in results, i in [0:results.size] do
+              if let some n := (Val.rv r).toInt? then ints := ints.insert (.opResult ⟨inner, i⟩) n
+    else if iname == "memref.alloc" then
+      if let some b := c.allocBufs[inner]? then
+        if !ip.buffers[b]!.type.leadingDyn then pos := pos.insert (.opResult ⟨inner, 0⟩) (wholeOf b)
+    else if viewOps.contains iname then
+      let some src := operands[0]? | continue
+      let some sp := pos[src]? <|> outside src | continue
+      let srcShape := (memrefShape? (typeString (src.getType! ctx))).getD []
+      if let some vp := viewPositions ctx inner sp srcShape intOf then
+        pos := pos.insert (.opResult ⟨inner, 0⟩) vp
+  -- Values from outside, as the body's ops use them.
+  for inner in e.body do
+    for o in inner.getOperands! ctx do
+      if !pos.contains o && isMemRefType (o.getType! ctx) then
+        if let some p := outside o then pos := pos.insert o p
+  return pos
+
+/-- D22b: an op whose effects stay within its memref operands' elements: a linalg op, or
+`memref.copy` (upstream semantics). -/
+def elementwiseOp (name : String) : Bool := name.startsWith "linalg." || name == "memref.copy"
+
+/-- The memref operands an uninterpreted op writes: a linalg op's `outs`, `memref.copy`'s target. -/
+def writtenOperands (ctx : IRContext OpCode) (inner : OperationPtr) : Array ValuePtr :=
+  let name := opName ctx inner
+  let operands := inner.getOperands! ctx
+  if name == "memref.copy" then operands.extract 1 2
+  else match denseInts (findProp (unregProps ctx inner) "operandSegmentSizes") with
+    | some #[nIns, nOuts] => operands.extract nIns.toNat (nIns.toNat + nOuts.toNat)
+    | _ => operands
+
 /-- The buffers an uninterpreted op writes: a linalg op's `outs`, `memref.copy`'s target, and
 otherwise every memref it touches (D22). -/
 def writtenBuffers (ctx : IRContext OpCode) (inner : OperationPtr) (bufOf : ValuePtr → Option Nat) :
@@ -1819,6 +1894,8 @@ def writtenBuffers (ctx : IRContext OpCode) (inner : OperationPtr) (bufOf : Valu
 def IProgram.finishExecute (ctx : IRContext OpCode) (ip : IProgram) (v : Nat) (s : MState) : MState := Id.run do
   let c := ip.ctxs[v]!
   let e := ip.prog.events[v]!
+  -- D22b: the elements the body's memref values name, as the footprint has them.
+  let bpos := ip.bodyPositions ctx v
   let fail (m : String) : MState := { s with fault := some s!"event {v}{pathStr c.path}: {m}" }
   let mut vals : Std.HashMap ValuePtr Val := {}
   let mut mem := s.mem
@@ -1918,6 +1995,33 @@ def IProgram.finishExecute (ctx : IRContext OpCode) (ip : IProgram) (v : Nat) (s
         | .ok _ => return fail "affine.apply: the map does not have one result"
         | .error m => return fail s!"affine.apply: {m}"
       | none => vals := vals.insert res .undef
+    else if elementwiseOp iname &&
+        (operands.filter (fun o => isMemRefType (o.getType! ctx))).all bpos.contains then
+      -- D22b: a linalg op or memref.copy whose operands' elements are all known reads and writes
+      -- only those (upstream semantics), as its footprint says.
+      let mops := operands.filter (fun o => isMemRefType (o.getType! ctx))
+      for o in mops do
+        if freed.contains bpos[o]!.1 then
+          return fail s!"'{iname}' used {ip.buffers[bpos[o]!.1]!.name} after it was deallocated"
+      if iname == "memref.copy" then
+        let (a, pa) := bpos[operands[0]!]!
+        let (b, pb) := bpos[operands[1]!]!
+        if pa.size != pb.size then return fail "memref.copy between views of different sizes"
+        let src := pa.map fun q => mem[(a, q)]?.getD .undef
+        for q in pb, x in src do
+          mem := mem.insert (b, q) x
+      else
+        let readVals := ins.toList ++ mops.toList.flatMap fun o =>
+          let (b, ps) := bpos[o]!
+          ps.toList.map fun q => mem[(b, q)]?.getD .undef
+        let h := hashInputs readVals
+        for o in writtenOperands ctx inner do
+          if let some (b, ps) := bpos[o]? then
+            for q in ps do
+              mem := mem.insert (b, q) (opaqueOfH inner h q.toNat)
+        for i in [0:inner.getNumResults! ctx] do
+          if !isMemRefType ((ValuePtr.opResult ⟨inner, i⟩).getType! ctx) then
+            vals := vals.insert (.opResult ⟨inner, i⟩) (opaqueOfH inner h (1000000 + i))
     else if iname == "memref.copy" && ins.size == 2 && (ins[0]! matches .buf _) && (ins[1]! matches .buf _) &&
         (operands.toList.all fun o =>
           let t := typeString (o.getType! ctx)
@@ -2076,6 +2180,7 @@ def IProgram.footprintsR (ctx : IRContext OpCode) (ip : IProgram) :
           if let .error m := checkBounds dt ip.buffers[db]!.name dpos then
             issues := issues.push ⟨v, s!"air.dma_memcpy_nd writes out of bounds: {m}"⟩
     | .execute | .syncOp =>
+      let bpos := ip.bodyPositions ctx v
       let mut vals : Std.HashMap ValuePtr Val := {}
       let mut localBuf : Std.HashMap ValuePtr Nat := {}
       for inner in e.body do
@@ -2129,6 +2234,14 @@ def IProgram.footprintsR (ctx : IRContext OpCode) (ip : IProgram) :
               return q
             acc := acc ++ [⟨b, if isLoad then .read else .write, match q with
               | some q => [(q, q + 1)] | none => whole b⟩]
+        else if elementwiseOp iname &&
+            (operands.filter (fun o => isMemRefType (o.getType! ctx))).all bpos.contains then
+          -- D22b: the elements of its operands, read; those of what it writes, written.
+          for o in operands.filter (fun o => isMemRefType (o.getType! ctx)) do
+            let (b, ps) := bpos[o]!
+            acc := acc ++ [⟨b, .read, runsOf ps.toList⟩]
+          for o in writtenOperands ctx inner do
+            if let some (b, ps) := bpos[o]? then acc := acc ++ [⟨b, .write, runsOf ps.toList⟩]
         else
           for b in (memrefOperands ctx inner).filterMap bufOf do
             acc := acc ++ [⟨b, .read, whole b⟩]

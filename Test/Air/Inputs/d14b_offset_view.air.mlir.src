@@ -1,6 +1,6 @@
 module {
-  // A pattern on a view at offset 4: AIR's composition and the view's position disagree (D14 open):
-  // refused.
+  // A pattern on a view at offset 4 (D14): from the view's element 0, position 4 of %src, in
+  // elements of %src: positions 4 and 6.
   func.func @offset_view(%src: memref<16xi32>, %out: memref<2xi32>) {
     %c1 = arith.constant 1 : index
     air.launch (%l) in (%ls=%c1) args(%a=%src, %o=%out) : memref<16xi32>, memref<2xi32> {

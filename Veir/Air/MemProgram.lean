@@ -46,13 +46,16 @@ structure MemRefType where
   /-- `memref<*xT>`: a bare pointer (D63). No upper bound; its extent is how far its accesses
   reach (`IProgram.sizeBarePointers` sets `shape` to it). -/
   unranked : Bool := false
+  /-- D70: a leading dynamic dimension with no cast to fix it: as a bare pointer (D63) in that
+  dimension, its length how far its accesses reach (`IProgram.sizeBarePointers`). -/
+  leadingDyn : Bool := false
 deriving Repr, Inhabited, BEq
 
 def MemRefType.numel (t : MemRefType) : Nat := t.shape.foldl (· * ·) 1
 
 /-- Whether position `p` lies in a buffer of type `t`: a bare pointer (D63) only needs `p ≥ 0`. -/
 def MemRefType.inBounds (t : MemRefType) (p : Int) : Bool :=
-  p ≥ 0 && (t.unranked || p < t.numel)
+  p ≥ 0 && (t.unranked || t.leadingDyn || p < t.numel)
 
 /-- Row-major linear strides. -/
 def MemRefType.strides (t : MemRefType) : List Int :=
@@ -62,8 +65,11 @@ def leadingNat (cs : List Char) : Option (Nat × List Char) :=
   let ds := cs.takeWhile Char.isDigit
   if ds.isEmpty then none else some (String.ofList ds |>.toNat!, cs.drop ds.length)
 
-/-- Read `memref<4x8xi32, 1>`: a static shape, an element type, an optional memory space. -/
-def parseMemRefType (s : String) : Except String MemRefType := do
+/-- Read `memref<4x8xi32, 1>`: a static shape, an element type, an optional memory space. A
+dynamic dimension `?` takes the next of `dims` (D68, D69); with none left, a leading one is a bare
+pointer's when `leadingBare` (D70), and anything else is refused. -/
+def parseMemRefType (s : String) (dims : List Nat := []) (leadingBare : Bool := false) :
+    Except String MemRefType := do
   let cs := s.toList
   let pre := "memref<".toList
   unless cs.take pre.length == pre && cs.getLast? == some '>' do
@@ -79,8 +85,16 @@ def parseMemRefType (s : String) : Except String MemRefType := do
   let unranked := rest.take 2 == ['*', 'x']
   if unranked then rest := rest.drop 2
   let mut shape : List Nat := []
+  let mut dims := dims
+  let mut leadingDyn := false
   repeat
-    if rest.head? == some '?' then throw s!"'{s}': a dynamic shape is not supported"
+    if rest.take 2 == ['?', 'x'] then
+      match dims with
+      | d :: ds => shape := shape ++ [d]; dims := ds; rest := rest.drop 2; continue
+      | [] =>
+        if leadingBare && shape.isEmpty && !unranked then
+          leadingDyn := true; shape := [0]; rest := rest.drop 2; continue
+        throw s!"'{s}': a dynamic shape is not supported"
     match leadingNat rest with
     | some (n, 'x' :: tl) => shape := shape ++ [n]; rest := tl
     | _ => break
@@ -96,7 +110,7 @@ def parseMemRefType (s : String) : Except String MemRefType := do
       match leadingNat sp.trimAscii.toString.toList with
       | some (n, _) => pure n
       | none => throw s!"'{s}': unsupported memory space"
-  return { shape, elem, bitwidth, space, unranked }
+  return { shape, elem, bitwidth, space, unranked, leadingDyn }
 
 /-! ### Values and memory -/
 
@@ -264,6 +278,8 @@ the pattern is empty. -/
 def sidePositions (t : MemRefType) (offs sizes strides : Array Int) : Except String (List Dim) := do
   if offs.isEmpty && sizes.isEmpty && strides.isEmpty then
     if t.unranked then throw "a bare pointer (unranked memref, D63) as a whole transfer end has no length"
+    if t.leadingDyn then
+      throw "a memref with a leading dynamic dimension (D70) as a whole transfer end has no length"
     return [⟨0, t.numel, 1⟩]
   -- No offsets with sizes and strides: every offset 0 (D14a, as AIR's `get1DOffset` reads it).
   let offs := if offs.isEmpty then Array.replicate sizes.size 0 else offs

@@ -647,7 +647,9 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
       IO.println s!"@{name}: transfer sizes depend on the scalar argument(s) {names sampled}, not \
         given: each is tried with {ArgSplit.sizeSamples} (sizes are positive), and each verdict \
         below holds for its values only"
-    for n in notes do IO.println s!"  not split: {n}"
+    -- An argument tried with sample values is accounted for.
+    for n in notes do
+      if !sampled.any fun x => n.startsWith s!"%arg{x.arg}:" then IO.println s!"  not split: {n}"
     let mut bad := 0
     for vs in tuples do
       let tag := ", ".intercalate ((all.zip vs).map fun (s, v) => s!"%arg{s.arg} = {v}")

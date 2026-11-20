@@ -349,8 +349,8 @@ are positive (decided 2026-11-20). -/
 def sizeSamples : List Int := [1, 2, 3]
 
 /-- The scalar arguments not given and not split that carry, unchanged, into the sizes of an
-`air.channel.put` or `air.channel.get`: its position among the scalar arguments, and among the
-function's arguments. -/
+`air.channel.put` or `air.channel.get`, or of a `memref.alloc` (D69): its position among the scalar
+arguments, and among the function's arguments. -/
 def sizeArgs (ctx : IRContext OpCode) (func : OperationPtr) (known : List (Option Int))
     (splits : List Split) : Except String (List (Nat × Nat)) := do
   let block ← singleBlock ctx func "func.func"
@@ -360,6 +360,10 @@ def sizeArgs (ctx : IRContext OpCode) (func : OperationPtr) (known : List (Optio
   let mut sizeOps : Std.HashSet ValuePtr := {}
   for op in ops do
     let name := opName ctx op
+    -- D69: the dynamic sizes of a `memref.alloc` are its operands.
+    if name == "memref.alloc" then
+      for v in op.getOperands! ctx do sizeOps := sizeOps.insert v
+      continue
     if name != "air.channel.put" && name != "air.channel.get" then continue
     let some seg := denseInts (findProp (unregProps ctx op) "operandSegmentSizes") | continue
     if seg.size < 5 then continue

@@ -1,0 +1,80 @@
+module {
+  air.channel @c [1, 1]
+  // D68: %a is cast to 4x8, so it has 32 elements: the put of rows 2 and 3 stays in bounds.
+  func.func @cast_shape(%a: memref<?x8xi32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c8 = arith.constant 8 : index
+    %s = memref.cast %a : memref<?x8xi32> to memref<4x8xi32>
+    %b = memref.alloc() : memref<16xi32>
+    %t0 = air.wait_all async
+    %p = air.channel.put async [%t0] @c[] (%a[%c2, %c0] [%c2, %c8] [%c8, %c1]) : (memref<?x8xi32>)
+    %g = air.channel.get async [%t0] @c[] (%b[] [] []) : (memref<16xi32>)
+    air.wait_all [%p, %g]
+    return
+  }
+
+  // D68: a copy to a static memref fixes the shape too: %a has 16 elements, and the store to
+  // %a[12] after the copy is ordered after it.
+  func.func @copy_shape(%a: memref<?xi32>) {
+    %c12 = arith.constant 12 : index
+    %z = arith.constant 0 : i32
+    %s = memref.alloc() : memref<16xi32>
+    %t0 = air.execute {
+      memref.copy %a, %s : memref<?xi32> to memref<16xi32>
+    }
+    %t1 = air.execute [%t0] {
+      memref.store %z, %a[%c12] : memref<?xi32>
+    }
+    air.wait_all [%t1]
+    return
+  }
+
+  // D70: no cast or copy: the leading dimension reaches as far as its accesses, here row 5.
+  func.func @leading_dyn(%a: memref<?x8xi32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c4 = arith.constant 4 : index
+    %c8 = arith.constant 8 : index
+    %b = memref.alloc() : memref<16xi32>
+    %t0 = air.wait_all async
+    %p = air.channel.put async [%t0] @c[] (%a[%c4, %c0] [%c1, %c8] [%c8, %c1]) : (memref<?x8xi32>)
+    %g = air.channel.get async [%t0] @c[] (%b[%c0] [%c8] [%c1]) : (memref<16xi32>)
+    air.wait_all [%p, %g]
+    return
+  }
+
+  // D69: an alloc's dynamic size known when instantiated.
+  func.func @alloc_known() {
+    %c4 = arith.constant 4 : index
+    %m = memref.alloc(%c4) : memref<?xi32>
+    %b = memref.alloc() : memref<4xi32>
+    %t0 = air.wait_all async
+    %p = air.channel.put async [%t0] @c[] (%m[] [] []) : (memref<?xi32>)
+    %g = air.channel.get async [%t0] @c[] (%b[] [] []) : (memref<4xi32>)
+    air.wait_all [%p, %g]
+    return
+  }
+
+  // D69 and D67: an alloc's size from %n, not given: tried with 1, 2 and 3.
+  func.func @alloc_arg(%n: index) {
+    %m = memref.alloc(%n) : memref<?xi32>
+    %b = memref.alloc() : memref<4xi32>
+    %t0 = air.wait_all async
+    %p = air.channel.put async [%t0] @c[] (%m[] [] []) : (memref<?xi32>)
+    %g = air.channel.get async [%t0] @c[] (%b[] [] []) : (memref<4xi32>)
+    air.wait_all [%p, %g]
+    return
+  }
+
+  // D70: a whole transfer of a leading dynamic dimension has no length: refused.
+  func.func @whole_leading_dyn(%a: memref<?x8xi32>) {
+    %b = memref.alloc() : memref<8xi32>
+    %t0 = air.wait_all async
+    %p = air.channel.put async [%t0] @c[] (%a[] [] []) : (memref<?x8xi32>)
+    %g = air.channel.get async [%t0] @c[] (%b[] [] []) : (memref<8xi32>)
+    air.wait_all [%p, %g]
+    return
+  }
+}

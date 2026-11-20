@@ -1,0 +1,17 @@
+module {
+  air.channel @c [1, 1]
+  // D68: cast to 2x8, the same put reads rows 2 and 3, out of bounds.
+  func.func @cast_too_small(%a: memref<?x8xi32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c8 = arith.constant 8 : index
+    %s = memref.cast %a : memref<?x8xi32> to memref<2x8xi32>
+    %b = memref.alloc() : memref<16xi32>
+    %t0 = air.wait_all async
+    %p = air.channel.put async [%t0] @c[] (%a[%c2, %c0] [%c2, %c8] [%c8, %c1]) : (memref<?x8xi32>)
+    %g = air.channel.get async [%t0] @c[] (%b[] [] []) : (memref<16xi32>)
+    air.wait_all [%p, %g]
+    return
+  }
+}

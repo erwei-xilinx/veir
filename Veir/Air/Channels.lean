@@ -193,7 +193,8 @@ access known before running touches, and at least 1. An access whose positions a
 (D23) is taken as that whole extent, which meets every access that is known; past it no access
 known before running reaches. -/
 def IProgram.sizeBarePointers (ctx : IRContext OpCode) (ip : IProgram) : IProgram := Id.run do
-  let bare := (List.range ip.buffers.size).filter (ip.buffers[·]!.type.unranked)
+  let bare := (List.range ip.buffers.size).filter fun b =>
+    ip.buffers[b]!.type.unranked || ip.buffers[b]!.type.leadingDyn
   if bare.isEmpty then return ip
   let mut top : Std.HashMap Nat Int := {}
   let (fps, _) := ip.footprints ctx
@@ -208,6 +209,11 @@ def IProgram.sizeBarePointers (ctx : IRContext OpCode) (ip : IProgram) : IProgra
       top := top.insert ep.buf (qs.foldl max (top.getD ep.buf 0))
   let buffers := ip.buffers.mapIdx fun b x =>
     if x.type.unranked then { x with type := { x.type with shape := [(top.getD b 0).toNat + 1] } }
+    -- D70: whole rows of the inner dimensions, up to the furthest access.
+    else if x.type.leadingDyn then
+      let inner := (x.type.shape.drop 1).foldl (· * ·) 1
+      let rows := if inner == 0 then 1 else ((top.getD b 0).toNat + 1 + inner - 1) / inner
+      { x with type := { x.type with shape := rows :: x.type.shape.drop 1 } }
     else x
   return { ip with buffers }
 

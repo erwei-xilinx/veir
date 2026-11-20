@@ -249,11 +249,28 @@ def pathStr : List Int → String
   | [] => ""
   | p => s!" (iteration {p})"
 
-def newBufferI (name : String) (t : TypeAttr) : IM Nat := do
-  let ty ← liftE (parseMemRefType (typeString t))
+def newBufferI (name : String) (t : TypeAttr) (dims : List Nat := []) (leadingBare := false) :
+    IM Nat := do
+  let ty ← liftE (parseMemRefType (typeString t) dims leadingBare)
   let buf : Buffer := { name, type := ty }
   modifyGet fun st =>
     (st.buffers.size, { st with buffers := st.buffers.push buf, bufFrames := st.bufFrames.push st.frames })
+
+/-- The sizes of `shape` at the dynamic dimensions of the memref type `ts`. -/
+def dynDims (ts : String) (shape : List Nat) : List Nat :=
+  let dimsPart := ((ts.drop "memref<".length).toString.splitOn ",").headD ""
+  let toks := (dimsPart.splitOn "x").dropLast
+  (toks.zip shape).filterMap fun (tok, n) => if tok.trimAscii.toString == "?" then some n else none
+
+/-- D69: the dynamic sizes of a `memref.alloc` (its operands, one per `?` in order), as
+instantiated; one not known before running is refused (a scalar argument not given is tried with
+sample values, D67). -/
+def allocDims (ctx : IRContext OpCode) (op : OperationPtr) (intOf : ValuePtr → Option Int)
+    (what : String) : IM (List Nat) := do
+  (op.getOperands! ctx).toList.mapM fun v => do
+    match intOf v with
+    | some n => if n < 0 then throw s!"{what}: memref.alloc with a negative size {n}" else pure n.toNat
+    | none => throw s!"{what}: a dynamic size of memref.alloc is not known before running (D69)"
 
 /-- The elements of a `dense<...>` initial value: a splat or a list of integers; anything else
 (floats, bf16) is opaque (as VEIR-004's constants are). -/
@@ -518,9 +535,12 @@ def captureBody (ctx : IRContext OpCode) (what : String) (ops : Array OperationP
         | .blockArgument _ => throw s!"{what}: '{iname}' reads a block argument the host does not know"
     if iname == "memref.alloc" then
       let ty := (ValuePtr.opResult ⟨inner, 0⟩).getType! ctx
+      let dims ← allocDims ctx inner (fun v => match captured[v]? <|> env[v]? with
+        | some (.val x) => x.toInt?
+        | _ => none) what
       let nb ← if hasAttrNamed ctx inner "air.symmetric" then
           symmetricBuffer inner s!"alloc in event {id}{pathStr path}" ty path
-        else newBufferI s!"alloc in event {id}{pathStr path}" ty
+        else newBufferI s!"alloc in event {id}{pathStr path}" ty dims
       recordRefeed ctx inner nb s!"alloc in event {id}{pathStr path}"
       allocBufs := allocBufs.insert inner nb
       localBuf := localBuf.insert (.opResult ⟨inner, 0⟩) nb
@@ -814,9 +834,10 @@ partial def walkOps (ctx : IRContext OpCode) (ops : Array OperationPtr)
       else if name == "air.channel.issue" then env ← issueInstance ctx op env path
       else if name == "memref.alloc" then
         let ty := (ValuePtr.opResult ⟨op, 0⟩).getType! ctx
+        let dims ← allocDims ctx op (fun v => env[v]? >>= knownIntH?) s!"memref.alloc{pathStr path}"
         let b ← if hasAttrNamed ctx op "air.symmetric" then
             symmetricBuffer op s!"host alloc{pathStr path}" ty path
-          else newBufferI s!"host alloc{pathStr path}" ty
+          else newBufferI s!"host alloc{pathStr path}" ty dims
         recordRefeed ctx op b s!"memref.alloc{pathStr path}"
         env := env.insert (.opResult ⟨op, 0⟩) (.val (.buf b))
       else if name == "memref.get_global" then
@@ -1547,6 +1568,52 @@ partial def nestedOps (ctx : IRContext OpCode) (op : OperationPtr) : Array Opera
       out := out ++ nestedOps ctx o
   return out
 
+/-- D68: the shape a dynamic memref argument is cast to (`memref.cast` to a static type), or copied
+to or from (`memref.copy` with a static memref: upstream, both sides have one shape), directly or
+through the `args` of launch, segment and herd; all of them must agree. -/
+partial def castShapeOf (ctx : IRContext OpCode) (ops : Array OperationPtr) (a : ValuePtr) :
+    Except String (Option (List Nat)) := do
+  -- The values carrying `a`: itself and the block arguments of the hierarchy ops it is passed to.
+  let mut carry : Std.HashSet ValuePtr := ({} : Std.HashSet ValuePtr).insert a
+  for _ in [0:ops.size + 1] do
+    let before := carry.size
+    for op in ops do
+      let name := opName ctx op
+      if !hierarchyOps.contains name then continue
+      let some seg := denseInts (findProp (unregProps ctx op) "operandSegmentSizes") | continue
+      let isRank := name == "air.rank"
+      let nDeps := seg[0]!.toNat
+      let nUni := if isRank then seg[1]!.toNat else 0
+      let nSizes := seg[if isRank then 2 else 1]!.toNat
+      let base := nDeps + nUni + nSizes
+      let operands := op.getOperands! ctx
+      for j in [base:operands.size] do
+        if !carry.contains operands[j]! then continue
+        let some blk := (op.getRegion! ctx 0).getFirstBlock! ctx | continue
+        if let some b := (blk.getArguments! ctx)[2 * nSizes + (j - base)]? then carry := carry.insert b
+    if carry.size == before then break
+  let mut shape : Option (List Nat) := none
+  for op in ops do
+    let name := opName ctx op
+    let operands := op.getOperands! ctx
+    -- The static type the argument meets: a cast's result, or a copy's other side.
+    let other : Option ValuePtr :=
+      if name == "memref.cast" then
+        if operands[0]?.any carry.contains then some (.opResult ⟨op, 0⟩) else none
+      else if name == "memref.copy" && operands.size == 2 then
+        if carry.contains operands[0]! then some operands[1]!
+        else if carry.contains operands[1]! then some operands[0]!
+        else none
+      else none
+    let some o := other | continue
+    let .ok t := parseMemRefType (typeString (o.getType! ctx)) | continue
+    if t.unranked then continue
+    match shape with
+    | none => shape := some t.shape
+    | some s => if s != t.shape then
+        throw s!"{name}: one dynamic memref argument meets the shapes {s} and {t.shape} (D68)"
+  return shape
+
 def branchOpNames : List String := ["scf.if", "affine.if", "scf.index_switch"]
 
 /-- Instantiate a function, with the given scalar arguments (others are unknown) and the values
@@ -1601,7 +1668,19 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
         -- A token passed in has no event the model knows: `tokOf` refuses its uses.
         continue
       if isMemRefType t then
-        let b ← newBufferI s!"%arg{i}" t
+        -- D68: a dynamic argument has the shape it is cast to; else, D70, a leading dynamic
+        -- dimension is a bare pointer's.
+        let ts := typeString t
+        let b ← if ts.contains '?' then do
+            match ← liftE (castShapeOf ctx (nestedOps ctx func) v) with
+            | some shape =>
+              -- The `?`s take the cast's sizes, and the static sizes must be the cast's too.
+              let ty ← liftE (parseMemRefType ts (dynDims ts shape))
+              if ty.shape != shape then
+                throw s!"%arg{i}: '{ts}' is cast to the shape {shape} (D68)"
+              newBufferI s!"%arg{i}" t (dynDims ts shape)
+            | none => newBufferI s!"%arg{i}" t [] (leadingBare := true)
+          else newBufferI s!"%arg{i}" t
         argBufs := argBufs.push b
         env := env.insert v (.val (.buf b))
       else

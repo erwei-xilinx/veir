@@ -185,6 +185,13 @@ def riscv64LegalizerInfo : LegalizerInfo where
       .customFor [s32],
       .minScalar (.type 0) 64,
     ]
+    -- Multiply-high is legal at `s64` alone: the high half sits at a different
+    -- place in a wider product, so widening a narrower one is not the same
+    -- operation, and `mulh`/`mulhu` compute only the `s64` case.
+    | .g_smulh | .g_umulh => [
+      .legalFor [s64],
+      .lower,
+    ]
     | .g_srem => [
       .legalFor [s64],
       .minScalar (.type 0) 64,
@@ -264,7 +271,7 @@ def riscv64LegalizerInfo : LegalizerInfo where
     ]
     | .g_constant => [
       -- LLVM's custom `i64` rule only decides on the constant pool, which we don't need.
-      .legalFor [s64],
+      .legalFor [s64, p0],
       .minScalar (.type 0) 64,
     ]
     | .g_poison => [
@@ -274,6 +281,12 @@ def riscv64LegalizerInfo : LegalizerInfo where
     | .g_freeze => [
       .legalFor [s64],
       .minScalar (.type 0) 64,
+    ]
+    | .g_ptrtoint => [
+      .legalForTypePairs [(s64, p0)],
+    ]
+    | .g_inttoptr => [
+      .legalForTypePairs [(p0, s64)],
     ]
     -- Loads and stores must be naturally aligned, as in LLVM without `+unaligned-scalar-mem`. LLVM
     -- also makes `s16` and `s32` legal, for `flh`/`flw` and `fsh`/`fsw`. We have no FPs, so we widen

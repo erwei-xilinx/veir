@@ -325,7 +325,7 @@ def footprints (ctx : IRContext OpCode) (s : Sample) (trips : Nat → Nat) :
 /-- A sample with the values events compute (D59, D62): the rounds of `instantiateRunning`, which
 propose values by running the sample, without its checks (the template is trusted). A transfer
 value no round proposes stays over-approximated (D23). -/
-partial def sampleWithValues (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List Int)
+partial def sampleWithValues (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List (Option Int))
     (zero : List SymKey) : Except String IProgram :=
   let rec go (decisions : Std.HashMap ResultKey Int) (round : Nat) : Except String IProgram := do
     if round > maxRounds then throw s!"more than {maxRounds} rounds of run-time values"
@@ -343,7 +343,7 @@ partial def sampleWithValues (ctx : IRContext OpCode) (func : OperationPtr) (sca
   go {} 0
 
 /-- The template of a function, or why there is none; `none` when it has no symbolic loop. -/
-def template (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List Int) :
+def template (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List (Option Int)) :
     Except String (Option (Template × Sample)) := do
   let sampled (zero : List SymKey) : Except String IProgram := sampleWithValues ctx func scalars zero
   let ip ← sampled []

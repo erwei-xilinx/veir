@@ -95,7 +95,7 @@ inductive DecisionStatus where
 
 /-- Instantiate with run-time control flow (D59). Returns the whole program, how many rounds it
 took, and what is known of its decisions. -/
-partial def instantiateRunning (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List Int)
+partial def instantiateRunning (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List (Option Int))
     (argData : Std.HashMap Nat (Array Int)) (sampleN : Option Nat := none)
     (zeroLoops : List SymKey := []) : Except String (IProgram × Nat × DecisionStatus) := do
   let rec go (decisions : Std.HashMap ResultKey Int) (round : Nat) :

@@ -1541,7 +1541,7 @@ def branchOpNames : List String := ["scf.if", "affine.if", "scf.index_switch"]
 
 /-- Instantiate a function, with the given scalar arguments (others are unknown) and the values
 of event results decided so far (D59). -/
-def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : List Int)
+def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : List (Option Int))
     (decisions : Std.HashMap ResultKey Int := {}) (sampleN : Option Nat := none)
     (zeroLoops : List SymKey := []) : Except String IProgram := do
   let .func .func := func.getOpType! ctx
@@ -1596,7 +1596,8 @@ def instantiate (ctx : IRContext OpCode) (func : OperationPtr) (scalarArgs : Lis
         env := env.insert v (.val (.buf b))
       else
         match scalars with
-        | n :: rest => env := env.insert v (.val (intVal ctx v n)); scalars := rest
+        | some n :: rest => env := env.insert v (.val (intVal ctx v n)); scalars := rest
+        | none :: rest => env := env.insert v (.val .undef); scalars := rest
         | [] => env := env.insert v (.val .undef)
     let final ← walkOps ctx ops env []
     return (final, argBufs)

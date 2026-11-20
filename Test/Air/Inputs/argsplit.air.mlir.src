@@ -1,0 +1,119 @@
+module {
+  air.channel @c [1, 1]
+  // The segment puts and the herd gets in the same case of a switch on %sel: every class of
+  // values (case 0, case 1, the default) completes.
+  func.func @switch_both_sides(%sel: index) {
+    %c1 = arith.constant 1 : index
+    %0 = air.launch async (%lx) in (%lsx=%c1) args(%ls=%sel) : index {
+      %1 = air.segment @seg async args(%ss=%ls) : index {
+        %c1_s = arith.constant 1 : index
+        %t0, %l2 = air.execute -> (memref<32xi32, 1>) {
+          %x = memref.alloc() : memref<32xi32, 1>
+          air.execute_terminator %x : memref<32xi32, 1>
+        }
+        %p = scf.index_switch %ss -> !air.async.token
+        case 0 {
+          %q = air.channel.put async [%t0] @c[] (%l2[] [] []) : (memref<32xi32, 1>)
+          scf.yield %q : !air.async.token
+        }
+        case 1 {
+          %q = air.channel.put async [%t0] @c[] (%l2[] [] []) : (memref<32xi32, 1>)
+          scf.yield %q : !air.async.token
+        }
+        default {
+          scf.yield %t0 : !air.async.token
+        }
+        %h = air.herd @herd async tile (%tx, %ty) in (%sx=%c1_s, %sy=%c1_s) args(%hs=%ss) : index {
+          %t1, %l1 = air.execute -> (memref<32xi32, 2>) {
+            %x = memref.alloc() : memref<32xi32, 2>
+            air.execute_terminator %x : memref<32xi32, 2>
+          }
+          %c0_h = arith.constant 0 : index
+          %c2_h = arith.constant 2 : index
+          %some = arith.cmpi slt, %hs, %c2_h : index
+          %pos = arith.cmpi sge, %hs, %c0_h : index
+          %in = arith.andi %some, %pos : i1
+          %g = scf.if %in -> (!air.async.token) {
+            %r = air.channel.get async [%t1] @c[] (%l1[] [] []) : (memref<32xi32, 2>)
+            scf.yield %r : !air.async.token
+          } else {
+            scf.yield %t1 : !air.async.token
+          }
+        }
+      }
+    }
+    return
+  }
+
+  // An i1 argument: both values are tried.
+  func.func @flag(%p: i1) {
+    %c1 = arith.constant 1 : index
+    %0 = air.launch async (%lx) in (%lsx=%c1) args(%lp=%p) : i1 {
+      %1 = air.segment @seg async args(%sp=%lp) : i1 {
+        %c1_s = arith.constant 1 : index
+        %t0, %l2 = air.execute -> (memref<32xi32, 1>) {
+          %x = memref.alloc() : memref<32xi32, 1>
+          air.execute_terminator %x : memref<32xi32, 1>
+        }
+        %t1, %l3 = air.execute -> (memref<32xi32, 1>) {
+          %x = memref.alloc() : memref<32xi32, 1>
+          air.execute_terminator %x : memref<32xi32, 1>
+        }
+        %q = scf.if %sp -> (!air.async.token) {
+          %a = air.channel.put async [%t0] @c[] (%l2[] [] []) : (memref<32xi32, 1>)
+          %b = air.channel.get async [%t1] @c[] (%l3[] [] []) : (memref<32xi32, 1>)
+          %w = air.wait_all async [%a, %b]
+          scf.yield %w : !air.async.token
+        } else {
+          scf.yield %t0 : !air.async.token
+        }
+      }
+    }
+    return
+  }
+
+  // The put runs only when %n < 4, the get always: the classes with %n >= 4 deadlock.
+  func.func @one_side_guarded(%n: i32) {
+    %c1 = arith.constant 1 : index
+    %0 = air.launch async (%lx) in (%lsx=%c1) args(%ln=%n) : i32 {
+      %1 = air.segment @seg async args(%sn=%ln) : i32 {
+        %c1_s = arith.constant 1 : index
+        %c4 = arith.constant 4 : i32
+        %t0, %l2 = air.execute -> (memref<32xi32, 1>) {
+          %x = memref.alloc() : memref<32xi32, 1>
+          air.execute_terminator %x : memref<32xi32, 1>
+        }
+        %t1, %l3 = air.execute -> (memref<32xi32, 1>) {
+          %x = memref.alloc() : memref<32xi32, 1>
+          air.execute_terminator %x : memref<32xi32, 1>
+        }
+        %small = arith.cmpi slt, %sn, %c4 : i32
+        %q = scf.if %small -> (!air.async.token) {
+          %a = air.channel.put async [%t0] @c[] (%l2[] [] []) : (memref<32xi32, 1>)
+          scf.yield %a : !air.async.token
+        } else {
+          scf.yield %t0 : !air.async.token
+        }
+        %b = air.channel.get async [%t1] @c[] (%l3[] [] []) : (memref<32xi32, 1>)
+      }
+    }
+    return
+  }
+
+  // %k decides a branch and is also an offset: it is not split, and the branch is refused.
+  func.func @also_offset(%k: index) {
+    %c1 = arith.constant 1 : index
+    %c0 = arith.constant 0 : index
+    %c8 = arith.constant 8 : index
+    %m = memref.alloc() : memref<64xi32>
+    %t0 = air.wait_all async
+    %pos = arith.cmpi sgt, %k, %c0 : index
+    %q = scf.if %pos -> (!air.async.token) {
+      %a = air.channel.put async [%t0] @c[] (%m[%k] [%c8] [%c1]) : (memref<64xi32>)
+      scf.yield %a : !air.async.token
+    } else {
+      scf.yield %t0 : !air.async.token
+    }
+    return
+  }
+}

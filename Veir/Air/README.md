@@ -54,6 +54,13 @@ the values (`Running.lean`, not proven), and the whole program they end with is 
 completes and is race-free, `Chan.decision_reads` proves every execution reads the values used;
 otherwise the output says this is not established, and its verdicts are for that control flow.
 
+Control flow decided by a scalar argument not given (`--args`, or `?` in it) is checked for every
+value of the argument when only comparisons with constants read it (`ArgSplit.lean`): `races`
+splits its values into classes (each constant, the gap above each, the gap below all), checks the
+program instantiated with one value of each class, and says whether every class is clean. An
+argument that anything else reads (an offset, a loop bound) is not split, and the branch is refused
+as before.
+
 Refused, pending a decision or work:
 - an access pattern on a view at a non-zero offset (D14; at offset 0 it is accepted, D14b);
 - a slot fed both by a broadcast put and by other puts;
@@ -298,6 +305,9 @@ None uses `Lean.ofReduceBool` or an axiom of this development.
 | `Chan.raceFree_of_racesOkE` | the same scan with orders from the event graph (`finishersL`, `startersL`, `hb_finish_start`) and short label paths (`localReach`): no matrix over every label | — |
 | `Chan.scanOk_sound` | one location's scan orders every conflicting pair, by transitivity | — |
 | `Chan.outcome_uniqueH` | the end-to-end statement of the fast checks | `WF`, `LFramed` |
+| `ArgSplit.reps_cover` | for every value in an argument's range, one of the values tried compares with every constant (`<`, `=`) as it does | — |
+| `ArgSplit.eval_invariant`, `eval_invariant'` | then `arith.cmpi`'s signed and equality predicates (`IntPred.eval`) give the same result on both, the argument on either side | — |
+| `ArgSplit.combos_cover` | with several arguments, every tuple of values has its classes among the tuples tried | — |
 | `Aie.Cert.parents_sound`, `Cert.closed_complete`, `Cert.exact` (`AieCert.lean`) | an exploration's states are reachable; closed, they are all the reachable states | — |
 
 "Same traces" is the strongest notion here. It implies the same finishing orders (linear
@@ -340,6 +350,14 @@ label's accesses lie in its covering instance's, places in memory identify buffe
 conflicts on stream slots or within one event are ordered by the stream) is trusted: the template
 is generalized from a sample with each symbolic loop run three times (`LoopTemplate`), and is not
 cross-checked against a full instantiation (decided 2026-11-18).
+
+**Branches on scalar arguments (`ArgSplit.lean`).** That the values tried cover every value of
+the arguments, comparison by comparison, is proven (`reps_cover`, `eval_invariant`,
+`combos_cover`). That only those comparisons read the arguments (`ArgSplit.plan`: through the
+`args` of launch, segment and herd and sign-extending casts, into `arith.cmpi` with `eq`, `ne`,
+`slt`, `sle`, `sgt`, `sge` against a constant, or `scf.index_switch`), so that two values of one
+class instantiate the same program, is trusted, as `Instance` is. An `i1` argument is tried with
+both values.
 
 **The AIE model** (`Aie.extract`, `Model.steps`, `Model.settle`) is the definition of T1-T10;
 that it says what `AIE_SEMANTICS.md` says is not proven. Explorations are checked

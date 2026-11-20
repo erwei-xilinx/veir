@@ -2,6 +2,7 @@ import Veir.Air.Extract
 import Veir.Air.Determinism
 import Veir.Air.Pattern
 import Veir.Air.Schedule
+import Veir.Air.ArgSplit
 
 /-! Tests for the AIR event-graph model.
 
@@ -222,3 +223,33 @@ info: 'Veir.Air.races_eq_racesFast' depends on axioms: [propext, Classical.choic
 -/
 #guard_msgs in
 #print axioms races_eq_racesFast
+
+-- Branches on scalar arguments (`ArgSplit`): the values tried for `%n < 4` on an `i32`, and for
+-- an `index_switch` with cases 0 and 1.
+#guard (ArgSplit.reps [4] (-2147483648) 2147483647).eraseDups == [4, 5, 3]
+#guard (ArgSplit.reps [0, 1] (-2147483648) 2147483647).eraseDups == [0, 1, 2, -1]
+#guard ArgSplit.combos [[0, 1], [5]] == [[0, 5], [1, 5]]
+
+/--
+info: 'Veir.Air.ArgSplit.reps_cover' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms ArgSplit.reps_cover
+
+/--
+info: 'Veir.Air.ArgSplit.eval_invariant' depends on axioms: [propext, Quot.sound]
+-/
+#guard_msgs in
+#print axioms ArgSplit.eval_invariant
+
+/--
+info: 'Veir.Air.ArgSplit.eval_invariant'' depends on axioms: [propext, Quot.sound]
+-/
+#guard_msgs in
+#print axioms ArgSplit.eval_invariant'
+
+/--
+info: 'Veir.Air.ArgSplit.combos_cover' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms ArgSplit.combos_cover

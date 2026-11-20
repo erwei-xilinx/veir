@@ -8,6 +8,7 @@ import Veir.Air.AieCert
 import Veir.Air.Running
 import Veir.Air.LoopTemplate
 import Veir.Air.LoopDeadGen
+import Veir.Air.ArgSplit
 
 /-! # `air-veir`: AIR async programs in VeIR
 
@@ -64,9 +65,11 @@ Options:
   --no-por                       aie: never fall back to partial-order reduction
   --all-outcomes                 aie: print every distinct outcome (default: the first 4)
   --args=<i,j,...>               values of the function's scalar (index, integer) arguments,
-                                 in order. `run` uses 0 for missing ones; `races` treats
-                                 missing ones as unknown, so the accesses they shape cover
-                                 their whole buffer
+                                 in order; `?` leaves one unknown. `run` uses 0 for unknown
+                                 ones; `races` treats them as unknown, so the accesses they
+                                 shape cover their whole buffer, and splits those that only
+                                 branches compare with constants into classes of values,
+                                 one value checked for each
   --mem=<i>:<v,v,...>            contents of the i-th memref argument (counting memref
   --mem=<i>@<file>               arguments only), as integers; from a file, separated by
                                  commas or white space. Loop bounds and branch conditions
@@ -82,7 +85,7 @@ structure Args where
   maxStates : Nat := 200000
   por : Bool := true
   allOutcomes : Bool := false
-  scalarArgs : Option (List Int) := none
+  scalarArgs : Option (List (Option Int)) := none
   /-- `--mem` options, as given. -/
   memSpecs : List String := []
   /-- Contents of memref arguments, by position among the memref arguments (D59), read from
@@ -101,7 +104,7 @@ def parseArgs (args : List String) : Except String Args := do
   let mut maxStates := 200000
   let mut por := true
   let mut allOutcomes := false
-  let mut scalarArgs : Option (List Int) := none
+  let mut scalarArgs : Option (List (Option Int)) := none
   let mut memSpecs : List String := []
   for a in args do
     if a == "--allow-unregistered-dialect" then allowUnregistered := true
@@ -116,7 +119,9 @@ def parseArgs (args : List String) : Except String Args := do
         | throw s!"invalid {a}"
       maxStates := n
     else if a.startsWith "--args=" then
-      let some xs := ((a.drop "--args=".length).toString.splitOn ",").mapM String.toInt?
+      -- `?` leaves an argument unknown.
+      let some xs := ((a.drop "--args=".length).toString.splitOn ",").mapM fun w =>
+          if w == "?" then some none else (String.toInt? w).map some
         | throw s!"invalid {a}"
       scalarArgs := some xs
     else if a.startsWith "--mem=" then
@@ -218,7 +223,7 @@ def kindName : EventKind → String
   | .decide => "control-flow decision"
 
 /-- Instantiate a function's events (Veir.Air.Instance), with the scalar arguments given. -/
-def extractOrThrow (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List Int := []) :
+def extractOrThrow (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List (Option Int) := []) :
     IO IProgram := do
   match instantiate ctx func scalars with
   | .ok ip =>
@@ -233,7 +238,7 @@ def extractOrThrow (ctx : IRContext OpCode) (func : OperationPtr) (scalars : Lis
 
 /-- Instantiate with run-time control flow (D59, `Veir.Air.Running`), on the memref contents given;
 also returns the line saying what is known of the decisions, if there are any. -/
-def extractRunning (args : Args) (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List Int)
+def extractRunning (args : Args) (ctx : IRContext OpCode) (func : OperationPtr) (scalars : List (Option Int))
     (partialOk : Bool := false) : IO (IProgram × Option String) := do
   let name := funcName ctx func
   match instantiateRunning ctx func scalars args.argData with
@@ -275,7 +280,8 @@ def extractRunning (args : Args) (ctx : IRContext OpCode) (func : OperationPtr) 
     return (ip, line)
 
 /-- `run` takes missing scalar arguments to be 0. -/
-def runScalars (args : Args) : List Int := (args.scalarArgs.getD []) ++ List.replicate 64 0
+def runScalars (args : Args) : List (Option Int) :=
+  (args.scalarArgs.getD []).map (fun x => some (x.getD 0)) ++ List.replicate 64 (some 0)
 
 /-- A value as MLIR would write it. -/
 def showValue : RuntimeValue → String
@@ -460,7 +466,7 @@ def raceLines (ctx : IRContext OpCode) (ip : IProgram) (ca : ChanAnalysis) (cm :
 instances), race-freedom for every trip count of its symbolic loops, from a loop template
 (`LoopTemplate`, trusted) and its certificate (`LoopCert.raceFree_of_certOk`, proven). `none`
 when there is no template to try. -/
-def templateVerdict (ctx : IRContext OpCode) (func : OperationPtr) (name : String) (scalars : List Int)
+def templateVerdict (ctx : IRContext OpCode) (func : OperationPtr) (name : String) (scalars : List (Option Int))
     (why : String) : IO (Option Bool) := do
   match LoopTemplate.template ctx func scalars with
   | .ok none => return none
@@ -534,65 +540,108 @@ def cmdTemplate (args : Args) (file : String) : IO Unit := do
       if let some (v, w, σ) := LoopTemplate.firstFailure T then
         IO.println s!"  first failure: t{v}, t{w}, region {σ.map fun ((L, o) : Nat × Ordering) => (L, repr o)}"
 
+/-- `races` on one function with the scalar arguments `scalars`; `name` is how its lines start.
+Whether it is clean (no race, deadlock or error). -/
+def racesFunc (args : Args) (ctx : IRContext OpCode) (func : OperationPtr) (name : String)
+    (scalars : List (Option Int)) : IO Bool := do
+  let mut clean := true
+  let res ← (extractRunning args ctx func scalars (partialOk := true)).toBaseIO
+  let (ip, dline) ← match res with
+    | .ok r => pure r
+    | .error e =>
+      let why := toString e
+      if (why.splitOn "a loop bound is not known").length > 1 ||
+          (why.splitOn "too large to instantiate").length > 1 then
+        match ← templateVerdict ctx func name scalars why with
+        | some ok => return ok
+        | none => throw e
+      else throw e
+  let (fps0, issues) := ip.footprintsR ctx
+  let p := ip.prog
+  let eventAt (v : Nat) := s!"event {v}{pathStr ip.ctxs[v]!.path} ({kindName p.events[v]!.kind})"
+  -- Every verdict comes from the proven model (Veir.Air.ChanSem, ChanMem, ChanFast, ChanGlue).
+  let mut reports : List RaceReport := []
+  let mut chanLines : List String := []
+  let ca ← match ip.analyzeChannels with
+    | .ok ca => pure ca
+    | .error e => throw (IO.userError s!"@{name}: {e}")
+  -- D33 and D37 come from the extraction; the rest from the proven channel model.
+  chanLines := chanLines ++ ca.errors.map (s!"  error: " ++ ·)
+  match ip.putOrders ca with
+  | .error e => chanLines := chanLines ++ [s!"  error: not covered: {e}"]
+  | .ok orders =>
+    -- D52: one model per order of the puts no token orders; the program is all of them.
+    let many := orders.length > 1
+    if many then
+      chanLines := chanLines ++ [s!"  {orders.length} orders of puts that no token orders (D52); each is checked"]
+    for o in orders do
+      match ip.chanModel ca o with
+      | .error e => chanLines := chanLines ++ [s!"  error: not covered: {e}"]
+      | .ok cm =>
+        let ls := raceLines ctx ip ca cm fps0 eventAt
+        chanLines := chanLines ++ (if many then ls.map (· ++ s!" [puts in order {orderDesc o}]") else ls)
+  let raceCount := reports.length + (chanLines.filter (·.startsWith "  race")).length
+  IO.println s!"@{name}: {p.events.size} event(s), {ip.buffers.size} buffer(s), \
+    {raceCount} race(s), {issues.size} problem(s) inside single events"
+  if let some l := dline then IO.println l
+  for l in chanLines do IO.println l
+  for r in reports do
+    IO.println s!"  race: {r.kind} on {r.buffer} element {r.element} between {eventAt r.first} and \
+      {eventAt r.second}, with no token path between them"
+  for i in issues do
+    IO.println s!"  event {i.event}{pathStr ip.ctxs[i.event]!.path}: {i.msg}"
+  unless ip.branches.isEmpty do
+    let parts := ip.branches.toList.zipIdx.map fun ((n, k, rs), i) =>
+      s!"#{i} {n} took {rs} of {k} region(s)"
+    IO.println s!"  branches reached by this input (coverage, not a verdict): {"; ".intercalate parts}"
+  let chanBad := chanLines.any fun l => l.startsWith "  error" || l.startsWith "  DEADLOCK" ||
+    l.startsWith "  internal" || l.startsWith "  races not" || l.startsWith "  race"
+  if !reports.isEmpty || !issues.isEmpty || chanBad || !ip.complete then clean := false
+  return clean
+
+/-- The scalar arguments a branch reads and `--args` does not give are split into classes
+(`ArgSplit`): each class is checked with one value, and together they cover every value. -/
 def cmdRaces (args : Args) (file : String) : IO Bool := do
   let (ctx, top) ← load args file
   let mut clean := true
   for func in topLevelFuncs ctx.raw top do
     let name := funcName ctx.raw func
-    let res ← (extractRunning args ctx.raw func (args.scalarArgs.getD []) (partialOk := true)).toBaseIO
-    let (ip, dline) ← match res with
+    let known := args.scalarArgs.getD []
+    let (splits, notes) ← match ArgSplit.plan ctx.raw func known with
       | .ok r => pure r
-      | .error e =>
-        let why := toString e
-        if (why.splitOn "a loop bound is not known").length > 1 ||
-            (why.splitOn "too large to instantiate").length > 1 then
-          match ← templateVerdict ctx.raw func name (args.scalarArgs.getD []) why with
-          | some ok =>
-            if !ok then clean := false
-            continue
-          | none => throw e
-        else throw e
-    let (fps0, issues) := ip.footprintsR ctx.raw
-    let p := ip.prog
-    let eventAt (v : Nat) := s!"event {v}{pathStr ip.ctxs[v]!.path} ({kindName p.events[v]!.kind})"
-    -- Every verdict comes from the proven model (Veir.Air.ChanSem, ChanMem, ChanFast, ChanGlue).
-    let mut reports : List RaceReport := []
-    let mut chanLines : List String := []
-    let ca ← match ip.analyzeChannels with
-      | .ok ca => pure ca
       | .error e => throw (IO.userError s!"@{name}: {e}")
-    -- D33 and D37 come from the extraction; the rest from the proven channel model.
-    chanLines := chanLines ++ ca.errors.map (s!"  error: " ++ ·)
-    match ip.putOrders ca with
-    | .error e => chanLines := chanLines ++ [s!"  error: not covered: {e}"]
-    | .ok orders =>
-      -- D52: one model per order of the puts no token orders; the program is all of them.
-      let many := orders.length > 1
-      if many then
-        chanLines := chanLines ++ [s!"  {orders.length} orders of puts that no token orders (D52); each is checked"]
-      for o in orders do
-        match ip.chanModel ca o with
-        | .error e => chanLines := chanLines ++ [s!"  error: not covered: {e}"]
-        | .ok cm =>
-          let ls := raceLines ctx.raw ip ca cm fps0 eventAt
-          chanLines := chanLines ++ (if many then ls.map (· ++ s!" [puts in order {orderDesc o}]") else ls)
-    let raceCount := reports.length + (chanLines.filter (·.startsWith "  race")).length
-    IO.println s!"@{name}: {p.events.size} event(s), {ip.buffers.size} buffer(s), \
-      {raceCount} race(s), {issues.size} problem(s) inside single events"
-    if let some l := dline then IO.println l
-    for l in chanLines do IO.println l
-    for r in reports do
-      IO.println s!"  race: {r.kind} on {r.buffer} element {r.element} between {eventAt r.first} and \
-        {eventAt r.second}, with no token path between them"
-    for i in issues do
-      IO.println s!"  event {i.event}{pathStr ip.ctxs[i.event]!.path}: {i.msg}"
-    unless ip.branches.isEmpty do
-      let parts := ip.branches.toList.zipIdx.map fun ((n, k, rs), i) =>
-        s!"#{i} {n} took {rs} of {k} region(s)"
-      IO.println s!"  branches reached by this input (coverage, not a verdict): {"; ".intercalate parts}"
-    let chanBad := chanLines.any fun l => l.startsWith "  error" || l.startsWith "  DEADLOCK" ||
-      l.startsWith "  internal" || l.startsWith "  races not" || l.startsWith "  race"
-    if !reports.isEmpty || !issues.isEmpty || chanBad || !ip.complete then clean := false
+    let tuples := ArgSplit.combos (splits.map (·.values))
+    if splits.isEmpty || tuples.length > ArgSplit.maxTuples then
+      if !splits.isEmpty then
+        IO.println s!"@{name}: {tuples.length} classes of scalar argument values, more than \
+          {ArgSplit.maxTuples}: not split"
+      let ok ← try racesFunc args ctx.raw func name known
+        catch e =>
+          if splits.isEmpty && !notes.isEmpty &&
+              ((toString e).splitOn "the branch condition is not known").length > 1 then
+            throw (IO.userError s!"{e}; scalar arguments not split (ArgSplit): {"; ".intercalate notes}")
+          else throw e
+      clean := clean && ok
+      continue
+    let argNames := ", ".intercalate (splits.map (s!"%arg{·.arg}"))
+    IO.println s!"@{name}: branches read the scalar argument(s) {argNames}, not given: {tuples.length} \
+      class(es) of values, each checked with one value; together they cover every value \
+      (proven, ArgSplit.reps_cover, ArgSplit.eval_invariant, ArgSplit.combos_cover; that only \
+      comparisons with the constants {splits.map (·.consts.eraseDups.mergeSort)} read them is \
+      extracted, ArgSplit.plan)"
+    for n in notes do IO.println s!"  not split: {n}"
+    let mut bad := 0
+    for vs in tuples do
+      let tag := ", ".intercalate ((splits.zip vs).map fun (s, v) => s!"%arg{s.arg} = {v}")
+      let ok ← try racesFunc args ctx.raw func s!"{name} [{tag}]" (ArgSplit.fill known splits vs)
+        catch e => do IO.println s!"{e} [{tag}]"; pure false
+      if !ok then bad := bad + 1
+    if bad == 0 then
+      IO.println s!"@{name}: every class is clean: for every value of {argNames}"
+    else
+      IO.println s!"@{name}: {bad} of {tuples.length} class(es) not clean (above): not for every \
+        value of {argNames}"
+      clean := false
   return clean
 
 def cmdReduce (args : Args) (file : String) : IO Unit := do

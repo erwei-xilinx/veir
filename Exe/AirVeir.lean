@@ -617,11 +617,17 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
     let (splits, notes) ← match ArgSplit.plan ctx.raw func known with
       | .ok r => pure r
       | .error e => throw (IO.userError s!"@{name}: {e}")
-    let tuples := ArgSplit.combos (splits.map (·.values))
-    if splits.isEmpty || tuples.length > ArgSplit.maxTuples then
-      if !splits.isEmpty then
-        IO.println s!"@{name}: {tuples.length} classes of scalar argument values, more than \
-          {ArgSplit.maxTuples}: not split"
+    let sized ← match ArgSplit.sizeArgs ctx.raw func known splits with
+      | .ok r => pure r
+      | .error e => throw (IO.userError s!"@{name}: {e}")
+    let sampled : List ArgSplit.Split := sized.map fun (pos, arg) =>
+      { pos, arg, consts := [], values := ArgSplit.sizeSamples }
+    let all := splits ++ sampled
+    let tuples := ArgSplit.combos (all.map (·.values))
+    if all.isEmpty || tuples.length > ArgSplit.maxTuples then
+      if !all.isEmpty then
+        IO.println s!"@{name}: {tuples.length} combinations of scalar argument values, more than \
+          {ArgSplit.maxTuples}: not tried"
       let ok ← try racesFunc args ctx.raw func name known
         catch e =>
           if splits.isEmpty && !notes.isEmpty &&
@@ -630,24 +636,34 @@ def cmdRaces (args : Args) (file : String) : IO Bool := do
           else throw e
       clean := clean && ok
       continue
-    let argNames := ", ".intercalate (splits.map (s!"%arg{·.arg}"))
-    IO.println s!"@{name}: branches read the scalar argument(s) {argNames}, not given: {tuples.length} \
-      class(es) of values, each checked with one value; together they cover every value \
-      (proven, ArgSplit.reps_cover, ArgSplit.eval_invariant, ArgSplit.combos_cover; that only \
-      comparisons with the constants {splits.map (·.consts.eraseDups.mergeSort)} read them is \
-      extracted, ArgSplit.plan)"
+    let names (xs : List ArgSplit.Split) := ", ".intercalate (xs.map (s!"%arg{·.arg}"))
+    if !splits.isEmpty then
+      IO.println s!"@{name}: branches read the scalar argument(s) {names splits}, not given: \
+        {(ArgSplit.combos (splits.map (·.values))).length} class(es) of values, each checked with \
+        one value; together they cover every value (proven, ArgSplit.reps_cover, \
+        ArgSplit.eval_invariant, ArgSplit.combos_cover; that only comparisons with the constants \
+        {splits.map (·.consts.eraseDups.mergeSort)} read them is extracted, ArgSplit.plan)"
+    if !sampled.isEmpty then
+      IO.println s!"@{name}: transfer sizes depend on the scalar argument(s) {names sampled}, not \
+        given: each is tried with {ArgSplit.sizeSamples} (sizes are positive), and each verdict \
+        below holds for its values only"
     for n in notes do IO.println s!"  not split: {n}"
     let mut bad := 0
     for vs in tuples do
-      let tag := ", ".intercalate ((splits.zip vs).map fun (s, v) => s!"%arg{s.arg} = {v}")
-      let ok ← try racesFunc args ctx.raw func s!"{name} [{tag}]" (ArgSplit.fill known splits vs)
+      let tag := ", ".intercalate ((all.zip vs).map fun (s, v) => s!"%arg{s.arg} = {v}")
+      let ok ← try racesFunc args ctx.raw func s!"{name} [{tag}]" (ArgSplit.fill known all vs)
         catch e => do IO.println s!"{e} [{tag}]"; pure false
       if !ok then bad := bad + 1
-    if bad == 0 then
-      IO.println s!"@{name}: every class is clean: for every value of {argNames}"
+    if bad == 0 && sampled.isEmpty then
+      IO.println s!"@{name}: every class is clean: for every value of {names splits}"
+    else if bad == 0 then
+      let split := if splits.isEmpty then "" else s!"for every value of {names splits}, and "
+      IO.println s!"@{name}: every case tried is clean: {split}for the values of {names sampled} \
+        tried; other values are not checked"
+      clean := false
     else
-      IO.println s!"@{name}: {bad} of {tuples.length} class(es) not clean (above): not for every \
-        value of {argNames}"
+      IO.println s!"@{name}: {bad} of {tuples.length} case(s) not clean (above): not for every \
+        value of {names all}"
       clean := false
   return clean
 

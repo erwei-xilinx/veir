@@ -62,7 +62,10 @@ argument that anything else reads (an offset, a loop bound) is not split, and th
 as before. An offset of a channel transfer that a scalar argument not given decides is any value:
 the transfer is taken to touch its whole buffer (D23), so the verdicts hold for every value, and
 `races` notes that a race reported on such an access may occur for none. A size the argument
-decides is still refused (the number of elements decides how the streams balance).
+decides has no finite cover (the number of elements decides how the streams balance): it is tried
+with the values `ArgSplit.sizeSamples` (1, 2, 3; sizes are positive, decided 2026-11-20), each
+verdict proven for its value; a value not clean refutes "for every value", and otherwise only the
+values tried are checked.
 
 Refused, pending a decision or work:
 - an access pattern on a view at a non-zero offset (D14; at offset 0 it is accepted, D14b);

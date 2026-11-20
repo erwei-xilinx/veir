@@ -23,7 +23,7 @@
 // CHECK-NEXT: DEADLOCK
 // CHECK: @one_side_guarded [%arg0 = 3]:
 // CHECK-NEXT: no deadlock
-// CHECK: @one_side_guarded: 2 of 3 class(es) not clean (above): not for every value of %arg0
+// CHECK: @one_side_guarded: 2 of 3 case(s) not clean (above): not for every value of %arg0
 //
 // An offset from an argument not given is any value: the transfer touches its whole buffer (D23).
 // CHECK: @offset_arg: 4 event(s), 2 buffer(s), 0 race(s)
@@ -33,6 +33,15 @@
 // CHECK-NEXT: note: transfer offsets from scalar arguments not given
 // CHECK-NEXT: no deadlock
 // CHECK-NEXT: race: WAW on host alloc element 0
+//
+// A size from an argument not given is tried with sample values (sizes are positive).
+// CHECK: @size_arg: transfer sizes depend on the scalar argument(s) %arg0, not given: each is tried with [1, 2, 3]
+// CHECK: @size_arg [%arg0 = 1]:
+// CHECK-NEXT: no deadlock
+// CHECK: @size_arg [%arg0 = 3]:
+// CHECK-NEXT: no deadlock
+// CHECK-NEXT: note: 16 element(s) of sync puts are never got (buffered, D30)
+// CHECK: @size_arg: every case tried is clean: for the values of %arg0 tried; other values are not checked
 // ERR: error: @also_offset: 'scf.if': the branch condition is not known before running
 // ERR-SAME: scalar arguments not split (ArgSplit): %arg0: 'air.channel.put' reads it
 //

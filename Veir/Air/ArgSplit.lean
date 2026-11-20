@@ -338,6 +338,47 @@ def plan (ctx : IRContext OpCode) (func : OperationPtr) (known : List (Option In
       splits := splits ++ [{ pos := p, arg := i, consts, values := (reps consts lo hi).eraseDups }]
   return (splits, notes)
 
+/-! ### Trusted: transfer sizes from arguments, tried with sample values
+
+A size decides how many elements a transfer moves, and so how the streams balance: there is no
+finite cover of its values here. The values below are tried, each verdict proven for its value;
+a value not clean refutes "for every value", and otherwise only the values tried are checked. Sizes
+are positive (decided 2026-11-20). -/
+
+/-- The values tried for an argument that decides a transfer's size. -/
+def sizeSamples : List Int := [1, 2, 3]
+
+/-- The scalar arguments not given and not split that carry, unchanged, into the sizes of an
+`air.channel.put` or `air.channel.get`: its position among the scalar arguments, and among the
+function's arguments. -/
+def sizeArgs (ctx : IRContext OpCode) (func : OperationPtr) (known : List (Option Int))
+    (splits : List Split) : Except String (List (Nat × Nat)) := do
+  let block ← singleBlock ctx func "func.func"
+  let ops := nestedOps ctx func
+  -- The size operands of every channel op (operand group 4: dependencies, indices, memref,
+  -- offsets, sizes, strides, dest).
+  let mut sizeOps : Std.HashSet ValuePtr := {}
+  for op in ops do
+    let name := opName ctx op
+    if name != "air.channel.put" && name != "air.channel.get" then continue
+    let some seg := denseInts (findProp (unregProps ctx op) "operandSegmentSizes") | continue
+    if seg.size < 5 then continue
+    let start := (seg.extract 0 4).foldl (fun a n => a + n.toNat) 0
+    let operands := op.getOperands! ctx
+    for j in [start:start + seg[4]!.toNat] do
+      if let some v := operands[j]? then sizeOps := sizeOps.insert v
+  let mut out := []
+  let mut pos := 0
+  for v in block.getArguments! ctx, i in [0:block.getNumArguments! ctx] do
+    let t := v.getType! ctx
+    if Air.isAsyncToken t.val || isMemRefType t then continue
+    let p := pos
+    pos := pos + 1
+    if (known[p]?.join).isSome || splits.any (·.pos == p) then continue
+    let .ok carry := carriers ctx ops v | continue
+    if carry.toList.any sizeOps.contains then out := out ++ [(p, i)]
+  return out
+
 /-- `known` with the split arguments set to `vs`. -/
 def fill (known : List (Option Int)) (splits : List Split) (vs : List Int) : List (Option Int) :=
   let n := splits.foldl (fun m s => max m (s.pos + 1)) known.length

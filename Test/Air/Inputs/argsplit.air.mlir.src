@@ -132,6 +132,19 @@ module {
     air.wait_all [%p, %g, %r]
     return
   }
+  // A size from %n, not given: no finite cover; tried with 1, 2 and 3. The sync put's extra
+  // elements stay buffered (D30), so every value tried completes.
+  func.func @size_arg(%n: index) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c8 = arith.constant 8 : index
+    %m = memref.alloc() : memref<4x8xi32>
+    %b = memref.alloc() : memref<8xi32>
+    air.channel.put @c[] (%m[%c0, %c0] [%n, %c8] [%c8, %c1]) : (memref<4x8xi32>)
+    air.channel.get @c[] (%b[] [] []) : (memref<8xi32>)
+    return
+  }
+
   // %k decides a branch and is also an offset: it is not split, and the branch is refused.
   func.func @also_offset(%k: index) {
     %c1 = arith.constant 1 : index

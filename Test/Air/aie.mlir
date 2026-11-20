@@ -12,6 +12,7 @@
 // PASS-NEXT: no deadlock
 // PASS-NEXT: 1 distinct outcome(s) of host memory
 // PASS-NEXT: %arg0 = [0..63], %arg1 = [0..63]
+// PASS-NEXT: no race
 
 // DEAD: DEADLOCK: the runtime sequence cannot finish
 // DEAD: 0 distinct outcome(s)
@@ -19,6 +20,7 @@
 // RACE: no deadlock
 // RACE-NEXT: 2 distinct outcome(s) of host memory
 // RACE: %arg1 = [undef x 64]
+// RACE: RACE: in a reachable state (AieCert.Cert.parents_sound), 'tile (0, 2) MM2S 0 -> shim (0, 0) S2MM 0: 64 element(s)' and 'shim (0, 0) MM2S 0 -> tile (0, 2) S2MM 0: 64 element(s)' can each happen next and both touch buf0, one writing
 
 // Through an L2 memtile: correct.
 // RUN: air-veir aie --allow-unregistered-dialect %S/Inputs/aie_l2.mlir 2>/dev/null | filecheck %s --check-prefix=L2

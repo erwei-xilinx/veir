@@ -32,7 +32,9 @@ They are the definitions.
 
 /-- The successors of a state: none once it is final. -/
 def Model.post (m : Model) (s : St) : Array St :=
-  if s.fault.isSome || s.rtPc ≥ m.runtime.size then #[]
+  -- With a runtime sequence, nothing is explored past its end; without one (a device on its
+  -- own), everything that can move does.
+  if s.fault.isSome || (!m.runtime.isEmpty && s.rtPc ≥ m.runtime.size) then #[]
   else (m.steps s).map fun (_, s') => m.settle s'
 
 def Model.start (m : Model) : St := m.settle m.init

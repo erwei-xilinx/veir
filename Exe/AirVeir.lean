@@ -854,6 +854,18 @@ def cmdAie (args : Args) (file : String) : IO Bool := do
         let parts := (m.hostArgs.toList.zip o.toList).map fun (b, vs) =>
           s!"{m.buffers[b]!.1} = [{runs vs.toList}]"
         IO.println s!"    {", ".intercalate parts}"
+      -- Races: in a reachable state, two agents' next steps touch one buffer, one writing.
+      match (List.range c.states.size).findSome? fun i => (m.raceAt c.states[i]!).map (i, ·) with
+      | some (i, (l1, l2, b)) =>
+        ok := false
+        let tr := c.traceTo m i
+        IO.println s!"  RACE: in a reachable state (AieCert.Cert.parents_sound), '{m.showLabel l1}' and \
+          '{m.showLabel l2}' can each happen next and both touch {m.buffers[b]!.1}, one writing; a run \
+          reaching it ({tr.size} step(s)):"
+        for l in tr.toList.drop (tr.size - min tr.size 12) do IO.println s!"    {l}"
+      | none =>
+        IO.println (if closed then "  no race: no reachable state has two agents' next steps touching one buffer, one writing"
+          else "  no race in the states explored")
       if outcomes.size > 1 then ok := false
   return ok
 

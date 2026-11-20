@@ -1091,7 +1091,9 @@ instance : ToString LocationAttr where
 instance : ToString DenseArrayAttr where
   toString attr :=
     let values := if attr.values.isEmpty then ""
-      else ": " ++ String.intercalate ", " (attr.values.toList.map ToString.toString)
+      else ": " ++ String.intercalate ", " (attr.values.toList.map fun v =>
+        -- MLIR prints the elements of an `i1` array as `true` and `false`.
+        if attr.elementType.bitwidth == 1 then (if v != 0 then "true" else "false") else toString v)
     s!"array<{attr.elementType}{values}>"
 
 instance : ToString DenseElementsAttr where

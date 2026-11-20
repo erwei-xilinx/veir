@@ -415,7 +415,8 @@ def parseOptionalUnitAttr : AttrParserM (Option UnitAttr) := do
 
 /--
   Parse a dense array attribute, if present.
-  Its syntax is `array<iN>` or `array<iN: v1, v2, ...>`.
+  Its syntax is `array<iN>` or `array<iN: v1, v2, ...>`; the elements of an `i1` array may also be
+  `true` and `false`, as MLIR prints them.
 -/
 def parseOptionalDenseArrayAttr : AttrParserM (Option DenseArrayAttr) := do
   if !(← parseOptionalKeyword "array".toByteArray) then
@@ -424,7 +425,12 @@ def parseOptionalDenseArrayAttr : AttrParserM (Option DenseArrayAttr) := do
   let elementType ← parseIntegerType "integer type expected in dense array attribute"
   let mut values : Array Int := #[]
   if ← parseOptionalPunctuation ":" then
-    values ← parseList (parseInteger false true)
+    let element : AttrParserM Int := do
+      if elementType.bitwidth == 1 then
+        if ← parseOptionalKeyword "true".toByteArray then return 1
+        if ← parseOptionalKeyword "false".toByteArray then return 0
+      parseInteger false true
+    values ← parseList element
   parsePunctuation ">"
   return some (DenseArrayAttr.mk elementType values)
 

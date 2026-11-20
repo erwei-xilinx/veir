@@ -249,6 +249,13 @@ def pathStr : List Int → String
   | [] => ""
   | p => s!" (iteration {p})"
 
+def newBufferS (name : String) (ts : String) (dims : List Nat := []) (leadingBare := false) :
+    IM Nat := do
+  let ty ← liftE (parseMemRefType ts dims leadingBare)
+  let buf : Buffer := { name, type := ty }
+  modifyGet fun st =>
+    (st.buffers.size, { st with buffers := st.buffers.push buf, bufFrames := st.bufFrames.push st.frames })
+
 def newBufferI (name : String) (t : TypeAttr) (dims : List Nat := []) (leadingBare := false) :
     IM Nat := do
   let ty ← liftE (parseMemRefType (typeString t) dims leadingBare)
@@ -597,6 +604,13 @@ def captureBody (ctx : IRContext OpCode) (what : String) (ops : Array OperationP
         match v with
         | .opResult ⟨d, _⟩ => throw s!"{what}: '{iname}' reads a value of '{opName ctx d}', which is not supported"
         | .blockArgument _ => throw s!"{what}: '{iname}' reads a block argument the host does not know"
+    if iname == "bufferization.to_tensor" then
+      -- D22c: the tensor is a snapshot of the buffer, a buffer of its own.
+      let ts := typeString ((ValuePtr.opResult ⟨inner, 0⟩).getType! ctx)
+      if ts.startsWith "tensor<" then
+        let nb ← newBufferS s!"tensor in event {id}{pathStr path}" ("memref<" ++ (ts.drop 7).toString)
+        allocBufs := allocBufs.insert inner nb
+        localBuf := localBuf.insert (.opResult ⟨inner, 0⟩) nb
     if iname == "memref.alloc" then
       let ty := (ValuePtr.opResult ⟨inner, 0⟩).getType! ctx
       let dims ← allocDims ctx inner (fun v => match captured[v]? <|> env[v]? with
@@ -1851,6 +1865,9 @@ def IProgram.finishDma (ip : IProgram) (v : Nat) (s : MState) : MState := Id.run
       mem := mem.insert (db, p) x
     return { s with mem }
 
+/-- A memref, or a tensor (which `bufferization.to_tensor` makes a buffer of its own, D22c). -/
+def isBufferLike (t : TypeAttr) : Bool := isMemRefType t || (typeString t).startsWith "tensor<"
+
 /-- D22b: the element positions the memref values of a body name, from what is known before
 running: a value from outside is its buffer's whole (in order) or a view's known positions
 (`IProgram.viewPos`); inside, an allocation's buffer whole, and a view as `viewPositions` computes
@@ -1885,7 +1902,7 @@ def IProgram.bodyPositions (ctx : IRContext OpCode) (ip : IProgram) (v : Nat) :
           if let .ok results := evalArith ctx inner rs.toArray then
             for r in results, i in [0:results.size] do
               if let some n := (Val.rv r).toInt? then ints := ints.insert (.opResult ⟨inner, i⟩) n
-    else if iname == "memref.alloc" then
+    else if iname == "memref.alloc" || iname == "bufferization.to_tensor" then
       if let some b := c.allocBufs[inner]? then
         if !ip.buffers[b]!.type.leadingDyn then pos := pos.insert (.opResult ⟨inner, 0⟩) (wholeOf b)
     else if viewOps.contains iname then
@@ -1897,13 +1914,26 @@ def IProgram.bodyPositions (ctx : IRContext OpCode) (ip : IProgram) (v : Nat) :
   -- Values from outside, as the body's ops use them.
   for inner in e.body do
     for o in inner.getOperands! ctx do
-      if !pos.contains o && isMemRefType (o.getType! ctx) then
+      if !pos.contains o && isBufferLike (o.getType! ctx) then
         if let some p := outside o then pos := pos.insert o p
   return pos
 
 /-- D22b: an op whose effects stay within its memref operands' elements: a linalg op, or
 `memref.copy` (upstream semantics). -/
 def elementwiseOp (name : String) : Bool := name.startsWith "linalg." || name == "memref.copy"
+
+/-- The source and target of an op that copies element by element, in order (upstream
+semantics): `memref.copy`; `bufferization.to_tensor`, a snapshot of its buffer (D22c);
+`bufferization.materialize_in_destination`, the tensor written into its destination. -/
+def copyLike (ctx : IRContext OpCode) (inner : OperationPtr) : Option (ValuePtr × ValuePtr) :=
+  let name := opName ctx inner
+  let operands := inner.getOperands! ctx
+  if name == "memref.copy" && operands.size == 2 then some (operands[0]!, operands[1]!)
+  else if name == "bufferization.to_tensor" && operands.size == 1 then
+    some (operands[0]!, .opResult ⟨inner, 0⟩)
+  else if name == "bufferization.materialize_in_destination" && operands.size == 2 &&
+      inner.getNumResults! ctx == 0 then some (operands[0]!, operands[1]!)
+  else none
 
 /-- The memref operands an uninterpreted op writes: a linalg op's `outs`, `memref.copy`'s target. -/
 def writtenOperands (ctx : IRContext OpCode) (inner : OperationPtr) : Array ValuePtr :=
@@ -2032,6 +2062,19 @@ def IProgram.finishExecute (ctx : IRContext OpCode) (ip : IProgram) (v : Nat) (s
         | .ok _ => return fail "affine.apply: the map does not have one result"
         | .error m => return fail s!"affine.apply: {m}"
       | none => vals := vals.insert res .undef
+    else if (copyLike ctx inner).any fun (sv, dv) => bpos.contains sv && bpos.contains dv then
+      -- D22a, D22c: element by element, in order, between positions the footprint has.
+      let some (sv, dv) := copyLike ctx inner | return fail s!"'{iname}': no source and target"
+      let (a, pa) := bpos[sv]!
+      let (b, pb) := bpos[dv]!
+      if freed.contains a || freed.contains b then
+        return fail s!"'{iname}' used a buffer after it was deallocated"
+      if pa.size != pb.size then return fail s!"'{iname}' between buffers of different sizes"
+      let src := pa.map fun q => mem[(a, q)]?.getD .undef
+      for q in pb, x in src do
+        mem := mem.insert (b, q) x
+      if iname == "bufferization.to_tensor" then
+        vals := vals.insert (.opResult ⟨inner, 0⟩) (.buf b)
     else if elementwiseOp iname &&
         (operands.filter (fun o => isMemRefType (o.getType! ctx))).all bpos.contains then
       -- D22b: a linalg op or memref.copy whose operands' elements are all known reads and writes
@@ -2271,6 +2314,13 @@ def IProgram.footprintsR (ctx : IRContext OpCode) (ip : IProgram) :
               return q
             acc := acc ++ [⟨b, if isLoad then .read else .write, match q with
               | some q => [(q, q + 1)] | none => whole b⟩]
+        else if (copyLike ctx inner).any fun (sv, dv) => bpos.contains sv && bpos.contains dv then
+          if let some (sv, dv) := copyLike ctx inner then
+            let (a, pa) := bpos[sv]!
+            let (b, pb) := bpos[dv]!
+            acc := acc ++ [⟨a, .read, runsOf pa.toList⟩, ⟨b, .write, runsOf pb.toList⟩]
+          if iname == "bufferization.to_tensor" then
+            if let some b := c.allocBufs[inner]? then localBuf := localBuf.insert (.opResult ⟨inner, 0⟩) b
         else if elementwiseOp iname &&
             (operands.filter (fun o => isMemRefType (o.getType! ctx))).all bpos.contains then
           -- D22b: the elements of its operands, read; those of what it writes, written.

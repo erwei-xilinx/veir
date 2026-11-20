@@ -1,0 +1,25 @@
+module {
+  // D22c: bufferization.to_tensor is a snapshot of its buffer; materialize_in_destination writes it
+  // into the destination. The store to %src after the snapshot does not reach %dst: %dst holds
+  // %src's initial contents (0 to 3), not the stored 7.
+  func.func @snapshot(%src: memref<4xi32>, %dst: memref<4xi32>) {
+    %c0 = arith.constant 0 : index
+    %c7 = arith.constant 7 : i32
+    %buf = memref.alloc() : memref<4xi32>
+    memref.copy %src, %buf : memref<4xi32> to memref<4xi32>
+    %t = bufferization.to_tensor %buf restrict writable : memref<4xi32> to tensor<4xi32>
+    memref.store %c7, %src[%c0] : memref<4xi32>
+    bufferization.materialize_in_destination %t in writable %dst : (tensor<4xi32>, memref<4xi32>) -> ()
+    return
+  }
+
+  // The same, materialized into a view: elements 2 to 5 of an 8-element buffer.
+  func.func @into_view(%src: memref<4xi32>, %dst: memref<8xi32>) {
+    %buf = memref.alloc() : memref<4xi32>
+    memref.copy %src, %buf : memref<4xi32> to memref<4xi32>
+    %t = bufferization.to_tensor %buf restrict writable : memref<4xi32> to tensor<4xi32>
+    %v = memref.subview %dst[2] [4] [1] : memref<8xi32> to memref<4xi32, strided<[1], offset: 2>>
+    bufferization.materialize_in_destination %t in writable %v : (tensor<4xi32>, memref<4xi32, strided<[1], offset: 2>>) -> ()
+    return
+  }
+}

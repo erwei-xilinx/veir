@@ -1,0 +1,13 @@
+module {
+  // A reinterpret_cast reaching past its 16-element buffer: rows 2 and 3 of a 4x4 view at offset 8.
+  func.func @cast_past_end() {
+    %z = arith.constant 0 : i32
+    %m = memref.alloc() : memref<16xi32>
+    %t = air.execute {
+      %v = memref.reinterpret_cast %m to offset: [8], sizes: [4, 4], strides: [4, 1] : memref<16xi32> to memref<4x4xi32, strided<[4, 1], offset: 8>>
+      linalg.fill ins(%z : i32) outs(%v : memref<4x4xi32, strided<[4, 1], offset: 8>>)
+    }
+    air.wait_all [%t]
+    return
+  }
+}

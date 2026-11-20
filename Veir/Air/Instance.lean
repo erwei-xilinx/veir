@@ -435,6 +435,53 @@ def affineText (ctx : IRContext OpCode) (op : OperationPtr) (prop : String) : Op
   | some (.unregisteredAttr u) => some u.value
   | _ => none
 
+/-- The offsets, sizes and strides of a `memref.subview` or `memref.reinterpret_cast`, when all
+are known. -/
+def viewPattern (ctx : IRContext OpCode) (op : OperationPtr) (intOf : ValuePtr → Option Int) :
+    Option (List Int × List Int × List Int) := do
+  let props := unregProps ctx op
+  let seg ← denseInts (findProp props "operandSegmentSizes")
+  let operands := op.getOperands! ctx
+  let dyn (k : Nat) : Array ValuePtr :=
+    let start := (seg.toList.take k).foldl (fun a (n : Int) => a + n.toNat) 0
+    operands.extract start (start + (seg[k]?.getD 0).toNat)
+  let resolve (stat : Array Int) (d : Array ValuePtr) : Option (List Int) := do
+    let xs ← (decodeList stat d).toOption
+    let ys : Array Int ← xs.mapM fun (x : Int ⊕ ValuePtr) => match x with | .inl n => some n | .inr v => intOf v
+    pure ys.toList
+  let offs ← resolve (← denseInts (findProp props "static_offsets")) (dyn 1)
+  let sizes ← resolve (← denseInts (findProp props "static_sizes")) (dyn 2)
+  let strides ← resolve (← denseInts (findProp props "static_strides")) (dyn 3)
+  return (offs, sizes, strides)
+
+/-- Every multi-index of `sizes`, row-major. -/
+def multiIndices (sizes : List Int) : List (List Int) :=
+  sizes.foldr (init := [[]]) fun n acc => (List.range n.toNat).flatMap fun (i : Nat) => acc.map ((i : Int) :: ·)
+
+/-- A `memref.subview` or `memref.reinterpret_cast` whose operands are known and that reaches
+outside its source: the first position (`reinterpret_cast`, in the buffer) or source index
+(`subview`, per dimension) outside, and the bound it exceeds. Out of bounds is undefined upstream:
+refused, like a transfer out of bounds. -/
+def viewOutOfBounds (ctx : IRContext OpCode) (op : OperationPtr) (src : Nat × Array Int)
+    (srcShape : List Nat) (intOf : ValuePtr → Option Int) (bare : Bool := false) :
+    Option (List Int × Nat) := do
+  let name := opName ctx op
+  let (offs, sizes, strides) ← viewPattern ctx op intOf
+  let dot (xs ys : List Int) : Int := (xs.zip ys).foldl (fun a (x, y) => a + x * y) 0
+  if name == "memref.reinterpret_cast" then
+    let P := src.2
+    if P != (List.range P.size).toArray.map Int.ofNat then none
+    let off ← offs.head?
+    let q ← (multiIndices sizes).find? fun i =>
+      off + dot i strides < 0 || (!bare && off + dot i strides ≥ (P.size : Int))
+    return ([off + dot q strides], P.size)
+  if name != "memref.subview" || srcShape.length != offs.length then none
+  let shape : List Int := srcShape.map Int.ofNat
+  let i ← (multiIndices sizes).find? fun i =>
+    ((i.zip (offs.zip strides)).zip shape).any fun ((x, (o, st)), n) => o + x * st < 0 || o + x * st ≥ n
+  let srcIdx := (i.zip (offs.zip strides)).map fun (x, (o, st)) => o + x * st
+  return (srcIdx, srcShape.foldl (· * ·) 1)
+
 /-- Where each element of a view lies in its buffer, in the view's row-major order, from where the
 source's elements lie (`src`) and the source's shape. `memref.subview` as upstream defines it (the
 same as `Pattern.subviewFrom`); reshapes and casts keep the order; `memref.reinterpret_cast`
@@ -475,22 +522,8 @@ def viewPositions (ctx : IRContext OpCode) (op : OperationPtr) (src : Nat × Arr
       P[lin.toNat]?
     return (b, ps.toArray)
   if name != "memref.subview" && name != "memref.reinterpret_cast" then none
-  let props := unregProps ctx op
-  let seg ← denseInts (findProp props "operandSegmentSizes")
-  let operands := op.getOperands! ctx
-  let dyn (k : Nat) : Array ValuePtr :=
-    let start := (seg.toList.take k).foldl (fun a (n : Int) => a + n.toNat) 0
-    operands.extract start (start + (seg[k]?.getD 0).toNat)
-  let resolve (stat : Array Int) (d : Array ValuePtr) : Option (List Int) := do
-    let xs ← (decodeList stat d).toOption
-    let ys : Array Int ← xs.mapM fun (x : Int ⊕ ValuePtr) => match x with | .inl n => some n | .inr v => intOf v
-    pure ys.toList
-  let offs ← resolve (← denseInts (findProp props "static_offsets")) (dyn 1)
-  let sizes ← resolve (← denseInts (findProp props "static_sizes")) (dyn 2)
-  let strides ← resolve (← denseInts (findProp props "static_strides")) (dyn 3)
-  -- Every multi-index of `sizes`, row-major.
-  let idxs : List (List Int) := sizes.foldr (init := [[]]) fun n acc =>
-    (List.range n.toNat).flatMap fun (i : Nat) => acc.map ((i : Int) :: ·)
+  let (offs, sizes, strides) ← viewPattern ctx op intOf
+  let idxs := multiIndices sizes
   let (b, P) := src
   let dot (xs ys : List Int) : Int := (xs.zip ys).foldl (fun a (x, y) => a + x * y) 0
   if name == "memref.reinterpret_cast" then
@@ -507,6 +540,8 @@ def viewPositions (ctx : IRContext OpCode) (op : OperationPtr) (src : Nat × Arr
   let rs : List Int := (List.range shape.length).map fun d => ((shape.drop (d + 1)).foldl (· * ·) 1)
   let ps ← idxs.mapM fun i => do
     let srcIdx : List Int := (i.zip (offs.zip strides)).map fun (x, (o, st)) => o + x * st
+    -- Each index within its dimension, not wrapping into the next row.
+    if srcIdx.length != shape.length || (srcIdx.zip shape).any (fun (x, n) => x < 0 || x ≥ n) then none
     let lin := dot srcIdx rs
     if lin < 0 then none
     P[lin.toNat]?
@@ -598,6 +633,8 @@ def captureBody (ctx : IRContext OpCode) (what : String) (ops : Array OperationP
         let bare := st.buffers[sp.1]!.type.unranked
         if let some vp := viewPositions ctx inner sp srcShape intOf bare then
           localViewPos := localViewPos.insert (.opResult ⟨inner, 0⟩) vp
+        else if let some (idx, n) := viewOutOfBounds ctx inner sp srcShape intOf bare then
+          throw s!"{what}: '{iname}' reaches {idx} outside its source ({n} elements)"
     else if iname == "memref.load" || iname == "memref.store" ||
         iname == "affine.load" || iname == "affine.store" then
       let m := (inner.getOperands! ctx)[if iname == "memref.load" || iname == "affine.load" then 0 else 1]!

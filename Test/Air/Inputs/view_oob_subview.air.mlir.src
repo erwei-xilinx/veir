@@ -1,0 +1,16 @@
+module {
+  // A subview of columns 12 to 19 of an 8x16 buffer (the column offset is an operand, so the
+  // verifier does not see it): column 16 is outside its row, even though the linear position, 16,
+  // is inside the buffer.
+  func.func @subview_past_row() {
+    %z = arith.constant 0 : i32
+    %c12 = arith.constant 12 : index
+    %m = memref.alloc() : memref<8x16xi32>
+    %t = air.execute {
+      %v = memref.subview %m[0, %c12] [1, 8] [1, 1] : memref<8x16xi32> to memref<1x8xi32, strided<[16, 1], offset: ?>>
+      linalg.fill ins(%z : i32) outs(%v : memref<1x8xi32, strided<[16, 1], offset: ?>>)
+    }
+    air.wait_all [%t]
+    return
+  }
+}

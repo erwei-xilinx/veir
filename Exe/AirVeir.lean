@@ -567,6 +567,13 @@ def racesFunc (args : Args) (ctx : IRContext OpCode) (func : OperationPtr) (name
     | .error e => throw (IO.userError s!"@{name}: {e}")
   -- D33 and D37 come from the extraction; the rest from the proven channel model.
   chanLines := chanLines ++ ca.errors.map (s!"  error: " ++ ·)
+  -- Offsets from scalar arguments not given: the whole buffer (D23).
+  let unknownOffsets := ca.endpoints.toList.any fun (_, ep) =>
+    ep.dynShift.any fun (h, _) => match h with | .val _ => true | _ => false
+  if unknownOffsets then
+    chanLines := chanLines ++ ["  note: transfer offsets from scalar arguments not given (--args) \
+      stand for every value: those transfers are taken to touch their whole buffer (D23), so the \
+      verdicts hold for every value, but a race reported on such an access may occur for none"]
   match ip.putOrders ca with
   | .error e => chanLines := chanLines ++ [s!"  error: not covered: {e}"]
   | .ok orders =>

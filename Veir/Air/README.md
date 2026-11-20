@@ -59,7 +59,10 @@ value of the argument when only comparisons with constants read it (`ArgSplit.le
 splits its values into classes (each constant, the gap above each, the gap below all), checks the
 program instantiated with one value of each class, and says whether every class is clean. An
 argument that anything else reads (an offset, a loop bound) is not split, and the branch is refused
-as before.
+as before. An offset of a channel transfer that a scalar argument not given decides is any value:
+the transfer is taken to touch its whole buffer (D23), so the verdicts hold for every value, and
+`races` notes that a race reported on such an access may occur for none. A size the argument
+decides is still refused (the number of elements decides how the streams balance).
 
 Refused, pending a decision or work:
 - an access pattern on a view at a non-zero offset (D14; at offset 0 it is accepted, D14b);

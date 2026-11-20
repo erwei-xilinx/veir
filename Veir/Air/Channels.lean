@@ -132,7 +132,13 @@ def IProgram.endpoint (ip : IProgram) (v : Nat) (issue : Option Nat := none) :
       | some (.val x) =>
         match x.toInt? with
         | some n => offs := offs.push n
-        | none => throw s!"{what}: a channel transfer's pattern must be known before running"
+        | none =>
+          -- A scalar argument not given (`--args`): any value. Its positions are not known, as
+          -- for an offset an event computes (D23): the whole buffer.
+          if let .undef := x then
+            offs := offs.push 0
+            dynShift := dynShift ++ [(.val x, strides0[d]!)]
+          else throw s!"{what}: a channel transfer's pattern must be known before running"
       | some h@(.result _ _) =>
         offs := offs.push 0
         dynShift := dynShift ++ [(h, strides0[d]!)]

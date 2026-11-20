@@ -100,6 +100,38 @@ module {
     return
   }
 
+  // An offset from %k, not given: any value; the get's elements land anywhere in %m (D23).
+  // Nothing else touches %m: race-free and complete for every value.
+  func.func @offset_arg(%k: index) {
+    %c1 = arith.constant 1 : index
+    %c8 = arith.constant 8 : index
+    %m = memref.alloc() : memref<64xi32>
+    %a = memref.alloc() : memref<8xi32>
+    %t0 = air.wait_all async
+    %p = air.channel.put async [%t0] @c[] (%a[] [] []) : (memref<8xi32>)
+    %g = air.channel.get async [%t0] @c[] (%m[%k] [%c8] [%c1]) : (memref<64xi32>)
+    air.wait_all [%p, %g]
+    return
+  }
+
+  // A store to %m[0] that no token orders with the get: a race only when %k <= 0 < %k + 8;
+  // reported, with the note.
+  func.func @offset_arg_overlap(%k: index) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c8 = arith.constant 8 : index
+    %z = arith.constant 0 : i32
+    %m = memref.alloc() : memref<64xi32>
+    %a = memref.alloc() : memref<8xi32>
+    %t0 = air.wait_all async
+    %p = air.channel.put async [%t0] @c[] (%a[] [] []) : (memref<8xi32>)
+    %g = air.channel.get async [%t0] @c[] (%m[%k] [%c8] [%c1]) : (memref<64xi32>)
+    %r = air.execute [%t0] {
+      memref.store %z, %m[%c0] : memref<64xi32>
+    }
+    air.wait_all [%p, %g, %r]
+    return
+  }
   // %k decides a branch and is also an offset: it is not split, and the branch is refused.
   func.func @also_offset(%k: index) {
     %c1 = arith.constant 1 : index
@@ -116,4 +148,5 @@ module {
     }
     return
   }
+
 }

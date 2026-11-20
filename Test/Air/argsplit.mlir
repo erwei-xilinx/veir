@@ -24,13 +24,23 @@
 // CHECK: @one_side_guarded [%arg0 = 3]:
 // CHECK-NEXT: no deadlock
 // CHECK: @one_side_guarded: 2 of 3 class(es) not clean (above): not for every value of %arg0
+//
+// An offset from an argument not given is any value: the transfer touches its whole buffer (D23).
+// CHECK: @offset_arg: 4 event(s), 2 buffer(s), 0 race(s)
+// CHECK-NEXT: note: transfer offsets from scalar arguments not given (--args) stand for every value
+// CHECK-NEXT: no deadlock
+// CHECK: @offset_arg_overlap: 5 event(s), 2 buffer(s), 1 race(s)
+// CHECK-NEXT: note: transfer offsets from scalar arguments not given
+// CHECK-NEXT: no deadlock
+// CHECK-NEXT: race: WAW on host alloc element 0
 // ERR: error: @also_offset: 'scf.if': the branch condition is not known before running
 // ERR-SAME: scalar arguments not split (ArgSplit): %arg0: 'air.channel.put' reads it
 //
-// A value given is not split; `?` leaves one unknown.
-// RUN: not air-veir races --allow-unregistered-dialect --args=5 %S/Inputs/argsplit.mlir 2>/dev/null | filecheck %s --check-prefix=GIVEN
+// A value given is not split; `?` leaves one unknown. With %k = 16 the get misses %m[0]: no race.
+// RUN: not air-veir races --allow-unregistered-dialect --args=16 %S/Inputs/argsplit.mlir 2>/dev/null | filecheck %s --check-prefix=GIVEN
 // GIVEN: @switch_both_sides: 8 event(s)
 // GIVEN: @one_side_guarded: 7 event(s)
 // GIVEN-NEXT: DEADLOCK
+// GIVEN: @offset_arg_overlap: 5 event(s), 2 buffer(s), 0 race(s)
 // RUN: not air-veir races --allow-unregistered-dialect --args=? %S/Inputs/argsplit.mlir 2>/dev/null | filecheck %s --check-prefix=UNKNOWN
 // UNKNOWN: @switch_both_sides: branches read the scalar argument(s) %arg0

@@ -1,4 +1,4 @@
-// air-dependency's output for ~/air-issues/AIR-007-air-dependency-misses-overlapping-accesses/repro.mlir (mlir-air 9b81b5de0)
+// air-dependency's output for the reproducer of AIR-007 (air-dependency misses overlapping accesses) (mlir-air 9b81b5de0)
 "builtin.module"() ({
   "func.func"() <{function_type = (memref<4x8xi32>, memref<1x8xi32>) -> (), sym_name = "f"}> ({
   ^bb0(%arg0: memref<4x8xi32>, %arg1: memref<1x8xi32>):

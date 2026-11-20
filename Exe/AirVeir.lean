@@ -189,7 +189,7 @@ def load (args : Args) (file : String) : IO (WfIRContext OpCode × OperationPtr)
   | .ok (ctx, top, _) => return (ctx, top)
   | .error e =>
     -- VeIR's verifier refuses `index` operands to arith integer ops, which MLIR allows
-    -- (VEIR-003 in ~/air-issues). The model computes on `index` values, so read the program
+    -- (known VeIR issue VEIR-003). The model computes on `index` values, so read the program
     -- without VeIR's verifier in that case only, and say so.
     let isIndex := (e.splitOn "to have integer type").length > 1
     -- VeIR does not know that unregistered ops such as aie.next_bd may end a block (VEIR-005).

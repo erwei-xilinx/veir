@@ -152,8 +152,7 @@ left unordered is a program error.
 **Confirmed 2026-11-13:** every RAW, WAR and WAW between accesses to the same memory addresses
 must be registered as a dependency, and catching all of them is `air-dependency`'s job. "Same
 addresses" means the footprints overlap. `air-dependency` currently compares start addresses
-instead, which misses overlapping accesses of different shapes; tracked as AIR-007 in
-`~/air-issues`.
+instead, which misses overlapping accesses of different shapes; tracked as AIR-007.
 
 **Consequence for the model, once memory is added.** An unordered conflict will be a race,
 reported as a fault, not given a meaning. For race-free programs, non-conflicting bodies commute,
@@ -241,7 +240,7 @@ layout strides; they differ otherwise. Pending: which one is AIR's semantics?
   `NpuDmaMemcpyNdOp::getOffsetInBytes` computes `Σ offsets[i]·strides[i]`, and `aie-opt
   --aie-dma-to-npu` patches 32 bytes for the 1-D example and 72 for the 2-D one.
 - mlir-aie's **documentation** of that op describes the shape-relative, subview-like reading (16
-  and 40 bytes). The doc contradicts the implementation: AIE-001 in `~/air-issues`.
+  and 40 bytes). The doc contradicts the implementation: tracked as AIE-001.
 
 So the whole toolchain implements "offset in units of the dimension's stride". Only the
 mlir-aie doc and the `memref.subview` analogy say otherwise.
@@ -276,7 +275,7 @@ not ordered after every access, or an access ordered after the dealloc, is an er
 (use-after-free).
 
 This raised a suspicion: the ping-pong transformation may use a dealloc to mark the end of a
-buffer's lifetime in a way that breaks this rule. Tracked as AIR-006 in `~/air-issues`; not yet
+buffer's lifetime in a way that breaks this rule. Tracked as AIR-006; not yet
 investigated.
 
 ## D19. Top-level memref arguments do not alias ✅ (differs from upstream)
@@ -287,8 +286,8 @@ assumption that distinct top-level memref SSA values address distinct storage").
 
 Upstream MLIR assumes the opposite. `LocalAliasAnalysis` returns `MayAlias` for two values with
 no allocation effect. Upstream's way to state non-aliasing is `memref.distinct_objects`, under
-which aliasing is undefined behaviour. Recorded for later review in
-`~/air-issues/UPSTREAM_DIVERGENCES.md`.
+which aliasing is undefined behaviour. Recorded for later review as
+an upstream divergence.
 
 ## D20. A DMA is a stream ✅
 

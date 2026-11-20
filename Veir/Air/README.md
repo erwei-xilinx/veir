@@ -440,8 +440,8 @@ for operand removal, which are not in VeIR yet. Its output is only printed, and 
   - `fillAIRDepListUsingGraphTR` skips a source vertex whose op is not an `AsyncOpInterface`.
 
   So with two or more body ops, every edge out of the execute is lost when the reduced graph is
-  written back. Multi-op execute bodies occur in 33 of 1,817 executes in AIR's `mlir/test`. A fix
-  is not yet written or tested. Tracked locally as AIR-002 in `~/air-issues`.
+  written back. Multi-op execute bodies occur in 33 of 1,817 executes in AIR's `mlir/test`. Fixed
+  in mlir-air PR #2359 (AIR-002).
 - **`air-dependency-canonicalize` run time is superlinear in the number of functions in a module**:
   1.5 s, 7 s and 42 s for 1000, 2000 and 4000 small functions. Hypothesis, not profiled: the
   pass's `dependencyContext` (`dep_ctx`, with its `op_to_v`/`op_to_g` maps) is a member of the
@@ -534,7 +534,7 @@ Status of the hierarchy layer (layer 5):
 | C1 | `air-verify-hierarchy-locality`, AIR's own race check for herd operands, accepts overlapping per-tile slices (AIR-013, on its positive tests). |
 | C2 | Certified as in layer 4. Under D38 (i), `air-dependency`'s drain rule deadlocks (AIR-012). |
 | C3 | Instances are concurrent, so races between tiles are found (`hierarchy.mlir`). |
-| C5 | `sweep_dependency.py` analyses each chunk before and after `air-dependency` (D45 makes the input analysable). Over 232 AIR test files (all of `AIRDependency/`, and every test with a herd and channels): 100 functions analysed; 50 ok, 22 problems already in the input, 25 fragments (a sync put nothing gets), and **3 introduced by `air-dependency`**: AIR-012 (drain edge deadlock) and AIR-014 (channel FIFO order lost across a loop, twice). With branches supported, 5 more: AIR-020 (ops after `scf.if`/`affine.if` do not wait for accesses inside it, 4 tests) and `shared_l1_placement` (likely AIR-012). Inputs already async (tests of other passes) are analysed as written. Output: `~/air-issues/notes/sweep_2026_11_14.out`. |
+| C5 | `sweep_dependency.py` analyses each chunk before and after `air-dependency` (D45 makes the input analysable). Over 232 AIR test files (all of `AIRDependency/`, and every test with a herd and channels): 100 functions analysed; 50 ok, 22 problems already in the input, 25 fragments (a sync put nothing gets), and **3 introduced by `air-dependency`**: AIR-012 (drain edge deadlock) and AIR-014 (channel FIFO order lost across a loop, twice). With branches supported, 5 more: AIR-020 (ops after `scf.if`/`affine.if` do not wait for accesses inside it, 4 tests) and `shared_l1_placement` (likely AIR-012). Inputs already async (tests of other passes) are analysed as written. |
 | C6 | Deferred until the whole dialect is covered (below). |
 
 ### C6: the target model (started 2026-11-14)

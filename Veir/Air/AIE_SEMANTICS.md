@@ -20,6 +20,7 @@ and who confirmed it. As in `SEMANTICS.md`, nothing is encoded before it is conf
 | T11 | Pointer provenance in a core: a value derived from a buffer (the pointer `aievec.fifo_start` makes from a view of it, an address computed from it with `llvm.getelementptr`, casts or arithmetic, an aggregate or a loop or branch result holding it, a stack slot (`llvm.alloca`) it was stored to, an integer address taken with `memref.extract_aligned_pointer_as_index` or `llvm.ptrtoint`) points into that buffer. An op using such a value reads and writes that buffer when it runs, as D22 has an opaque op do with its memref operands, unless it only computes an address. Assumed, as D22 assumes for memrefs: an op (an aievec op, a callee) uses a pointer only while it runs and does not keep it for later. A pointer stored to memory other than a stack slot is refused | ✅ 2026-11-20 (model choice extending D22; "an op uses a pointer only while it runs" confirmed) |
 | T12 | A core's values live across its lock operations (registers of the core). A lock-free `scf.for` may carry values (iteration arguments); a lock-free `scf.if` on a value the model does not compute (an opaque call's result) may run either region: both are explored | model definition, 2026-11-20 |
 | T13 | A race: in a reachable state, two different agents (DMA channels, cores, the runtime) each have a next step that touches common elements of one buffer, one of them writing; either may happen first. A DMA transfer touches the positions it moves, a core computation its buffers whole (D22). A device without a runtime sequence runs until nothing can move; that is not a deadlock | model definition, 2026-11-20 |
+| T14 | In a BD, an acquire with `acq_en = false` is disabled: the BD neither waits on nor decrements that lock, and its release still happens (mlir-aie writes `acq_en` into the BD's lock-acquire-enable field). A core's `aie.use_lock` with `acq_en = false` is refused | ✅ 2026-11-20 |
 
 ## T5, the evidence
 
@@ -121,3 +122,10 @@ tested by `Test/Air/aie.mlir`.
 - Packet relays (24 programs, results returned through packet flows): 20 correct; 4 are AIR-022,
   the in-place K = 4 cases.
 - Phase 3, the expressiveness catalogue: [`C6_EXPRESSIVENESS.md`](C6_EXPRESSIVENESS.md).
+- `shared_l1_single_herd` (2026-11-20): a build of 2026-09-30 can deadlock: the memtile's four
+  MM2S channels share one counting lock pair, and a channel whose BD ring loops can take another's
+  token. Current builds give each consumer its own locks, releasing them in BDs whose acquire is
+  disabled (T14): no deadlock, one outcome.
+- A probe with three L3 inputs into one compute tile (2026-11-20): current builds send them from
+  two shim channels into one in-order S2MM ring, which takes the packets in either order: 3
+  outcomes (AIR-031). A July build sent all three from one channel: one outcome.

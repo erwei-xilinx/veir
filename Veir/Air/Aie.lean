@@ -226,6 +226,10 @@ def lockUse (ctx : IRContext OpCode) (op : OperationPtr) : EM LockUse := do
   | some 2 => return { lock := l, acquire := true, value := v }
   | a => throw s!"aie.use_lock: action {a} is not supported (T1: only AcquireGreaterEqual and Release)"
 
+/-- An acquire with `acq_en = false`: in a BD, the acquire is disabled (T14). -/
+def acquireDisabled (ctx : IRContext OpCode) (op : OperationPtr) : Bool :=
+  propInt ctx op "acq_en" == some 0
+
 /-- The elements an `aie.dma_bd` moves, in order: `offset + Σ iₖ·strideₖ`, sizes and strides
 listed outermost first (`AIEOps.td`, `dma_bd`); without them, `len` contiguous elements. -/
 def bdPositions (ctx : IRContext OpCode) (op : OperationPtr) (numel : Nat) : Except String (Array Int) := do
@@ -287,6 +291,7 @@ partial def bdChain (ctx : IRContext OpCode) (start : BlockPtr) (bufOfArg : Valu
       match opName ctx op with
       | "aie.use_lock" =>
         let u ← lockUse ctx op
+        if u.acquire && acquireDisabled ctx op then continue
         if bd.isNone then pre := pre.push u else post := post.push u
       | "aie.dma_bd" =>
         if bd.isSome then throw "BD chain: two aie.dma_bd in one block"
@@ -587,6 +592,7 @@ partial def coreCode (ctx : IRContext OpCode) (op : OperationPtr) : EM (Array In
         pending := #[]
       if n == "aie.use_lock" then
         let u ← lockUse ctx o
+        if acquireDisabled ctx o then throw "core: 'aie.use_lock' with acq_en = false (T14: only in a BD)"
         code := code.push (if u.acquire then .acq u.lock u.value else .rel u.lock u.value)
       else if n == "cf.br" then
         fixups := fixups.push (code.size, (o.getSuccessors! ctx)[0]!)
@@ -682,13 +688,15 @@ partial def runtimeSeq (ctx : IRContext OpCode) (op : OperationPtr) : EM Unit :=
               let ps ← match bdPositions ctx x numel with
                 | .ok ps => pure ps
                 | .error e => throw e
-              acc := acc.push ({ pre := #[], buf, positions := ps, post := #[], next := none } : BD)
+              let bd : BD := { pre := #[], buf, positions := ps, post := #[], next := none,
+                               packet := packetId ctx x }
+              acc := acc.push bd
             else if opName ctx x == "aie.end" || opName ctx x == "arith.constant" then pure ()
             else throw s!"task: '{opName ctx x}' is not supported"
           let n := acc.size
           pure (acc.mapIdx fun i bd => { bd with next := if i + 1 < n then some (i + 1) else none }, 0)
       let rep := ((propInt ctx o "repeat_count").getD 0).toNat
-      -- A shim task on a packet flow stamps its header on every BD (T6).
+      -- A packet on the task stamps its header on every BD (T6); one on a BD, that BD's.
       let bds := match packetId ctx o with
         | some p => bds.map fun bd => { bd with packet := some p }
         | none => bds

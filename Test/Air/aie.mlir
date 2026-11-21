@@ -65,3 +65,31 @@
 // FANIN-NEXT: 2 distinct outcome(s) of host memory
 // FANIN-DAG: %arg1 = [0..31]
 // FANIN-DAG: %arg1 = [16..31, 0..15]
+
+// T14: a BD's acquire with acq_en = false is disabled. Without the acquire, the passthrough's
+// MM2S may send the buffer before the S2MM has filled it.
+// RUN: not air-veir aie --allow-unregistered-dialect %S/Inputs/aie_passthrough_acq_en.mlir 2>/dev/null | filecheck %s --check-prefix=ACQEN
+// ACQEN: proven (AieCert.Cert.exact)
+// ACQEN: no deadlock
+// ACQEN-NEXT: 2 distinct outcome(s) of host memory
+// ACQEN-DAG: %arg1 = [undef x 64]
+// ACQEN-DAG: %arg1 = [0..63]
+// ACQEN: 'tile (0, 2) MM2S 0 -> shim (0, 0) S2MM 0: 64 element(s)' and 'shim (0, 0) MM2S 0 -> tile (0, 2) S2MM 0: 64 element(s)' can each happen next
+// On a core it is refused.
+// RUN: not air-veir aie --allow-unregistered-dialect %S/Inputs/aie_core_acq_en.mlir 2>&1 | filecheck %s --check-prefix=ACQEN-CORE
+// ACQEN-CORE: @seg: refused: core: 'aie.use_lock' with acq_en = false (T14: only in a BD)
+// shared_l1_single_herd: the memtile's S2MM releases its four consumers' locks in BDs whose acquire
+// is disabled. Read as enabled acquires, every run deadlocks.
+// RUN: air-veir aie --allow-unregistered-dialect %S/Inputs/aie_shared_l1_acq_en.mlir 2>/dev/null | filecheck %s --check-prefix=ACQEN-SL1
+// ACQEN-SL1: @seg: 14 DMA channel(s), 4 core(s), 26 lock(s), 2 task(s)
+// ACQEN-SL1: no deadlock
+// ACQEN-SL1-NEXT: 1 distinct outcome(s) of host memory
+// ACQEN-SL1: no race
+
+// A shim task's dma_bd carries its packet (T6). Two shim channels send packets to one in-order
+// S2MM ring, which takes them in either order (T8, T9): 3 outcomes, not 1.
+// RUN: not air-veir aie --allow-unregistered-dialect %S/Inputs/aie_packet_task_bd.mlir 2>/dev/null | filecheck %s --check-prefix=PKTBD
+// PKTBD: @seg: 5 DMA channel(s), 1 core(s), 8 lock(s), 4 task(s)
+// PKTBD-NEXT: proven (AieCert.Cert.exact)
+// PKTBD-NEXT: no deadlock
+// PKTBD-NEXT: 3 distinct outcome(s) of host memory
